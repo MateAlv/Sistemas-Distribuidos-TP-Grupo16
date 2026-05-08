@@ -1,5 +1,4 @@
 import pika
-import socket
 from .middleware import (
     MessageMiddlewareQueue, 
     MessageMiddlewareExchange, 
@@ -16,10 +15,15 @@ _CONNECTION_ERRORS = (
 
 class _RabbitMQBase:
     def __init__(self, host):
-        self._connection = pika.BlockingConnection(pika.ConnectionParameters(host=host))
-        self._channel = self._connection.channel()
+        self._connection = None
+        self._channel = None
         self._user_callback = None
         self._queue_name = None
+        try:
+            self._connection = pika.BlockingConnection(pika.ConnectionParameters(host=host))
+            self._channel = self._connection.channel()
+        except _CONNECTION_ERRORS as e:
+            raise MessageMiddlewareDisconnectedError(e)
 
     def __enter__(self):
         return self
@@ -34,9 +38,9 @@ class _RabbitMQBase:
         self._user_callback(body, ack, nack)
 
     
-    def start_consuming(self, on_messaging_callback):
+    def start_consuming(self, on_message_callback):
         try:
-            self._user_callback = on_messaging_callback
+            self._user_callback = on_message_callback
             self._channel.basic_qos(prefetch_count=1)
             self._channel.basic_consume(
                 queue=self._queue_name, 
@@ -49,10 +53,13 @@ class _RabbitMQBase:
 
     def stop_consuming(self):
         try:
-            if self._channel:
-                self._channel.stop_consuming()
+            if not self._channel or not self._channel.is_open:
+                return
+            self._channel.stop_consuming()
         except _CONNECTION_ERRORS as e:
             raise MessageMiddlewareDisconnectedError(e)
+        except Exception:
+            return
 
     def close(self):
         errors = []
@@ -77,9 +84,16 @@ class MessageMiddlewareQueueRabbitMQ(_RabbitMQBase, MessageMiddlewareQueue):
 
     def send(self, message):
         try:
-            self._channel.basic_publish(exchange="", routing_key=self._queue_name, body=message)
+            self._channel.basic_publish(
+                exchange="",
+                routing_key=self._queue_name,
+                body=message,
+                properties=pika.BasicProperties(delivery_mode=2),
+            )
         except _CONNECTION_ERRORS as e:
             raise MessageMiddlewareDisconnectedError(e)
+        except MessageMiddlewareMessageError:
+            raise
         except Exception as e:
             raise MessageMiddlewareMessageError(e)
 
@@ -92,7 +106,7 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
         super().__init__(host)
         self._exchange_name = exchange_name
         self._exchange_type = exchange_type
-        self._exchange = self._channel.exchange_declare(
+        self._channel.exchange_declare(
             exchange=exchange_name,
             exchange_type=exchange_type,
             durable=True,
@@ -107,6 +121,7 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
                     exchange=self._exchange_name,
                     routing_key='',
                     body=message,
+                    properties=pika.BasicProperties(delivery_mode=2),
                 )
             else:
                 if not self._routing_keys:
@@ -117,16 +132,26 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
                         exchange=self._exchange_name,
                         routing_key=key,
                         body=message,
+                        properties=pika.BasicProperties(delivery_mode=2),
                     )
         except _CONNECTION_ERRORS as e:
             raise MessageMiddlewareDisconnectedError(e)
+        except MessageMiddlewareMessageError:
+            raise
         except Exception as e:
             raise MessageMiddlewareMessageError(e)
 
 
-    def start_consuming(self, on_messaging_callback):
-        self._init_queue()
-        super().start_consuming(on_messaging_callback)
+    def start_consuming(self, on_message_callback):
+        try:
+            self._init_queue()
+            super().start_consuming(on_message_callback)
+        except _CONNECTION_ERRORS as e:
+            raise MessageMiddlewareDisconnectedError(e)
+        except (MessageMiddlewareDisconnectedError, MessageMiddlewareMessageError):
+            raise
+        except Exception as e:
+            raise MessageMiddlewareMessageError(e)
 
     def _init_queue(self):
         if self._queue_name: 
@@ -141,6 +166,8 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
                 routing_key=''
             )
         else:
+            if not self._routing_keys:
+                raise MessageMiddlewareMessageError("Routing keys required for non-fanout exchange")
             for key in self._routing_keys:
                 self._channel.queue_bind(
                     queue=self._queue_name,

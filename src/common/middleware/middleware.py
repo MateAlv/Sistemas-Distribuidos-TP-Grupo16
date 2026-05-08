@@ -33,6 +33,7 @@ class MessageMiddleware(ABC):
 
     # Si se estaba consumiendo desde la cola/exchange, se detiene la escucha. Si
     # no se estaba consumiendo de la cola/exchange, no tiene efecto, ni levanta
+    # excepciones.
     # Si se pierde la conexión con el middleware eleva MessageMiddlewareDisconnectedError.
     @abstractmethod
     def stop_consuming(self):
@@ -54,7 +55,7 @@ class MessageMiddleware(ABC):
 
 class MessageMiddlewareExchange(MessageMiddleware):
     @abstractmethod
-    def __init__(self, host, exchange_name, route_keys):
+    def __init__(self, host, exchange_name, routing_keys):
         pass
 
 
