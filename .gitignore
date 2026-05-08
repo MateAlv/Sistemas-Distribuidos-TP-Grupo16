@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+
+.pytest_cache/
+
+*.log
+
+datasets/*
+!datasets/.gitkeep
+
+expected/*
+!expected/.gitkeep
+
+output/*
+!output/.gitkeep
