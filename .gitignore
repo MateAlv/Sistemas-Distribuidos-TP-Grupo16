@@ -1,5 +1,5 @@
 __pycache__/
-*.py[cod]
+*.pyc
 
 .pytest_cache/
 
@@ -13,7 +13,3 @@ expected/*
 
 output/*
 !output/.gitkeep
-
-*.egg-info/
-build/
-dist/

@@ -20,7 +20,7 @@ test:
 	mkdir -p output
 	rm ./output/* -f
 	COMPOSE_HTTP_TIMEOUT=300 docker compose -f docker-compose.yaml up --build --remove-orphans --detach
-	PYTHONPATH="$(PWD)/src/common" python3 ./verify_output.py
+	PYTHONPATH="$(PWD)/src/common" python3 ./scripts/verify_output.py
 	docker compose -f docker-compose.yaml stop -t 5
 	docker compose -f docker-compose.yaml down
 .PHONY: test
