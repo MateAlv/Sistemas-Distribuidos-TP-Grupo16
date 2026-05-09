@@ -5,11 +5,16 @@ __pycache__/
 
 *.log
 
-datasets/*
-!datasets/.gitkeep
+data/datasets/**/*
+!data/datasets/.gitkeep
+!data/datasets/*/
+!data/datasets/*/.gitkeep
 
-expected/*
-!expected/.gitkeep
+data/expected/**/*
+!data/expected/.gitkeep
+
+data/output/**/*
+!data/output/.gitkeep
 
 output/*
 !output/.gitkeep
