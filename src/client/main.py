@@ -1,6 +1,10 @@
 import os
 import logging
+import signal
 from dataclasses import dataclass
+
+from common.chunk_reader import MESSAGE_TYPE_SIZE, ChunkReader
+from common.sender import Sender
 
 DEFAULT_CLIENT_ID = 1
 DEFAULT_DATA_DIR = "/data"
@@ -27,6 +31,42 @@ class ClientConfig:
     logging_level: str
 
 
+class Client:
+    def __init__(self, config: ClientConfig) -> None:
+        self.config = config
+        self.closed = False
+        self.reader = ChunkReader(
+            client_id=config.client_id,
+            root=config.data_dir,
+            max_message_size=config.chunk_max_bytes,
+            extensions=CSV_EXTENSIONS,
+            message_type_size=MESSAGE_TYPE_SIZE,
+        )
+        self.sender = Sender(
+            host=config.server_host,
+            port=config.server_port,
+            connect_timeout=config.connect_timeout_seconds,
+            io_timeout=config.io_timeout_seconds,
+        )
+
+    def start(self) -> None:
+        logging.info(
+            "client_start | client_id=%s | data_dir=%s | server=%s:%s",
+            self.config.client_id,
+            self.config.data_dir,
+            self.config.server_host,
+            self.config.server_port,
+        )
+
+    def close(self) -> None:
+        self.closed = True
+        self.sender.close()
+
+    def handle_sigterm(self, signum, frame) -> None:
+        logging.info("client_shutdown | client_id=%s | signal=%s", self.config.client_id, signum)
+        self.close()
+
+
 def main() -> int:
     try:
         config = load_config()
@@ -36,6 +76,9 @@ def main() -> int:
         logging.basicConfig(level=logging.ERROR)
         logging.error("client_config | result=error | error=%s", e)
         return 2
+
+    client = Client(config)
+    signal.signal(signal.SIGTERM, client.handle_sigterm)
 
     logging.info(
         "client_config | result=ok | client_id=%s | data_dir=%s | "
@@ -47,6 +90,8 @@ def main() -> int:
         config.chunk_max_bytes,
         ",".join(CSV_EXTENSIONS),
     )
+
+    client.start()
 
     return 0
 
