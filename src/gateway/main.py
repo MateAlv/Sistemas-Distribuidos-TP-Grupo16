@@ -10,7 +10,6 @@ DEFAULT_SERVER_PORT = 5678
 DEFAULT_MOM_HOST = "rabbitmq"
 DEFAULT_FILE_INGESTOR_EXCHANGE = "file_ingestor_exchange"
 DEFAULT_FILE_INGESTOR_PARTITIONS = 1
-DEFAULT_RESULTS_QUEUE = "results_queue"
 DEFAULT_LOGGING_LEVEL = "INFO"
 MIN_TCP_PORT = 1
 MAX_TCP_PORT = 65535
@@ -27,14 +26,12 @@ def main() -> int:
     initialize_log(config.logging_level)
     logging.info(
         "gateway_config | result=ok | host=%s | port=%s | mom=%s | "
-        "file_ingestor_exchange=%s | file_ingestor_partitions=%s | "
-        "results_queue=%s",
+        "file_ingestor_exchange=%s | file_ingestor_partitions=%s",
         config.server_host,
         config.server_port,
         config.mom_host,
         config.file_ingestor_exchange,
         config.file_ingestor_partitions,
-        config.results_queue,
     )
 
     gw = Gateway(config)
@@ -65,7 +62,6 @@ def load_config() -> GatewayConfig:
             DEFAULT_FILE_INGESTOR_EXCHANGE,
         ),
         file_ingestor_partitions=file_ingestor_partitions,
-        results_queue=os.getenv("RESULTS_QUEUE", DEFAULT_RESULTS_QUEUE),
         logging_level=os.getenv("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
     )
 

@@ -48,7 +48,6 @@ services:
     - FILE_INGESTOR_PARTITIONS=1
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - RESULTS_QUEUE=results_queue
     - SERVER_HOST=gateway
     - SERVER_PORT=5678
   join:

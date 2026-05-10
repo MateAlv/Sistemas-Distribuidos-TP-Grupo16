@@ -9,11 +9,9 @@ from common.message_protocol.external import FileChunk, recv_exact, sendall
 from common.message_protocol.external.types import (
     HANDSHAKE, FILE_CHUNK, FINISH, ACK,
     MSG_CHUNK, MSG_EOF,
+    file_ingestor_routing_key,
 )
 from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
-
-
-FILE_INGESTOR_ROUTING_KEY_PREFIX = "file_ingestor"
 
 
 @dataclass(frozen=True)
@@ -23,7 +21,6 @@ class GatewayConfig:
     mom_host: str
     file_ingestor_exchange: str
     file_ingestor_partitions: int
-    results_queue: str
     logging_level: str
 
 
@@ -73,6 +70,10 @@ class Gateway:
         if self._server_sock is not None:
             try:
                 self._server_sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                self._server_sock.close()
             except OSError:
                 pass
 
@@ -240,7 +241,3 @@ def partition_for(client_id: int, rel_path: str, partitions: int) -> int:
 
     key = f"{int(client_id)}:{rel_path}".encode("utf-8")
     return int(hashlib.md5(key).hexdigest(), 16) % partitions
-
-
-def file_ingestor_routing_key(partition: int) -> str:
-    return f"{FILE_INGESTOR_ROUTING_KEY_PREFIX}.{int(partition)}"
