@@ -18,3 +18,7 @@ data/output/**/*
 
 output/*
 !output/.gitkeep
+
+
+/venv
+
