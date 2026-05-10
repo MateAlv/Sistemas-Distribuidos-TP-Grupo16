@@ -8,8 +8,8 @@ from gateway import Gateway, GatewayConfig
 DEFAULT_SERVER_HOST = "gateway"
 DEFAULT_SERVER_PORT = 5678
 DEFAULT_MOM_HOST = "rabbitmq"
-DEFAULT_MESSAGE_HANDLER_EXCHANGE = "message_handler_exchange"
-DEFAULT_MESSAGE_HANDLER_PARTITIONS = 1
+DEFAULT_FILE_INGESTOR_EXCHANGE = "file_ingestor_exchange"
+DEFAULT_FILE_INGESTOR_PARTITIONS = 1
 DEFAULT_RESULTS_QUEUE = "results_queue"
 DEFAULT_LOGGING_LEVEL = "INFO"
 MIN_TCP_PORT = 1
@@ -27,13 +27,13 @@ def main() -> int:
     initialize_log(config.logging_level)
     logging.info(
         "gateway_config | result=ok | host=%s | port=%s | mom=%s | "
-        "message_handler_exchange=%s | message_handler_partitions=%s | "
+        "file_ingestor_exchange=%s | file_ingestor_partitions=%s | "
         "results_queue=%s",
         config.server_host,
         config.server_port,
         config.mom_host,
-        config.message_handler_exchange,
-        config.message_handler_partitions,
+        config.file_ingestor_exchange,
+        config.file_ingestor_partitions,
         config.results_queue,
     )
 
@@ -49,22 +49,22 @@ def load_config() -> GatewayConfig:
     if port < MIN_TCP_PORT or port > MAX_TCP_PORT:
         raise ValueError(f"SERVER_PORT must be in range [{MIN_TCP_PORT}, {MAX_TCP_PORT}]")
 
-    message_handler_partitions = get_int(
-        "MESSAGE_HANDLER_PARTITIONS",
-        DEFAULT_MESSAGE_HANDLER_PARTITIONS,
+    file_ingestor_partitions = get_int(
+        "FILE_INGESTOR_PARTITIONS",
+        DEFAULT_FILE_INGESTOR_PARTITIONS,
     )
-    if message_handler_partitions <= 0:
-        raise ValueError("MESSAGE_HANDLER_PARTITIONS must be greater than 0")
+    if file_ingestor_partitions <= 0:
+        raise ValueError("FILE_INGESTOR_PARTITIONS must be greater than 0")
 
     return GatewayConfig(
         server_host=os.getenv("SERVER_HOST", DEFAULT_SERVER_HOST),
         server_port=port,
         mom_host=os.getenv("MOM_HOST", DEFAULT_MOM_HOST),
-        message_handler_exchange=os.getenv(
-            "MESSAGE_HANDLER_EXCHANGE",
-            DEFAULT_MESSAGE_HANDLER_EXCHANGE,
+        file_ingestor_exchange=os.getenv(
+            "FILE_INGESTOR_EXCHANGE",
+            DEFAULT_FILE_INGESTOR_EXCHANGE,
         ),
-        message_handler_partitions=message_handler_partitions,
+        file_ingestor_partitions=file_ingestor_partitions,
         results_queue=os.getenv("RESULTS_QUEUE", DEFAULT_RESULTS_QUEUE),
         logging_level=os.getenv("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
     )

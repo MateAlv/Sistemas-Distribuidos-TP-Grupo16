@@ -1,22 +1,19 @@
 import hashlib
 import logging
+import select
 import socket
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from common.message_protocol.external import FileChunk, recv_exact, sendall
 from common.message_protocol.external.types import (
     HANDSHAKE, FILE_CHUNK, FINISH, ACK,
-    MSG_CHUNK,
-    RES_RESULT, RES_EOF,
+    MSG_CHUNK, MSG_EOF,
 )
-from common.middleware.middleware_rabbitmq import (
-    MessageMiddlewareExchangeRabbitMQ,
-    MessageMiddlewareQueueRabbitMQ,
-)
+from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
 
 
-MESSAGE_HANDLER_ROUTING_KEY_PREFIX = "message_handler"
+FILE_INGESTOR_ROUTING_KEY_PREFIX = "file_ingestor"
 
 
 @dataclass(frozen=True)
@@ -24,8 +21,8 @@ class GatewayConfig:
     server_host: str
     server_port: int
     mom_host: str
-    message_handler_exchange: str
-    message_handler_partitions: int
+    file_ingestor_exchange: str
+    file_ingestor_partitions: int
     results_queue: str
     logging_level: str
 
@@ -35,6 +32,7 @@ class ClientSession:
     client_id: int
     sock: socket.socket
     chunks_forwarded: int = 0
+    used_partitions: set[int] = field(default_factory=set)
 
 
 class Gateway:
@@ -93,7 +91,7 @@ class Gateway:
         client_id = self._recv_handshake(client_sock)
         session = ClientSession(client_id=client_id, sock=client_sock)
         self._forward_chunks(session)
-        self._stream_results(client_sock, client_id)
+        self._wait_for_results(session)
 
     def _recv_handshake(self, client_sock: socket.socket) -> int:
         msg_type = int.from_bytes(recv_exact(client_sock, 1), "big")
@@ -107,9 +105,9 @@ class Gateway:
 
     def _forward_chunks(self, session: ClientSession) -> None:
         cfg = self._config
-        publisher = MessageHandlerPublisher(
+        publisher = FileIngestorPublisher(
             mom_host=cfg.mom_host,
-            exchange_name=cfg.message_handler_exchange,
+            exchange_name=cfg.file_ingestor_exchange,
         )
 
         try:
@@ -127,10 +125,11 @@ class Gateway:
                     partition = partition_for(
                         client_id=session.client_id,
                         rel_path=chunk.path(),
-                        partitions=cfg.message_handler_partitions,
+                        partitions=cfg.file_ingestor_partitions,
                     )
                     publisher.send(partition, _serialize_chunk(chunk))
                     session.chunks_forwarded += 1
+                    session.used_partitions.add(partition)
                     logging.debug(
                         "gateway_forward_chunk | client_id=%s | path=%s | "
                         "offset=%s | partition=%s | routing_key=%s",
@@ -138,16 +137,27 @@ class Gateway:
                         chunk.path(),
                         chunk.offset(),
                         partition,
-                        message_handler_routing_key(partition),
+                        file_ingestor_routing_key(partition),
                     )
                     _send_ack(session.sock)
 
                 elif msg_type == FINISH:
+                    for partition in sorted(session.used_partitions):
+                        publisher.send(partition, _serialize_eof(session.client_id))
+                        logging.debug(
+                            "gateway_forward_eof | client_id=%s | partition=%s | "
+                            "routing_key=%s",
+                            session.client_id,
+                            partition,
+                            file_ingestor_routing_key(partition),
+                        )
+
                     _send_ack(session.sock)
                     logging.info(
-                        "gateway_finish | client_id=%s | chunks=%s",
+                        "gateway_finish | client_id=%s | chunks=%s | partitions=%s",
                         session.client_id,
                         session.chunks_forwarded,
+                        sorted(session.used_partitions),
                     )
                     break
 
@@ -158,43 +168,25 @@ class Gateway:
         finally:
             publisher.close()
 
-    def _stream_results(self, client_sock: socket.socket, client_id: int) -> None:
-        logging.info("gateway_results_start | client_id=%s", client_id)
-        lines_sent = 0
-        cfg = self._config
-
-        with MessageMiddlewareQueueRabbitMQ(cfg.mom_host, cfg.results_queue) as queue:
-            def on_result(message: bytes, ack, nack) -> None:
-                nonlocal lines_sent
-                try:
-                    msg_type = message[0]
-                    payload = message[1:]
-
-                    if msg_type == RES_RESULT:
-                        line = payload.decode("utf-8")
-                        sendall(client_sock, (line + "\n").encode("utf-8"))
-                        lines_sent += 1
-                        ack()
-
-                    elif msg_type == RES_EOF:
-                        ack()
-                        queue.stop_consuming()
-
-                    else:
-                        logging.warning("gateway_unknown_result | msg_type=%s", msg_type)
-                        nack()
-
-                except Exception as e:
-                    logging.error("gateway_result_send_error | error=%s", e)
-                    nack()
-
-            queue.start_consuming(on_result)
-
+    def _wait_for_results(self, session: ClientSession) -> None:
         logging.info(
-            "gateway_results_done | client_id=%s | lines=%s",
-            client_id,
-            lines_sent,
+            "gateway_results_wait | client_id=%s | status=not_implemented",
+            session.client_id,
         )
+
+        while not self._stopped:
+            readable, _, _ = select.select([session.sock], [], [], 1.0)
+            if not readable:
+                continue
+
+            data = session.sock.recv(1, socket.MSG_PEEK)
+            if not data:
+                logging.info("gateway_client_closed | client_id=%s", session.client_id)
+                return
+
+            raise RuntimeError(
+                f"unexpected client data after finish for client_id={session.client_id}"
+            )
 
 
 def _send_ack(sock: socket.socket) -> None:
@@ -206,7 +198,12 @@ def _serialize_chunk(chunk: FileChunk) -> bytes:
     return MSG_CHUNK.to_bytes(1, "big") + chunk.serialize()
 
 
-class MessageHandlerPublisher:
+def _serialize_eof(client_id: int) -> bytes:
+    # Wire layout: msg_type(1) | client_id(4)
+    return MSG_EOF.to_bytes(1, "big") + client_id.to_bytes(4, "big")
+
+
+class FileIngestorPublisher:
     def __init__(self, mom_host: str, exchange_name: str) -> None:
         self._mom_host = mom_host
         self._exchange_name = exchange_name
@@ -232,7 +229,7 @@ class MessageHandlerPublisher:
             self._senders[partition] = MessageMiddlewareExchangeRabbitMQ(
                 host=self._mom_host,
                 exchange_name=self._exchange_name,
-                routing_keys=[message_handler_routing_key(partition)],
+                routing_keys=[file_ingestor_routing_key(partition)],
             )
         return self._senders[partition]
 
@@ -245,5 +242,5 @@ def partition_for(client_id: int, rel_path: str, partitions: int) -> int:
     return int(hashlib.md5(key).hexdigest(), 16) % partitions
 
 
-def message_handler_routing_key(partition: int) -> str:
-    return f"{MESSAGE_HANDLER_ROUTING_KEY_PREFIX}.{int(partition)}"
+def file_ingestor_routing_key(partition: int) -> str:
+    return f"{FILE_INGESTOR_ROUTING_KEY_PREFIX}.{int(partition)}"

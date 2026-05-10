@@ -44,8 +44,8 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - MESSAGE_HANDLER_EXCHANGE=message_handler_exchange
-    - MESSAGE_HANDLER_PARTITIONS=1
+    - FILE_INGESTOR_EXCHANGE=file_ingestor_exchange
+    - FILE_INGESTOR_PARTITIONS=1
     - MOM_HOST=rabbitmq
     - RESULTS_QUEUE=results_queue
     - PYTHONUNBUFFERED=1
