@@ -6,7 +6,7 @@ from common.socket_utils import ensure_socket, recv_exact, sendall
 
 
 H_ID_HANDSHAKE = 1
-H_ID_DATA = 2
+H_ID_FILE_CHUNK = 2
 H_ID_FINISH = 3
 H_ID_ACK = 4
 
@@ -76,7 +76,7 @@ class Sender:
         if not data:
             return
 
-        sendall(self._sock, _header_id_to_bytes(H_ID_DATA) + data)
+        sendall(self._sock, _header_id_to_bytes(H_ID_FILE_CHUNK) + data)
         self._wait_ack("file chunk")
 
     def send_finished(self) -> None:
