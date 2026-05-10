@@ -36,7 +36,7 @@ FILTER_AMOUNT = int(os.environ["FILTER_AMOUNT"])
 FILTER_PREFIX = os.environ["FILTER_PREFIX"] + "_" + CONFIGURATION
 CONTROL_EXCHANGE = os.environ["FILTER_PREFIX"] + "_" + "CONTROL_EXCHANGE_" + CONFIGURATION
 
-class filterWorker:
+class FilterWorker:
     def __init__(self):
     
         # Iniciacion de la cola de entrada
@@ -124,6 +124,8 @@ class filterWorker:
         # Procesados por cliente
         self.processed_by_client = {}
         self.closed_by_client = set()
+        self.control_responses_by_client = {}
+        self.all_processed_by_client = {}
 
     def _pass_eof_control_message(
             self, client_id, expected_total
@@ -220,28 +222,270 @@ class filterWorker:
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=b''
         )
-        self.control_output.publish(message)
+        self.control_output.publish(message)    
 
-
-
-
-
+    def _cleanup_client(self, client_id):
+        '''
+        Elimina toda la informacion asociada a un cliente, cerrando su procesamiento
+        '''
+        with self.lock:
+            if client_id in self.processed_by_client:
+                del self.processed_by_client[client_id]
+            self.closed_by_client.add(client_id)
+            self.control_responses_by_client[client_id] = set()
+            self.all_processed_by_client[client_id] = 0
 
     
+    def _forward_transaction(self, transaction: Transaction, client_id: int):
+        '''
+        Envia una transaccion a la cola de salida correspondiente segun la configuracion del worker
+        '''
+        logging.info(f"Transaction {transaction} passed filter in filter_{CONFIGURATION} with id {ID}, forwarding to output")
+        payload = self.transaction_serializer.serialize(transaction)
+        message = self.internal_packet_serializer.create_packet(
+            msg_type=message_protocol.common.MessageType.DATA,
+            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
+            payload=payload
+        )
+        if CONFIGURATION == C_Q1:
+            self.output_queues[GATEWAY_QUEUE].publish(message)
+        if CONFIGURATION == C_Q5:
+            self.output_queues[FILTER_Q5_USD_QUEUE].publish(message)
+        if CONFIGURATION == C_USD:
+            self.output_queues[FILTER_Q1_QUEUE].publish(message)
+            self.output_queues[SUM_Q2_QUEUE].publish(message)
+            self.output_queues[FILTER_DATE_QUEUE].publish(message)
+        if CONFIGURATION == C_DATE:
+            # Si la transaccion esta entre las fechas 2022-09-06 y 2022-09-15, va al sum de Q3 por sharding
+            # Si la transaccion esta entre las fechas 2022-09-01 y 2022-09-05, va al filtro de Q3
+            # Si la transaccion esta entre las fechas 2022-09-01 y 2022-09-05, va al scatter gather mapper de Q4
+            if self._filter_transaction(transaction, start_date="2022-09-06", end_date="2022-09-15"):
+                # Shardeo por el id de la transaccion
+                shard = transaction.hash_by_payment_format(SUM_Q3_AMOUNT)
+                self.output_exchanges[shard].publish(message)
+            if self._filter_transaction(transaction, start_date="2022-09-01", end_date="2022-09-05"):
+                self.output_queues[FILTER_Q3_QUEUE].publish(message)
+                self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].publish(message)
 
     
+    def _filter_transaction(self, transaction: Transaction, start_date=None, end_date=None):
+        '''
+        Aplica el filtro correspondiente a la configuracion de este worker a una transaccion,
+        devolviendo True si la transaccion pasa el filtro y False en caso contrario
+        '''
+        if CONFIGURATION == C_Q1:
+            return transaction < 50
+        if CONFIGURATION == C_Q5:
+            return transaction.format == "Wire" or transaction.format == "ACH"
+        if CONFIGURATION == C_USD:
+            return transaction.currency == "US Dollar"
+        if CONFIGURATION == C_DATE:
+            if start_date is None or end_date is None:
+                raise ValueError("start_date and end_date must be provided for DATE filter")
+            return transaction.is_in_date_range(start_date, end_date)
+        raise ValueError(f"Invalid configuration: {CONFIGURATION}")
     
-
     
+    def _process_data_message(self, message):
+        '''
+        Procesa un mensaje de la cola de entrada, aplicando el filtro correspondiente a la
+        configuracion de este worker y reenviando la transaccion a la cola de salida correspondiente 
+        si la transaccion pasa el filtro
+        '''
+        # Desempaquetamos el mensaje
+        msg_type, client_id, payload = self.internal_packet_serializer.unpack_packet(message)
 
+        if client_id in self.closed_by_client:
+            # Si el cliente ya fue cerrado, no procesamos mas mensajes de ese cliente
+            logging.info(f"Received message for closed client {client_id} in filter_{CONFIGURATION} with id {ID}, ignoring")
+            return
 
+        if msg_type == message_protocol.common.MessageType.DATA:
+            # Deserializamos la transaccion
+            transaction = self.transaction_serializer.deserialize(payload)
 
+            # Aplicamos el filtro y forwrdeamos
+            if CONFIGURATION == C_DATE:
+                self._forward_transaction(transaction, client_id)
+            elif self._filter_transaction(transaction):
+                self._forward_transaction(transaction, client_id)
 
-
+            # Actualizamos el conteo de procesados para este cliente
+            with self.lock:
+                if client_id not in self.processed_by_client:
+                    self.processed_by_client[client_id] = 0
+                self.processed_by_client[client_id] += 1
+            
+        elif msg_type == message_protocol.common.MessageType.EOF:
+            # Cuando recibimos un EOF:
+            # - Si se es el lider, se le avisa a los demas workers que se recibio un EOF 
+            #     para este cliente y cuantos mensajes se esperan en total, para que ellos puedan 
+            #     responder con su conteo de procesados
+            # - Si no se es el lider, se le avisa al lider que se recibio un EOF para este cliente y 
+            #     cuantos mensajes se esperan en total, para que el lider pueda solicitar el 
+            #     conteo de procesados a los demas workers
+            logging.info(f"Received EOF for client {client_id} in filter_{CONFIGURATION}")
+            with self.lock:
+                expected_total = self.processed_by_client.get(client_id, 0)
+            if self.is_leader:
+                self._request_control_message(client_id, expected_total)
+            else:
+                self._pass_eof_control_message(client_id, expected_total)
         
-                
+        else:
+            logging.warning(f"Received unknown message type: {msg_type} for filter_{CONFIGURATION}")
+    
+    def _process_control_message(self, message):
+        '''
+        Procesa un mensaje de control recibido por el exchange de control, actualizando el estado interno del worker
+        y respondiendo a los mensajes de control correspondientes
+        '''
+        # Desempaquetamos el mensaje
+        msg_type, client_id, payload = self.internal_packet_serializer.unpack_packet(message)
+        control_message = self.control_serializer.deserialize(payload)
 
+        if msg_type == message_protocol.common.MessageType.EOF_RECEIVED:
+            if not self.is_leader:
+                logging.warning(f"Received EOF_RECEIVED control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
+                return
+            # Si se recibe un mensaje indicando que se recibio un EOF para un cliente, se responde con una solicitud de conteo de procesados para ese cliente
+            self._request_control_message(client_id, control_message.expected_total)
 
+        if msg_type == message_protocol.common.MessageType.PROCESSED_REQUEST:
+            if self.is_leader:
+                logging.warning(f"Received PROCESSED_REQUEST control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am the leader, ignoring")
+                return
+            # Si se recibe una solicitud de conteo procesados, se responde con un mensaje indicando
+            # cuantos mensajes se han procesado para ese cliente
+            with self.lock:
+                processed_count = self.processed_by_client.get(client_id, 0)
+            self._answer_control_message(client_id, control_message.expected_total, processed_count)
+        
+        if msg_type == message_protocol.common.MessageType.PROCESSED_ANSWER:
+            if not self.is_leader:
+                logging.warning(f"Received PROCESSED_ANSWER control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
+                return
+            
+            with self.lock:
+                procesados = self.processed_by_client.get(client_id, 0)
 
+            if client_id not in self.control_responses_by_client:
+                self.control_responses_by_client[client_id] = set()
+            self.control_responses_by_client[client_id].add(control_message.sender_id)
+            
+            if client_id not in self.all_processed_by_client:
+                self.all_processed_by_client[client_id] = 0
+            self.all_processed_by_client[client_id] += control_message.processed_count
+            
+            if len(self.control_responses_by_client[client_id]) == FILTER_AMOUNT - 1:
+                if self.all_processed_by_client[client_id] + procesados == control_message.expected_total:
+                    logging.info(f"Received all PROCESSED_ANSWER control messages for client {client_id} in filter_{CONFIGURATION}, total processed: {procesados + control_message.processed_count}, expected: {control_message.expected_total}, sending FLUSH_ORDER")
+                    self._flush_control_message(client_id)
+                else:
+                    logging.info(f"Received all PROCESSED_ANSWER control messages for client {client_id} in filter_{CONFIGURATION}, total processed: {procesados + control_message.processed_count}, expected: {control_message.expected_total}, but counts do not match, resending PROCESSED_REQUEST")
+                    self._request_control_message(client_id, control_message.expected_total)
+                    self.control_responses_by_client[client_id] = set()
+                    self.all_processed_by_client[client_id] = 0
+        
+        if msg_type == message_protocol.common.MessageType.FLUSH_ORDER:
+            if self.is_leader:
+                logging.warning(f"Received FLUSH_ORDER control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am the leader, ignoring")
+                return
+            # Si se recibe una orden de flush, se limpian los recursos asociados a ese cliente y se responde con un mensaje de ack
+            self._cleanup_client(client_id)
+            self._ack_flush_control_message(client_id)
+            
+        
+        if msg_type == message_protocol.common.MessageType.FLUSH_ACK:
+            if not self.is_leader:
+                logging.warning(f"Received FLUSH_ACK control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
+                return
+            # Si se recibe un ack de flush, se marca al cliente como cerrado
+            self._cleanup_client(client_id)
 
+    def process_data_messages(self, message, ack, nack):
+        '''
+        Callback para procesar los mensajes recibidos por la cola de entrada
+        '''
+        try:
+            self._process_data_message(message)
+            ack()
+        except Exception as e:
+            logging.error(f"Error processing data message in filter_{CONFIGURATION} with id {ID}: {e}")
+            nack()
 
+    def process_control_messages(self, message, ack, nack):
+        '''
+        Callback para procesar los mensajes recibidos por el exchange de control
+        '''
+        try:
+            self._process_control_message(message)
+            ack()
+        except Exception as e:
+            logging.error(f"Error processing control message in filter_{CONFIGURATION} with id {ID}: {e}")
+            nack()
+
+    def start(self):
+        '''
+        Inicia el procesamiento de mensajes de la cola de entrada y del exchange de control
+        '''
+        # Se inicia un thread para procesar los mensajes de control
+        self.control_thread = threading.Thread(
+            target=self.control_input.start_consuming,
+            args=(self.process_control_messages)
+        )
+        self.control_thread.start()
+
+        try:
+            # Se procesan los mensajes de la cola de entrada en el thread principal
+            self.input_queue.start_consuming(self.process_data_messages)
+        except Exception as e:
+            logging.error(f"Error in filter_{CONFIGURATION} with id {ID}: {e}")
+        finally:
+            self.handle_sigterm()
+            if self.control_thread is not None:
+                self.control_thread.join(timeout=5)
+            self.close()
+    
+    def handle_sigterm(self):
+        '''
+        Maneja la señal de terminacion, cerrando los recursos de manera ordenada
+        '''
+        logging.info(f"Received SIGTERM in filter_{CONFIGURATION} with id {ID}, shutting down")
+        self.active = False
+        self.input_queue.stop_consuming()
+        self.control_input.stop_consuming()
+        self.close()
+    
+    def close(self):
+        '''
+        Cierra los recursos utilizados por este worker
+        '''
+        logging.info(f"Closing filter_{CONFIGURATION} with id {ID}")
+
+        try:
+            self.input_queue.close()
+        except Exception as e:
+            logging.error(f"Error closing input queue in filter_{CONFIGURATION} with id {ID}: {e}")
+
+        try:
+            self.control_input.close()
+        except Exception as e:
+            logging.error(f"Error closing control input in filter_{CONFIGURATION} with id {ID}: {e}")
+
+        try:
+            self.control_output.close()
+        except Exception as e:
+            logging.error(f"Error closing control output in filter_{CONFIGURATION} with id {ID}: {e}")
+
+        for queue in self.output_queues.values():
+            try:
+                queue.close()
+            except Exception as e:
+                logging.error(f"Error closing output queue in filter_{CONFIGURATION} with id {ID}: {e}")
+
+        for exchange in self.output_exchanges:
+            try:
+                exchange.close()
+            except Exception as e:
+                logging.error(f"Error closing output exchange in filter_{CONFIGURATION} with id {ID}: {e}")

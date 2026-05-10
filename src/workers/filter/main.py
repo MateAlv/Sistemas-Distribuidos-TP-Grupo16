@@ -1,7 +1,14 @@
-import os
 import logging
-import threading
+import signal
 
-from common.domain.transaction import Transaction
-from common.message_protocol import *
-from common.middleware import middleware
+from workers.filter.filters import FilterWorker
+
+def main():
+    logging.basicConfig(level=logging.INFO)
+    filter_worker = FilterWorker()
+    signal.signal(signal.SIGTERM, lambda signum, frame: filter_worker.handle_sigterm())
+    filter_worker.start()
+    return 0
+
+if __name__ == "__main__":
+    main()
