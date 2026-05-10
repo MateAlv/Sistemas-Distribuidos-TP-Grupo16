@@ -19,7 +19,7 @@ class TransactionSerializer:
             tx.id_transaccion.encode('utf-8')
         )
     
-    classmethod
+    @classmethod
     def deserialize(cls, data: bytes) -> Transaction:
         vals = struct.unpack(cls.FORMAT, data)
         return Transaction(
