@@ -2,8 +2,8 @@ import os
 import logging
 import threading
 
+from common import message_protocol
 from common.domain.transaction import Transaction
-from common.message_protocol import *
 from common.middleware import middleware
 from common.constants import *
 
@@ -119,8 +119,20 @@ class filterWorker:
         # Procesados por cliente
         self.processed_by_client = {}
         self.closed_by_client = set()
+
+    def _publish_control_message(
+            self, client_id, expected_total, processed_count
+    ):
+        message = message_protocol.internal.serialize(
+            [
+                client_id,
+                expected_total,
+                processed_count
+            ]
+        )
+        self.control_output.publish(message)
     
-    
+
 
 
 
