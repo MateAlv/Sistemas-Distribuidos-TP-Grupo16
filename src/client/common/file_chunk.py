@@ -48,6 +48,7 @@ class FileChunkHeader:
         return self.serialized_size_for_path(self.rel_path)
 
     def serialize(self) -> bytes:
+        # Wire layout: client_id(4) | payload_size(4) | path_size(4) | offset(8) | rel_path(N)
         return b"".join(
             [
                 self.client_id.to_bytes(4, byteorder="big"),
@@ -82,20 +83,10 @@ class FileChunkHeader:
 
     @classmethod
     def recv(cls, sock: socket.socket) -> "FileChunkHeader":
-        fixed_header = recv_exact(sock, cls.HEADER_SIZE)
-
-        client_id = int.from_bytes(fixed_header[0:4], byteorder="big")
-        payload_size = int.from_bytes(fixed_header[4:8], byteorder="big")
-        path_size = int.from_bytes(fixed_header[8:12], byteorder="big")
-        offset = int.from_bytes(fixed_header[12:20], byteorder="big")
-        rel_path = recv_exact(sock, path_size).decode("utf-8")
-
-        return cls(
-            rel_path=rel_path,
-            client_id=client_id,
-            offset=offset,
-            payload_size=payload_size,
-        )
+        fixed = recv_exact(sock, cls.HEADER_SIZE)
+        path_size = int.from_bytes(fixed[8:12], byteorder="big")
+        path_bytes = recv_exact(sock, path_size)
+        return cls.deserialize(fixed + path_bytes)
 
 
 class FileChunk:
