@@ -111,6 +111,11 @@ class filterWorker:
             MOM_HOST, CONTROL_EXCHANGE, self.output_control_keys
         )
 
+        # Serializadores para transacciones y mensajes de control
+        self.transaction_serializer = message_protocol.internal.TransactionSerializer()
+        self.control_serializer = message_protocol.internal.ControlMessageSerializer()
+        self.internal_packet_serializer = message_protocol.internal.InternalProtocol()
+
         # Estado interno
         self.lock = threading.Lock()
         self.active = True
@@ -120,17 +125,75 @@ class filterWorker:
         self.processed_by_client = {}
         self.closed_by_client = set()
 
-    def _publish_control_message(
-            self, client_id, expected_total, processed_count
+    def _pass_eof_control_message(
+            self, client_id, expected_total
     ):
-        message = message_protocol.internal.serialize(
-            [
-                client_id,
-                expected_total,
-                processed_count
-            ]
+        '''
+        Envia un mensaje de control al lider indicando que se recibio un EOF para un cliente, 
+        con la cantidad total de mensajes que se esperan para ese cliente
+        '''
+        message = self.control_serializer.serialize(
+            message_protocol.common.ControlMessage(
+                sender_id=ID,
+                expected_total=expected_total,
+                processed_count=0
+            )
+        )
+        message = self.internal_packet_serializer.create_packet(
+            msg_type=message_protocol.common.MessageType.EOF_RECEIVED,
+            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
+            payload=message
         )
         self.control_output.publish(message)
+
+    def _answer_control_message(
+            self, client_id, expected_total, processed_count
+    ):
+        '''
+        Responde a una solicitud de control con un mensaje indicando
+        '''
+        message = self.control_serializer.serialize(
+            message_protocol.common.ControlMessage(
+                sender_id=ID,
+                expected_total=expected_total,
+                processed_count=processed_count
+            )
+        )
+        message = self.internal_packet_serializer.create_packet(
+            msg_type=message_protocol.common.MessageType.PROCESSED_ANSWER,
+            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
+            payload=message
+        )
+        self.control_output.publish(message)
+
+    def _request_control_message(self, client_id, expected_total):
+        '''
+        Envia un mensaje de control a los workers correspondientes solicitando informacion de cuantos mensajes han procesado
+        '''
+        message = self.control_serializer.serialize(
+            message_protocol.common.ControlMessage(
+                sender_id=ID,
+                expected_total=expected_total,
+                processed_count=0
+            )
+        )
+        message = self.internal_packet_serializer.create_packet(
+            msg_type=message_protocol.common.MessageType.PROCESSED_REQUEST,
+            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
+            payload=message
+        )
+        self.control_output.publish(message)
+
+
+
+
+
+
+    
+
+    
+    
+
     
 
 
