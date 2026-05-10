@@ -19,7 +19,7 @@ DEFAULT_LOGGING_LEVEL = "INFO"
 MIN_TCP_PORT = 1
 MAX_TCP_PORT = 65535
 MAX_CLIENT_ID = 2**32 - 1
-CSV_EXTENSIONS = (".csv")
+CSV_EXTENSIONS = (".csv",)
 
 
 @dataclass(frozen=True)

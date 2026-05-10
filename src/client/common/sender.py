@@ -57,13 +57,6 @@ class Sender:
         finally:
             self._sock = None
 
-    def __enter__(self) -> "Sender":
-        self.connect()
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self.close()
-
     def send_handshake_request(self, client_id: int) -> None:
         ensure_socket(self._sock)
 

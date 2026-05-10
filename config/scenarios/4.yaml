@@ -15,7 +15,6 @@ services:
     - PYTHONUNBUFFERED=1
     - SUM_AMOUNT=3
     - SUM_PREFIX=sum
-    - TOP_SIZE=3
   aggregation_1:
     build:
       context: ./src/
@@ -32,7 +31,6 @@ services:
     - PYTHONUNBUFFERED=1
     - SUM_AMOUNT=3
     - SUM_PREFIX=sum
-    - TOP_SIZE=3
   aggregation_2:
     build:
       context: ./src/
@@ -49,7 +47,6 @@ services:
     - PYTHONUNBUFFERED=1
     - SUM_AMOUNT=3
     - SUM_PREFIX=sum
-    - TOP_SIZE=3
   client_0:
     build:
       context: ./src/
@@ -141,7 +138,6 @@ services:
     - PYTHONUNBUFFERED=1
     - SUM_AMOUNT=3
     - SUM_PREFIX=sum
-    - TOP_SIZE=3
   rabbitmq:
     build:
       context: ./rabbitmq

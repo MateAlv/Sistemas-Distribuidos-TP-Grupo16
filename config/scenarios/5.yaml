@@ -75,7 +75,6 @@ services:
     - PYTHONUNBUFFERED=1
     - SUM_AMOUNT=3
     - SUM_PREFIX=eqtatg
-    - TOP_SIZE=3
   ckcariaxuf_1:
     build:
       context: ./src/
@@ -92,7 +91,6 @@ services:
     - PYTHONUNBUFFERED=1
     - SUM_AMOUNT=3
     - SUM_PREFIX=eqtatg
-    - TOP_SIZE=3
   ckcariaxuf_2:
     build:
       context: ./src/
@@ -109,7 +107,6 @@ services:
     - PYTHONUNBUFFERED=1
     - SUM_AMOUNT=3
     - SUM_PREFIX=eqtatg
-    - TOP_SIZE=3
   eqtatg_0:
     build:
       context: ./src/
@@ -180,7 +177,6 @@ services:
     - PYTHONUNBUFFERED=1
     - SUM_AMOUNT=3
     - SUM_PREFIX=eqtatg
-    - TOP_SIZE=3
   szgpulnqog:
     build:
       context: ./rabbitmq
