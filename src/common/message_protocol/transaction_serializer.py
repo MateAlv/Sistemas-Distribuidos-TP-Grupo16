@@ -16,7 +16,7 @@ class TransactionSerializer:
             int(tx.to_account),
             float(tx.amount),
             tx.currency.encode('utf-8'),
-            tx.id_transaccion.encode('utf-8')
+            tx.format.encode('utf-8')
         )
     
     @classmethod

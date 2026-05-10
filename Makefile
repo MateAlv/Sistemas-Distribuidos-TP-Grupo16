@@ -35,3 +35,8 @@ switch:
 	@read -p "Selecciona uno [1-5]: " option;	\
 	cp ./scenarios/$${option}.yaml docker-compose.yaml
 .PHONY: switch
+
+test-unit:
+	docker build -f Dockerfile.test -t test-runner .
+	docker run --rm test-runner
+.PHONY: test-unit
