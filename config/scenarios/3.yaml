@@ -2,7 +2,7 @@ services:
   aggregation_0:
     build:
       context: ./src/
-      dockerfile: workers/aggregation/Dockerfile
+      dockerfile: workers/aggregator/Dockerfile
     container_name: aggregation_0
     depends_on:
     - join
@@ -22,54 +22,60 @@ services:
       dockerfile: client/Dockerfile
     container_name: client_0
     depends_on:
-    - sum_0
-    - sum_1
-    - sum_2
+    - gateway
     environment:
-    - INPUT_FILE=/datasets/input_0.csv
-    - OUTPUT_FILE=/output/output_0.csv
+    - CLIENT_ID=0
+    - DATA_DIR=/data
+    - CHUNK_MAX_BYTES=1048576
+    - RESULT_LINE_MAX_BYTES=1048576
+    - CONNECT_TIMEOUT_SECONDS=30
+    - IO_TIMEOUT_SECONDS=3600
+    - LOGGING_LEVEL=INFO
     - PYTHONUNBUFFERED=1
     - SERVER_HOST=gateway
     - SERVER_PORT=5678
     volumes:
-    - ./datasets:/datasets
-    - ./output:/output
+    - ./data/datasets/LI-Small:/data:ro
   client_1:
     build:
       context: ./src/
       dockerfile: client/Dockerfile
     container_name: client_1
     depends_on:
-    - sum_0
-    - sum_1
-    - sum_2
+    - gateway
     environment:
-    - INPUT_FILE=/datasets/input_1.csv
-    - OUTPUT_FILE=/output/output_1.csv
+    - CLIENT_ID=1
+    - DATA_DIR=/data
+    - CHUNK_MAX_BYTES=1048576
+    - RESULT_LINE_MAX_BYTES=1048576
+    - CONNECT_TIMEOUT_SECONDS=30
+    - IO_TIMEOUT_SECONDS=3600
+    - LOGGING_LEVEL=INFO
     - PYTHONUNBUFFERED=1
     - SERVER_HOST=gateway
     - SERVER_PORT=5678
     volumes:
-    - ./datasets:/datasets
-    - ./output:/output
+    - ./data/datasets/LI-Small:/data:ro
   client_2:
     build:
       context: ./src/
       dockerfile: client/Dockerfile
     container_name: client_2
     depends_on:
-    - sum_0
-    - sum_1
-    - sum_2
+    - gateway
     environment:
-    - INPUT_FILE=/datasets/input_2.csv
-    - OUTPUT_FILE=/output/output_2.csv
+    - CLIENT_ID=2
+    - DATA_DIR=/data
+    - CHUNK_MAX_BYTES=1048576
+    - RESULT_LINE_MAX_BYTES=1048576
+    - CONNECT_TIMEOUT_SECONDS=30
+    - IO_TIMEOUT_SECONDS=3600
+    - LOGGING_LEVEL=INFO
     - PYTHONUNBUFFERED=1
     - SERVER_HOST=gateway
     - SERVER_PORT=5678
     volumes:
-    - ./datasets:/datasets
-    - ./output:/output
+    - ./data/datasets/LI-Small:/data:ro
   gateway:
     build:
       context: ./src/
@@ -88,7 +94,7 @@ services:
   join:
     build:
       context: ./src/
-      dockerfile: workers/join/Dockerfile
+      dockerfile: workers/joiner/Dockerfile
     container_name: join
     depends_on:
     - gateway
