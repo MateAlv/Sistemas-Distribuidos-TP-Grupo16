@@ -1,95 +1,113 @@
 import os
 import logging
-import csv
-import socket
-import signal
+from dataclasses import dataclass
 
-from common import message_protocol
+DEFAULT_CLIENT_ID = 1
+DEFAULT_DATA_DIR = "/data"
+DEFAULT_SERVER_HOST = "gateway"
+DEFAULT_SERVER_PORT = 5678
+DEFAULT_CHUNK_MAX_BYTES = 64 * 1024
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
+DEFAULT_IO_TIMEOUT_SECONDS = 60000.0
+DEFAULT_LOGGING_LEVEL = "INFO"
+MIN_TCP_PORT = 1
+MAX_TCP_PORT = 65535
+CSV_EXTENSIONS = (".csv",)
 
-INPUT_FILE = os.environ["INPUT_FILE"]
-OUTPUT_FILE = os.environ["OUTPUT_FILE"]
-SERVER_HOST = os.environ["SERVER_HOST"]
-SERVER_PORT = int(os.environ["SERVER_PORT"])
 
-
-class Client:
-
-    def __init__(self):
-        self.closed = False
-        self._prev_sigterm_handler = signal.signal(signal.SIGTERM, self.handle_sigterm)
-
-    def handle_sigterm(self, signum, frame):
-        logging.info("Recieved SIGTERM signal")
-        self.closed = True
-        self.disconnect()
-
-        if self._prev_sigterm_handler:
-            self._prev_sigterm_handler(signum, frame)
-
-    def connect(self, server_host, server_port):
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.connect((server_host, server_port))
-
-    def disconnect(self):
-        if self.server_socket:
-            self.server_socket.shutdown(socket.SHUT_RDWR)
-
-    def send_fruit_records(self, input_file):
-        logging.info("Sending fruit records")
-        with open(input_file, newline="\n") as csvfile:
-            csv_reader = csv.reader(csvfile, delimiter=",", quotechar='"')
-            for row in csv_reader:
-                [fruit, amount] = row
-                message_protocol.external.send_msg(
-                    self.server_socket,
-                    message_protocol.external.MsgType.FRUIT_RECORD,
-                    fruit,
-                    int(amount),
-                )
-                message_protocol.external.recv_msg(self.server_socket)
-
-        message_protocol.external.send_msg(
-            self.server_socket, message_protocol.external.MsgType.END_OF_RECODS
-        )
-        message_protocol.external.recv_msg(self.server_socket)
-
-    def recv_fruit_top(self, output_file):
-        logging.info("Receiving fruit top")
-        fruit_top_message = message_protocol.external.recv_msg(self.server_socket)
-        message_protocol.external.send_msg(
-            self.server_socket, message_protocol.external.MsgType.ACK
-        )
-
-        if fruit_top_message[0] != message_protocol.external.MsgType.FRUIT_TOP:
-            raise TypeError("Expected a FRUIT_TOP message")
-
-        with open(output_file, "w") as csvfile:
-            csv_writer = csv.writer(csvfile, delimiter=",", quotechar='"')
-            for fruit_item in fruit_top_message[1]:
-                csv_writer.writerow(fruit_item)
+@dataclass(frozen=True)
+class ClientConfig:
+    client_id: int
+    data_dir: str
+    server_host: str
+    server_port: int
+    chunk_max_bytes: int
+    connect_timeout_seconds: float
+    io_timeout_seconds: float
+    logging_level: str
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO)
-    client = Client()
-
     try:
-        client.connect(SERVER_HOST, SERVER_PORT)
-        client.send_fruit_records(INPUT_FILE)
-        client.recv_fruit_top(OUTPUT_FILE)
-    except socket.error:
-        if not client.closed:
-            logging.error("The connection with the server was lost")
-            return 1
+        config = load_config()
+        initialize_log(config.logging_level)
+        validate_config(config)
     except Exception as e:
-        logging.error(e)
+        logging.basicConfig(level=logging.ERROR)
+        logging.error("client_config | result=error | error=%s", e)
         return 2
-    finally:
-        if not client.closed:
-            client.disconnect()
+
+    logging.info(
+        "client_config | result=ok | client_id=%s | data_dir=%s | "
+        "server=%s:%s | chunk_max_bytes=%s | extensions=%s",
+        config.client_id,
+        config.data_dir,
+        config.server_host,
+        config.server_port,
+        config.chunk_max_bytes,
+        ",".join(CSV_EXTENSIONS),
+    )
 
     return 0
 
 
+def load_config() -> ClientConfig:
+    return ClientConfig(
+        client_id=get_int("CLIENT_ID", DEFAULT_CLIENT_ID),
+        data_dir=os.getenv("DATA_DIR", DEFAULT_DATA_DIR),
+        server_host=os.getenv("SERVER_HOST", DEFAULT_SERVER_HOST),
+        server_port=get_int("SERVER_PORT", DEFAULT_SERVER_PORT),
+        chunk_max_bytes=get_int("CHUNK_MAX_BYTES", DEFAULT_CHUNK_MAX_BYTES),
+        connect_timeout_seconds=get_float(
+            "CONNECT_TIMEOUT_SECONDS",
+            DEFAULT_CONNECT_TIMEOUT_SECONDS,
+        ),
+        io_timeout_seconds=get_float("IO_TIMEOUT_SECONDS", DEFAULT_IO_TIMEOUT_SECONDS),
+        logging_level=os.getenv("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
+    )
+
+
+def initialize_log(level_name: str) -> None:
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    logging.basicConfig(
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        level=level,
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+def validate_config(config: ClientConfig) -> None:
+    if config.client_id < 0:
+        raise ValueError("CLIENT_ID must be greater than or equal to 0")
+    if config.server_port < MIN_TCP_PORT or config.server_port > MAX_TCP_PORT:
+        raise ValueError(f"SERVER_PORT must be in range [{MIN_TCP_PORT}, {MAX_TCP_PORT}]")
+    if config.chunk_max_bytes <= 0:
+        raise ValueError("CHUNK_MAX_BYTES must be greater than 0")
+    if config.connect_timeout_seconds <= 0:
+        raise ValueError("CONNECT_TIMEOUT_SECONDS must be greater than 0")
+    if config.io_timeout_seconds <= 0:
+        raise ValueError("IO_TIMEOUT_SECONDS must be greater than 0")
+
+
+def get_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
+def get_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
