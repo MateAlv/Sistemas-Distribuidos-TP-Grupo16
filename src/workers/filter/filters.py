@@ -184,6 +184,44 @@ class filterWorker:
         )
         self.control_output.publish(message)
 
+    def _flush_control_message(self, client_id):
+        '''
+        Envia un mensaje de control a los workers correspondientes 
+        solicitando que liberen los recursos asociados a un cliente
+        '''
+        message  = self.control_serializer.serialize(
+            message_protocol.common.ControlMessage(
+                sender_id=ID,
+                expected_total=0,
+                processed_count=0
+            )
+        )
+        message = self.internal_packet_serializer.create_packet(
+            msg_type=message_protocol.common.MessageType.FLUSH_ORDER,
+            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
+            payload=b''
+        )
+        self.control_output.publish(message)
+
+    def _ack_flush_control_message(self, client_id):
+        '''
+        Envia un mensaje de control a los workers correspondientes 
+        indicando que se han liberado los recursos asociados a un cliente
+        '''
+        message  = self.control_serializer.serialize(
+            message_protocol.common.ControlMessage(
+                sender_id=ID,
+                expected_total=0,
+                processed_count=0
+            )
+        )
+        message = self.internal_packet_serializer.create_packet(
+            msg_type=message_protocol.common.MessageType.FLUSH_ACK,
+            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
+            payload=b''
+        )
+        self.control_output.publish(message)
+
 
 
 
