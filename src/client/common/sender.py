@@ -1,6 +1,7 @@
 import logging
 import socket
 import time
+from collections.abc import Generator
 
 from common.socket_utils import ensure_socket, recv_exact, sendall
 
@@ -9,6 +10,7 @@ H_ID_HANDSHAKE = 1
 H_ID_FILE_CHUNK = 2
 H_ID_FINISH = 3
 H_ID_ACK = 4
+RESULT_RECV_SIZE = 4096
 
 
 class Sender:
@@ -85,6 +87,39 @@ class Sender:
         sendall(self._sock, _header_id_to_bytes(H_ID_FINISH))
         self._wait_ack("finish")
 
+    def iter_result_lines(
+        self,
+        max_line_size: int,
+        encoding: str = "utf-8",
+    ) -> Generator[str, None, None]:
+        ensure_socket(self._sock)
+
+        if max_line_size <= 0:
+            raise ValueError("max_line_size must be greater than 0")
+
+        line = bytearray()
+
+        while True:
+            data = self._sock.recv(RESULT_RECV_SIZE)
+            if not data:
+                if line:
+                    yield _decode_result_line(line, encoding)
+                return
+
+            offset = 0
+            while True:
+                newline = data.find(b"\n", offset)
+                if newline == -1:
+                    line.extend(data[offset:])
+                    _validate_result_line_size(line, max_line_size)
+                    break
+
+                line.extend(data[offset : newline + 1])
+                _validate_result_line_size(line, max_line_size)
+                yield _decode_result_line(line, encoding)
+                line.clear()
+                offset = newline + 1
+
     def _wait_ack(self, operation: str) -> None:
         ensure_socket(self._sock)
 
@@ -106,3 +141,12 @@ def _header_id_from_bytes(data: bytes) -> int:
     if len(data) != 1:
         raise ValueError(f"header must be exactly 1 byte, got {len(data)}")
     return int.from_bytes(data, byteorder="big")
+
+
+def _validate_result_line_size(line: bytearray, max_line_size: int) -> None:
+    if len(line) > max_line_size:
+        raise ValueError(f"result line exceeded max_line_size={max_line_size}")
+
+
+def _decode_result_line(line: bytearray, encoding: str) -> str:
+    return bytes(line).decode(encoding, errors="replace").rstrip("\r\n")

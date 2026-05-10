@@ -13,6 +13,7 @@ DEFAULT_SERVER_PORT = 5678
 DEFAULT_CHUNK_MAX_BYTES = 64 * 1024
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
 DEFAULT_IO_TIMEOUT_SECONDS = 60000.0
+DEFAULT_RESULT_LINE_MAX_BYTES = 1024 * 1024
 DEFAULT_LOGGING_LEVEL = "INFO"
 MIN_TCP_PORT = 1
 MAX_TCP_PORT = 65535
@@ -29,6 +30,7 @@ class ClientConfig:
     chunk_max_bytes: int
     connect_timeout_seconds: float
     io_timeout_seconds: float
+    result_line_max_bytes: int
     logging_level: str
 
 
@@ -62,8 +64,9 @@ class Client:
             self.config.server_port,
         )
 
-        with self.sender as sender:
-            sender.send_handshake_request(self.config.client_id)
+        self.sender.connect()
+        try:
+            self.sender.send_handshake_request(self.config.client_id)
             logging.info("client_handshake | client_id=%s | result=ok", self.config.client_id)
 
             for chunk in self.reader.iter():
@@ -84,17 +87,24 @@ class Client:
                     chunk.payload_size(),
                     message_size,
                 )
-                sender.send_file_chunk(chunk.serialize())
+                self.sender.send_file_chunk(chunk.serialize())
                 sent_chunks += 1
                 sent_payload_bytes += chunk.payload_size()
 
-            sender.send_finished()
+            self.sender.send_finished()
             logging.info(
                 "client_send_finished | client_id=%s | chunks=%s | payload_bytes=%s | result=ack",
                 self.config.client_id,
                 sent_chunks,
                 sent_payload_bytes,
             )
+
+            self.log_result_lines()
+        except Exception:
+            self.sender.close()
+            raise
+
+        self.sender.close()
 
     def close(self) -> None:
         self.closed = True
@@ -103,6 +113,25 @@ class Client:
     def handle_sigterm(self, signum, frame) -> None:
         logging.info("client_shutdown | client_id=%s | signal=%s", self.config.client_id, signum)
         self.close()
+
+    def log_result_lines(self) -> None:
+        logging.info("client_results_wait | client_id=%s", self.config.client_id)
+
+        result_lines = 0
+        for line in self.sender.iter_result_lines(self.config.result_line_max_bytes):
+            result_lines += 1
+            logging.info(
+                "client_result_line | client_id=%s | line_number=%s | data=%s",
+                self.config.client_id,
+                result_lines,
+                line,
+            )
+
+        logging.info(
+            "client_results_finished | client_id=%s | lines=%s",
+            self.config.client_id,
+            result_lines,
+        )
 
 
 def main() -> int:
@@ -159,6 +188,10 @@ def load_config() -> ClientConfig:
             DEFAULT_CONNECT_TIMEOUT_SECONDS,
         ),
         io_timeout_seconds=get_float("IO_TIMEOUT_SECONDS", DEFAULT_IO_TIMEOUT_SECONDS),
+        result_line_max_bytes=get_int(
+            "RESULT_LINE_MAX_BYTES",
+            DEFAULT_RESULT_LINE_MAX_BYTES,
+        ),
         logging_level=os.getenv("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
     )
 
@@ -187,6 +220,8 @@ def validate_config(config: ClientConfig) -> None:
         raise ValueError("CONNECT_TIMEOUT_SECONDS must be greater than 0")
     if config.io_timeout_seconds <= 0:
         raise ValueError("IO_TIMEOUT_SECONDS must be greater than 0")
+    if config.result_line_max_bytes <= 0:
+        raise ValueError("RESULT_LINE_MAX_BYTES must be greater than 0")
 
 
 def get_int(name: str, default: int) -> int:
