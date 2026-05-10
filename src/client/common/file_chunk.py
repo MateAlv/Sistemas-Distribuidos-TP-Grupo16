@@ -3,6 +3,19 @@ import socket
 from common.socket_utils import recv_exact
 
 
+MAX_UINT32 = 2**32 - 1
+MAX_UINT64 = 2**64 - 1
+
+
+def _validate_uint(name: str, value: int, max_value: int) -> int:
+    value = int(value)
+    if value < 0:
+        raise ValueError(f"{name} must be greater than or equal to 0")
+    if value > max_value:
+        raise ValueError(f"{name} must be less than or equal to {max_value}")
+    return value
+
+
 class FileChunkHeader:
     HEADER_SIZE = 20
 
@@ -14,10 +27,25 @@ class FileChunkHeader:
         payload_size: int,
     ) -> None:
         self.rel_path = rel_path
-        self.client_id = int(client_id)
-        self.offset = int(offset)
-        self.payload_size = int(payload_size)
-        self.path_size = len(rel_path.encode("utf-8"))
+        self.client_id = _validate_uint("client_id", client_id, MAX_UINT32)
+        self.offset = _validate_uint("offset", offset, MAX_UINT64)
+        self.payload_size = _validate_uint("payload_size", payload_size, MAX_UINT32)
+        self.path_size = _validate_uint(
+            "path_size",
+            self.path_size_for(rel_path),
+            MAX_UINT32,
+        )
+
+    @staticmethod
+    def path_size_for(rel_path: str) -> int:
+        return len(rel_path.encode("utf-8"))
+
+    @classmethod
+    def serialized_size_for_path(cls, rel_path: str) -> int:
+        return cls.HEADER_SIZE + cls.path_size_for(rel_path)
+
+    def serialized_size(self) -> int:
+        return self.serialized_size_for_path(self.rel_path)
 
     def serialize(self) -> bytes:
         return b"".join(
@@ -95,8 +123,48 @@ class FileChunk:
     def payload(self) -> bytes:
         return self.data
 
+    def serialized_size(self) -> int:
+        return self.header.serialized_size() + self.payload_size()
+
+    def message_size(self, message_type_size: int) -> int:
+        return int(message_type_size) + self.serialized_size()
+
     def serialize(self) -> bytes:
         return self.header.serialize() + self.data
+
+    @classmethod
+    def serialized_size_for(cls, rel_path: str, payload_size: int) -> int:
+        return FileChunkHeader.serialized_size_for_path(rel_path) + int(payload_size)
+
+    @classmethod
+    def message_overhead_for(cls, rel_path: str, message_type_size: int) -> int:
+        return int(message_type_size) + FileChunkHeader.serialized_size_for_path(rel_path)
+
+    @classmethod
+    def max_payload_size_for_message(
+        cls,
+        rel_path: str,
+        max_message_size: int,
+        message_type_size: int,
+    ) -> int:
+        max_message_size = int(max_message_size)
+        message_type_size = int(message_type_size)
+
+        if max_message_size <= 0:
+            raise ValueError("max_message_size must be greater than 0")
+        if message_type_size <= 0:
+            raise ValueError("message_type_size must be greater than 0")
+
+        overhead = cls.message_overhead_for(rel_path, message_type_size)
+        max_payload_size = max_message_size - overhead
+        if max_payload_size <= 0:
+            raise ValueError(
+                "max_message_size leaves no room for payload "
+                f"(max_message_size={max_message_size}, overhead={overhead}, "
+                f"rel_path={rel_path!r})"
+            )
+
+        return max_payload_size
 
     @classmethod
     def deserialize(cls, data: bytes) -> "FileChunk":
