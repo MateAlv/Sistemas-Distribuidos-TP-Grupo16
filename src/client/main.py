@@ -16,6 +16,7 @@ DEFAULT_IO_TIMEOUT_SECONDS = 60000.0
 DEFAULT_LOGGING_LEVEL = "INFO"
 MIN_TCP_PORT = 1
 MAX_TCP_PORT = 65535
+MAX_CLIENT_ID = 2**32 - 1
 CSV_EXTENSIONS = (".csv",)
 
 
@@ -50,13 +51,50 @@ class Client:
         )
 
     def start(self) -> None:
+        sent_chunks = 0
+        sent_payload_bytes = 0
+
         logging.info(
-            "client_start | client_id=%s | data_dir=%s | server=%s:%s",
+            "client_connect | client_id=%s | data_dir=%s | server=%s:%s",
             self.config.client_id,
             self.config.data_dir,
             self.config.server_host,
             self.config.server_port,
         )
+
+        with self.sender as sender:
+            sender.send_handshake_request(self.config.client_id)
+            logging.info("client_handshake | client_id=%s | result=ok", self.config.client_id)
+
+            for chunk in self.reader.iter():
+                message_size = chunk.message_size(MESSAGE_TYPE_SIZE)
+                if message_size > self.config.chunk_max_bytes:
+                    raise RuntimeError(
+                        "chunk message exceeded configured max size "
+                        f"(message_size={message_size}, max={self.config.chunk_max_bytes}, "
+                        f"path={chunk.path()!r}, offset={chunk.offset()})"
+                    )
+
+                logging.debug(
+                    "client_send_chunk | client_id=%s | path=%s | offset=%s | "
+                    "payload_bytes=%s | message_bytes=%s",
+                    self.config.client_id,
+                    chunk.path(),
+                    chunk.offset(),
+                    chunk.payload_size(),
+                    message_size,
+                )
+                sender.send_file_chunk(chunk.serialize())
+                sent_chunks += 1
+                sent_payload_bytes += chunk.payload_size()
+
+            sender.send_finished()
+            logging.info(
+                "client_send_finished | client_id=%s | chunks=%s | payload_bytes=%s | result=ack",
+                self.config.client_id,
+                sent_chunks,
+                sent_payload_bytes,
+            )
 
     def close(self) -> None:
         self.closed = True
@@ -91,7 +129,20 @@ def main() -> int:
         ",".join(CSV_EXTENSIONS),
     )
 
-    client.start()
+    try:
+        client.start()
+    except OSError as e:
+        if client.closed:
+            return 0
+        logging.error("client_io | result=error | error=%s", e)
+        return 1
+    except Exception as e:
+        if client.closed:
+            return 0
+        logging.error("client_run | result=error | error=%s", e)
+        return 2
+    finally:
+        client.close()
 
     return 0
 
@@ -124,6 +175,10 @@ def initialize_log(level_name: str) -> None:
 def validate_config(config: ClientConfig) -> None:
     if config.client_id < 0:
         raise ValueError("CLIENT_ID must be greater than or equal to 0")
+    if config.client_id > MAX_CLIENT_ID:
+        raise ValueError(f"CLIENT_ID must be less than or equal to {MAX_CLIENT_ID}")
+    if not os.path.isdir(config.data_dir):
+        raise ValueError(f"DATA_DIR must be an existing directory: {config.data_dir}")
     if config.server_port < MIN_TCP_PORT or config.server_port > MAX_TCP_PORT:
         raise ValueError(f"SERVER_PORT must be in range [{MIN_TCP_PORT}, {MAX_TCP_PORT}]")
     if config.chunk_max_bytes <= 0:
