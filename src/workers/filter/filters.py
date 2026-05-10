@@ -123,9 +123,12 @@ class FilterWorker:
 
         # Procesados por cliente
         self.processed_by_client = {}
+        self.forwarded_by_client = {}
         self.closed_by_client = set()
         self.control_responses_by_client = {}
         self.all_processed_by_client = {}
+        self.all_forwarded_by_client = {}
+        self.flushed_acks_by_client = {}
 
     def _pass_eof_control_message(
             self, client_id, expected_total
@@ -205,7 +208,7 @@ class FilterWorker:
         )
         self.control_output.publish(message)
 
-    def _ack_flush_control_message(self, client_id):
+    def _ack_flush_control_message(self, client_id, msgs_sent):
         '''
         Envia un mensaje de control a los workers correspondientes 
         indicando que se han liberado los recursos asociados a un cliente
@@ -214,7 +217,7 @@ class FilterWorker:
             message_protocol.common.ControlMessage(
                 sender_id=ID,
                 expected_total=0,
-                processed_count=0
+                processed_count=msgs_sent
             )
         )
         message = self.internal_packet_serializer.create_packet(
@@ -231,10 +234,17 @@ class FilterWorker:
         with self.lock:
             if client_id in self.processed_by_client:
                 del self.processed_by_client[client_id]
+            if client_id in self.forwarded_by_client:
+                del self.forwarded_by_client[client_id]
+            if client_id in self.all_processed_by_client:
+                del self.all_processed_by_client[client_id]
+            if client_id in self.all_forwarded_by_client:
+                del self.all_forwarded_by_client[client_id]
+            if client_id in self.control_responses_by_client:
+                del self.control_responses_by_client[client_id]
+            if client_id in self.flushed_acks_by_client:
+                del self.flushed_acks_by_client[client_id]
             self.closed_by_client.add(client_id)
-            self.control_responses_by_client[client_id] = set()
-            self.all_processed_by_client[client_id] = 0
-
     
     def _forward_transaction(self, transaction: Transaction, client_id: int):
         '''
@@ -267,6 +277,36 @@ class FilterWorker:
                 self.output_queues[FILTER_Q3_QUEUE].publish(message)
                 self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].publish(message)
 
+    def _forward_eof(self, client_id: int, expected_total: int):
+        '''
+        Envia un mensaje de EOF a la cola de salida correspondiente segun la configuracion del worker
+        '''
+        message = self.control_serializer.serialize(
+            message_protocol.common.ControlMessage(
+                sender_id=ID,
+                expected_total=expected_total,
+                processed_count=0
+            )
+        )
+        message = self.internal_packet_serializer.create_packet(
+            msg_type=message_protocol.common.MessageType.EOF,
+            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
+            payload=message
+        )
+        if CONFIGURATION == C_Q1:
+            self.output_queues[GATEWAY_QUEUE].publish(message)
+        if CONFIGURATION == C_Q5:
+            self.output_queues[FILTER_Q5_USD_QUEUE].publish(message)
+        if CONFIGURATION == C_USD:
+            self.output_queues[FILTER_Q1_QUEUE].publish(message)
+            self.output_queues[SUM_Q2_QUEUE].publish(message)
+            self.output_queues[FILTER_DATE_QUEUE].publish(message)
+        if CONFIGURATION == C_DATE:
+            for exchange in self.output_exchanges:
+                exchange.publish(message)
+            self.output_queues[FILTER_Q3_QUEUE].publish(message)
+            self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].publish(message)
+
     
     def _filter_transaction(self, transaction: Transaction, start_date=None, end_date=None):
         '''
@@ -281,7 +321,7 @@ class FilterWorker:
             return transaction.currency == "US Dollar"
         if CONFIGURATION == C_DATE:
             if start_date is None or end_date is None:
-                raise ValueError("start_date and end_date must be provided for DATE filter")
+                return True
             return transaction.is_in_date_range(start_date, end_date)
         raise ValueError(f"Invalid configuration: {CONFIGURATION}")
     
@@ -295,19 +335,22 @@ class FilterWorker:
         # Desempaquetamos el mensaje
         msg_type, client_id, payload = self.internal_packet_serializer.unpack_packet(message)
 
-        if client_id in self.closed_by_client:
-            # Si el cliente ya fue cerrado, no procesamos mas mensajes de ese cliente
-            logging.info(f"Received message for closed client {client_id} in filter_{CONFIGURATION} with id {ID}, ignoring")
-            return
+        with self.lock:
+            if client_id in self.closed_by_client:
+                # Si el cliente ya fue cerrado, no procesamos mas mensajes de ese cliente
+                logging.info(f"Received message for closed client {client_id} in filter_{CONFIGURATION} with id {ID}, ignoring")
+                return
 
         if msg_type == message_protocol.common.MessageType.DATA:
             # Deserializamos la transaccion
             transaction = self.transaction_serializer.deserialize(payload)
 
             # Aplicamos el filtro y forwrdeamos
-            if CONFIGURATION == C_DATE:
-                self._forward_transaction(transaction, client_id)
-            elif self._filter_transaction(transaction):
+            if CONFIGURATION == C_DATE or self._filter_transaction(transaction):
+                with self.lock:
+                    if client_id not in self.forwarded_by_client:
+                        self.forwarded_by_client[client_id] = 0
+                    self.forwarded_by_client[client_id] += 1
                 self._forward_transaction(transaction, client_id)
 
             # Actualizamos el conteo de procesados para este cliente
@@ -323,10 +366,12 @@ class FilterWorker:
             #     responder con su conteo de procesados
             # - Si no se es el lider, se le avisa al lider que se recibio un EOF para este cliente y 
             #     cuantos mensajes se esperan en total, para que el lider pueda solicitar el 
-            #     conteo de procesados a los demas workers
-            logging.info(f"Received EOF for client {client_id} in filter_{CONFIGURATION}")
-            with self.lock:
-                expected_total = self.processed_by_client.get(client_id, 0)
+            #     conteo de procesados a los demas workers            
+            control_message = self.control_serializer.deserialize(payload)
+            expected_total = control_message.expected_total
+
+            logging.info(f"Received EOF for client {client_id} in filter_{CONFIGURATION}. Expected total: {expected_total}.")
+            
             if self.is_leader:
                 self._request_control_message(client_id, expected_total)
             else:
@@ -351,7 +396,7 @@ class FilterWorker:
             # Si se recibe un mensaje indicando que se recibio un EOF para un cliente, se responde con una solicitud de conteo de procesados para ese cliente
             self._request_control_message(client_id, control_message.expected_total)
 
-        if msg_type == message_protocol.common.MessageType.PROCESSED_REQUEST:
+        elif msg_type == message_protocol.common.MessageType.PROCESSED_REQUEST:
             if self.is_leader:
                 logging.warning(f"Received PROCESSED_REQUEST control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am the leader, ignoring")
                 return
@@ -361,7 +406,7 @@ class FilterWorker:
                 processed_count = self.processed_by_client.get(client_id, 0)
             self._answer_control_message(client_id, control_message.expected_total, processed_count)
         
-        if msg_type == message_protocol.common.MessageType.PROCESSED_ANSWER:
+        elif msg_type == message_protocol.common.MessageType.PROCESSED_ANSWER:
             if not self.is_leader:
                 logging.warning(f"Received PROCESSED_ANSWER control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
                 return
@@ -387,21 +432,39 @@ class FilterWorker:
                     self.control_responses_by_client[client_id] = set()
                     self.all_processed_by_client[client_id] = 0
         
-        if msg_type == message_protocol.common.MessageType.FLUSH_ORDER:
+        elif msg_type == message_protocol.common.MessageType.FLUSH_ORDER:
             if self.is_leader:
                 logging.warning(f"Received FLUSH_ORDER control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am the leader, ignoring")
                 return
             # Si se recibe una orden de flush, se limpian los recursos asociados a ese cliente y se responde con un mensaje de ack
+            msgs_sent = 0
+            with self.lock:
+                msgs_sent = self.forwarded_by_client.get(client_id, 0)
             self._cleanup_client(client_id)
-            self._ack_flush_control_message(client_id)
+            self._ack_flush_control_message(client_id, msgs_sent)
             
         
-        if msg_type == message_protocol.common.MessageType.FLUSH_ACK:
+        elif msg_type == message_protocol.common.MessageType.FLUSH_ACK:
             if not self.is_leader:
                 logging.warning(f"Received FLUSH_ACK control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
                 return
-            # Si se recibe un ack de flush, se marca al cliente como cerrado
-            self._cleanup_client(client_id)
+            
+            if client_id not in self.flushed_acks_by_client:
+                self.flushed_acks_by_client[client_id] = set()            
+            self.flushed_acks_by_client[client_id].add(control_message.sender_id)
+            if client_id not in self.all_forwarded_by_client:
+                self.all_forwarded_by_client[client_id] = 0
+            self.all_forwarded_by_client[client_id] += control_message.processed_count
+
+            if len(self.flushed_acks_by_client[client_id]) == FILTER_AMOUNT - 1:
+                logging.info(f"Received all FLUSH_ACK control messages for client {client_id} in filter_{CONFIGURATION}, cleaning up client")
+                with self.lock:
+                    msgs_sent = self.all_forwarded_by_client[client_id] + self.forwarded_by_client.get(client_id, 0)
+                self._forward_eof(client_id, msgs_sent)
+                self._cleanup_client(client_id)
+
+        else:
+            logging.warning(f"Received unknown control message type: {msg_type} from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}")
 
     def process_data_messages(self, message, ack, nack):
         '''
