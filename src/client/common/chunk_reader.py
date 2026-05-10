@@ -1,7 +1,7 @@
 from collections.abc import Generator
 
 from common.directory_reader import DirectoryReader
-from common.file_chunk import FileChunk
+from common.message_protocol.external import FileChunk
 
 
 MESSAGE_TYPE_SIZE = 1

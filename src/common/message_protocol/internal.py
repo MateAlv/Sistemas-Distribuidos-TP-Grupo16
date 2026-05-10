@@ -1,6 +1,6 @@
 import json
 import struct
-from src.common.domain.transaction import Transaction
+from common.domain.transaction import Transaction
 
 
 class InternalProtocol:

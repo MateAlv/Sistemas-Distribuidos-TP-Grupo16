@@ -1,5 +1,5 @@
 import struct
-from src.common.domain.transaction import Transaction
+from common.domain.transaction import Transaction
 
 class TransactionSerializer: 
     FORMAT = "!10s Q Q Q Q d 3s 10s"

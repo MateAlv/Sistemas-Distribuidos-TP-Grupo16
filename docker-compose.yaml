@@ -44,10 +44,10 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - INPUT_QUEUE=results_queue
+    - CHUNKS_QUEUE=chunks_queue
     - MOM_HOST=rabbitmq
-    - OUTPUT_QUEUE=input_queue
     - PYTHONUNBUFFERED=1
+    - RESULTS_QUEUE=results_queue
     - SERVER_HOST=gateway
     - SERVER_PORT=5678
   join:

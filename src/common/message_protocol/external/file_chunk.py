@@ -1,6 +1,6 @@
 import socket
 
-from common.socket_utils import recv_exact
+from common.message_protocol.external.socket_utils import recv_exact
 
 
 MAX_UINT32 = 2**32 - 1
@@ -17,6 +17,7 @@ def _validate_uint(name: str, value: int, max_value: int) -> int:
 
 
 class FileChunkHeader:
+    # Wire layout: client_id(4) | payload_size(4) | path_size(4) | offset(8) | rel_path(N)
     HEADER_SIZE = 20
 
     def __init__(
@@ -48,7 +49,6 @@ class FileChunkHeader:
         return self.serialized_size_for_path(self.rel_path)
 
     def serialize(self) -> bytes:
-        # Wire layout: client_id(4) | payload_size(4) | path_size(4) | offset(8) | rel_path(N)
         return b"".join(
             [
                 self.client_id.to_bytes(4, byteorder="big"),

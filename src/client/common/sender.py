@@ -3,13 +3,10 @@ import socket
 import time
 from collections.abc import Generator
 
-from common.socket_utils import ensure_socket, recv_exact, sendall
+from common.message_protocol.external import ensure_socket, recv_exact, sendall
+from common.message_protocol.external.types import HANDSHAKE, FILE_CHUNK, FINISH, ACK
 
 
-H_ID_HANDSHAKE = 1
-H_ID_FILE_CHUNK = 2
-H_ID_FINISH = 3
-H_ID_ACK = 4
 RESULT_RECV_SIZE = 4096
 
 
@@ -60,7 +57,7 @@ class Sender:
     def send_handshake_request(self, client_id: int) -> None:
         ensure_socket(self._sock)
 
-        payload = _header_id_to_bytes(H_ID_HANDSHAKE)
+        payload = _header_id_to_bytes(HANDSHAKE)
         payload += int(client_id).to_bytes(4, byteorder="big")
         sendall(self._sock, payload)
         self._wait_ack("handshake")
@@ -71,13 +68,13 @@ class Sender:
         if not data:
             return
 
-        sendall(self._sock, _header_id_to_bytes(H_ID_FILE_CHUNK) + data)
+        sendall(self._sock, _header_id_to_bytes(FILE_CHUNK) + data)
         self._wait_ack("file chunk")
 
     def send_finished(self) -> None:
         ensure_socket(self._sock)
 
-        sendall(self._sock, _header_id_to_bytes(H_ID_FINISH))
+        sendall(self._sock, _header_id_to_bytes(FINISH))
         self._wait_ack("finish")
 
     def iter_result_lines(
@@ -117,7 +114,7 @@ class Sender:
         ensure_socket(self._sock)
 
         header = _header_id_from_bytes(recv_exact(self._sock, 1))
-        if header != H_ID_ACK:
+        if header != ACK:
             raise RuntimeError(f"invalid ACK for {operation}: received {header}")
         logging.debug("ack received for %s", operation)
 
