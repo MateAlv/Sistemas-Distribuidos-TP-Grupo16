@@ -2,34 +2,19 @@ import json
 import struct
 from src.common.domain.transaction import Transaction
 
-class TransactionSerializer: 
-    FORMAT = "!10s Q Q Q Q d 3s 10s"
-    SIZE = struct.calcsize(FORMAT)
-    
+
+class InternalProtocol:
+    HEADER_FORMAT = "!B 16s" 
+    HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+
     @classmethod
-    def serialize(cls, tx: Transaction) -> bytes:
-        return struct.pack(
-            cls.FORMAT,
-            tx.date.encode('utf-8'),
-            int(tx.from_bank),
-            int(tx.from_account),
-            int(tx.to_bank),
-            int(tx.to_account),
-            float(tx.amount),
-            tx.currency.encode('utf-8'),
-            tx.id_transaccion.encode('utf-8')
-        )
-    
-    classmethod
-    def deserialize(cls, data: bytes) -> Transaction:
-        vals = struct.unpack(cls.FORMAT, data)
-        return Transaction(
-            date=vals[0].decode('utf-8').strip('\x00'),
-            from_bank=vals[1],
-            from_account=vals[2],
-            to_bank=vals[3],
-            to_account=vals[4],
-            amount=vals[5],
-            currency=vals[6].decode('utf-8').strip('\x00'),
-            format=vals[7].decode('utf-8').strip('\x00')
-        )
+    def create_packet(cls, msg_type: int, client_id_bytes: bytes, payload: bytes) -> bytes:
+        header = struct.pack(cls.HEADER_FORMAT, msg_type, client_id_bytes)
+        return header + payload
+
+    @classmethod
+    def unpack_packet(cls, packet: bytes):
+        header_data = packet[:cls.HEADER_SIZE]
+        payload = packet[cls.HEADER_SIZE:]
+        msg_type, client_id = struct.unpack(cls.HEADER_FORMAT, header_data)
+        return msg_type, client_id, payload
