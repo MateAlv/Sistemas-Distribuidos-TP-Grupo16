@@ -84,9 +84,10 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - INPUT_QUEUE=results_queue
+    - MESSAGE_HANDLER_EXCHANGE=message_handler_exchange
+    - MESSAGE_HANDLER_PARTITIONS=1
     - MOM_HOST=rabbitmq
-    - OUTPUT_QUEUE=input_queue
+    - RESULTS_QUEUE=results_queue
     - PYTHONUNBUFFERED=1
     - SERVER_HOST=gateway
     - SERVER_PORT=5678

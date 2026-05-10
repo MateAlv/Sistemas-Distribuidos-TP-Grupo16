@@ -44,7 +44,8 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - CHUNKS_QUEUE=chunks_queue
+    - MESSAGE_HANDLER_EXCHANGE=message_handler_exchange
+    - MESSAGE_HANDLER_PARTITIONS=1
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - RESULTS_QUEUE=results_queue
