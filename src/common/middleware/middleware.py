@@ -63,3 +63,35 @@ class MessageMiddlewareQueue(MessageMiddleware):
     @abstractmethod
     def __init__(self, host, queue_name):
         pass
+
+
+class MessageMiddlewareRpcClient(MessageMiddleware):
+    @abstractmethod
+    def __init__(self, host, request_queue_name):
+        pass
+
+    @abstractmethod
+    def connect(self):
+        pass
+
+    @abstractmethod
+    def call(self, message, timeout=30):
+        pass
+
+
+class MessageMiddlewareRpcServer(MessageMiddleware):
+    @abstractmethod
+    def __init__(self, host, request_queue_name):
+        pass
+
+    @abstractmethod
+    def connect(self):
+        pass
+
+    @abstractmethod
+    def start(self, on_request_callback):
+        pass
+
+    @abstractmethod
+    def stop(self):
+        pass
