@@ -1,6 +1,7 @@
 import json
 import struct
-from common.domain.transaction import Transaction
+from common.message_protocol.common.message_type import MessageType
+from src.common.domain.transaction import Transaction
 
 
 class InternalProtocol:
@@ -8,7 +9,7 @@ class InternalProtocol:
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
     @classmethod
-    def create_packet(cls, msg_type: int, client_id_bytes: bytes, payload: bytes) -> bytes:
+    def create_packet(cls, msg_type: MessageType, client_id_bytes: bytes, payload: bytes) -> bytes:
         header = struct.pack(cls.HEADER_FORMAT, msg_type, client_id_bytes)
         return header + payload
 
