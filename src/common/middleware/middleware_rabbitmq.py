@@ -1,5 +1,6 @@
 import pika
 import uuid
+import time
 import threading
 from .middleware import (
     MessageMiddlewareQueue, 
@@ -213,13 +214,11 @@ class MessageMiddlewareRpcClientRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcClie
         reply_queue = self._channel.queue_declare(queue='', exclusive=True).method.queue
         
         response = None
-        response_received = threading.Event()
         
         def on_response(ch, method, props, body):
             nonlocal response
             if props.correlation_id == correlation_id:
                 response = body
-                response_received.set()
                 ch.basic_ack(delivery_tag=method.delivery_tag)
         
         self._channel.basic_consume(queue=reply_queue, on_message_callback=on_response, auto_ack=False)
@@ -235,10 +234,14 @@ class MessageMiddlewareRpcClientRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcClie
             )
         )
         
-        if response_received.wait(timeout=timeout):
-            return response
-        else:
-            raise MessageMiddlewareMessageError("RPC call timed out")
+        deadline = time.monotonic() + timeout
+        while response is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise MessageMiddlewareMessageError("RPC call timed out")
+            self._connection.process_data_events(time_limit=min(1, remaining))
+            
+        return response
 
 
 class MessageMiddlewareRpcServerRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcServer):

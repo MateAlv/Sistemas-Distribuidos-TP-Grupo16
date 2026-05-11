@@ -65,7 +65,7 @@ class MessageMiddlewareQueue(MessageMiddleware):
         pass
 
 
-class MessageMiddlewareRpcClient(MessageMiddleware):
+class MessageMiddlewareRpcClient(ABC):
     @abstractmethod
     def __init__(self, host, request_queue_name):
         pass
@@ -79,7 +79,7 @@ class MessageMiddlewareRpcClient(MessageMiddleware):
         pass
 
 
-class MessageMiddlewareRpcServer(MessageMiddleware):
+class MessageMiddlewareRpcServer(ABC):
     @abstractmethod
     def __init__(self, host, request_queue_name):
         pass

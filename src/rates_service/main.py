@@ -1,8 +1,8 @@
 import logging
 import json
 import os
-from src.common.rates.rates_manager import RatesManager
-from src.common.middleware.middleware_rabbitmq import MessageMiddlewareRpcServerRabbitMQ
+from src.common.middleware import MessageMiddlewareRpcServerRabbitMQ
+from src.common.rates import RatesManager
 
 REQUEST_QUEUE = "rates_requests"
 

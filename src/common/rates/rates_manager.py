@@ -10,7 +10,7 @@ class RatesManager:
     def __init__(self, cache_path: str, base_url=BASE_URL):
         self.cache_path = cache_path
         self._rates = {}
-        self._base_url = base_url,
+        self._base_url = base_url
 
     def fetch_period(self, start_date: str, end_date: str, max_retries=MAX_RETRIES) -> bool:
         url = f"{self._base_url}/{start_date}..{end_date}?base=USD"
