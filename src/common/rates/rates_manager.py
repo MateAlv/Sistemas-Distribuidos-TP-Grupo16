@@ -3,27 +3,32 @@ import json
 import os
 import logging
 
+BASE_URL = "https://api.frankfurter.app"
+MAX_RETRIES = 3
+
 class RatesManager:
-    def __init__(self, cache_path: str):
+    def __init__(self, cache_path: str, base_url=BASE_URL):
         self.cache_path = cache_path
         self._rates = {}
-        self._base_url = "https://api.frankfurter.app"
+        self._base_url = base_url,
 
-    def fetch_period(self, start_date: str, end_date: str) -> bool:
+    def fetch_period(self, start_date: str, end_date: str, max_retries=MAX_RETRIES) -> bool:
         url = f"{self._base_url}/{start_date}..{end_date}?base=USD"
         logging.info(f"fetch_rates | url={url} | result=requesting")
-        
-        try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            
-            self._rates = data.get('rates', {})
-            logging.info(f"fetch_rates | result=success | days={len(self._rates)}")
-            return True
-        except Exception as e:
-            logging.error(f"fetch_rates | result=error | error={e}")
-            return False
+        for attempt in range(1, max_retries + 1):
+            try:
+                logging.info("fetch_rates | url=%s | atempt=%d", url, attempt)
+                response = requests.get(url, timeout=10)
+                response.raise_for_status()
+                self._rates = response.json().get("rates", {})
+                logging.info("fetch_rates | result=success | entries=%d", len(self._rates))
+                return True
+            except Exception as e:
+                logging.error("fetch_rates | attempt=%d | error=%s", attempt, e)
+        logging.error("fetch_rates | result=error | max_retries=%d", max_retries)
+        return False
+
+
 
     def load_cache(self) -> bool:
         if not os.path.exists(self.cache_path):
@@ -40,10 +45,12 @@ class RatesManager:
             return False
 
     def save_cache(self) -> None:
+        directory = os.path.dirname(self.cache_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
         try:
-            os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
             with open(self.cache_path, 'w') as f:
-                json.dump(self._rates, f, indent=2)
+                json.dump(self._rates, f)
             logging.info(f"save_cache | path={self.cache_path} | result=success")
         except Exception as e:
             logging.error(f"save_cache | result=error | error={e}")
@@ -65,3 +72,6 @@ class RatesManager:
     @property
     def rates(self) -> dict:
         return self._rates
+
+    def load_from_payload(self, payload: bytes) -> None:
+        self._rates = json.loads(payload.decode('utf-8'))
