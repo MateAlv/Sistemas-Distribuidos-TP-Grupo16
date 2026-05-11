@@ -8,6 +8,7 @@ from file_ingestor import FileIngestor, FileIngestorConfig
 DEFAULT_ID = 0
 DEFAULT_MOM_HOST = "rabbitmq"
 DEFAULT_FILE_INGESTOR_EXCHANGE = "file_ingestor_exchange"
+DEFAULT_FILE_INGESTOR_QUEUE_PREFIX = "file_ingestor"
 DEFAULT_LOGGING_LEVEL = "INFO"
 
 
@@ -38,6 +39,7 @@ def load_config() -> FileIngestorConfig:
             "FILE_INGESTOR_EXCHANGE",
             DEFAULT_FILE_INGESTOR_EXCHANGE,
         ),
+        queue_name=file_ingestor_queue_name(ingestor_id),
         logging_level=os.getenv("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
     )
 
@@ -59,6 +61,14 @@ def get_int(name: str, default: int) -> int:
         return int(value)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer") from exc
+
+
+def file_ingestor_queue_name(ingestor_id: int) -> str:
+    prefix = os.getenv(
+        "FILE_INGESTOR_QUEUE_PREFIX",
+        DEFAULT_FILE_INGESTOR_QUEUE_PREFIX,
+    )
+    return f"{prefix}_{ingestor_id}"
 
 
 if __name__ == "__main__":

@@ -27,7 +27,6 @@ class _RabbitMQBase:
 
     def __enter__(self):
         return self
-    
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
         return False
@@ -37,7 +36,6 @@ class _RabbitMQBase:
         nack = lambda: ch.is_open and ch.basic_nack(delivery_tag=method.delivery_tag)
         self._user_callback(body, ack, nack)
 
-    
     def start_consuming(self, on_message_callback):
         try:
             self._user_callback = on_message_callback
@@ -101,11 +99,21 @@ class MessageMiddlewareQueueRabbitMQ(_RabbitMQBase, MessageMiddlewareQueue):
 
         
 class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange):
-    
-    def __init__(self, host, exchange_name, routing_keys, exchange_type="direct"):
+
+    def __init__(
+        self,
+        host,
+        exchange_name,
+        routing_keys,
+        exchange_type="direct",
+        queue_name=None,
+        exclusive=True,
+    ):
         super().__init__(host)
         self._exchange_name = exchange_name
         self._exchange_type = exchange_type
+        self._queue_name = queue_name
+        self._exclusive = exclusive
         self._channel.exchange_declare(
             exchange=exchange_name,
             exchange_type=exchange_type,
@@ -154,10 +162,15 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
             raise MessageMiddlewareMessageError(e)
 
     def _init_queue(self):
-        if self._queue_name: 
-            return
-        queue_result = self._channel.queue_declare(queue='', exclusive=True)
-        self._queue_name = queue_result.method.queue
+        if self._queue_name:
+            self._channel.queue_declare(
+                queue=self._queue_name,
+                durable=not self._exclusive,
+                exclusive=self._exclusive,
+            )
+        else:
+            queue_result = self._channel.queue_declare(queue='', exclusive=True)
+            self._queue_name = queue_result.method.queue
 
         if self._exchange_type == 'fanout':
             self._channel.queue_bind(
@@ -174,6 +187,3 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
                     exchange=self._exchange_name,
                     routing_key=key
                 )
-
-
-    
