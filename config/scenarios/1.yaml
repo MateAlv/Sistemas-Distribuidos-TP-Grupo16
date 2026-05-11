@@ -44,9 +44,9 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - INPUT_QUEUE=results_queue
+    - FILE_INGESTOR_EXCHANGE=file_ingestor_exchange
+    - FILE_INGESTOR_PARTITIONS=1
     - MOM_HOST=rabbitmq
-    - OUTPUT_QUEUE=input_queue
     - PYTHONUNBUFFERED=1
     - SERVER_HOST=gateway
     - SERVER_PORT=5678

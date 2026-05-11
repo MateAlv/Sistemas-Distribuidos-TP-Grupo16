@@ -4,7 +4,7 @@ import threading
 
 from common import message_protocol
 from common.domain.transaction import Transaction
-from common.middleware import middleware
+from common import middleware
 from common.constants import *
 
 # Id correspondiente a la entidad
@@ -129,6 +129,8 @@ class FilterWorker:
         self.all_processed_by_client = {}
         self.all_forwarded_by_client = {}
         self.flushed_acks_by_client = {}
+        self.first_data_logged_by_client = set()
+        self.deserialized_by_client = {}
 
     def _pass_eof_control_message(
             self, client_id, expected_total
@@ -149,7 +151,7 @@ class FilterWorker:
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=message
         )
-        self.control_output.publish(message)
+        self.control_output.send(message)
 
     def _answer_control_message(
             self, client_id, expected_total, processed_count
@@ -169,7 +171,7 @@ class FilterWorker:
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=message
         )
-        self.control_output.publish(message)
+        self.control_output.send(message)
 
     def _request_control_message(self, client_id, expected_total):
         '''
@@ -187,7 +189,7 @@ class FilterWorker:
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=message
         )
-        self.control_output.publish(message)
+        self.control_output.send(message)
 
     def _flush_control_message(self, client_id):
         '''
@@ -204,9 +206,9 @@ class FilterWorker:
         message = self.internal_packet_serializer.create_packet(
             msg_type=message_protocol.common.MessageType.FLUSH_ORDER,
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
-            payload=b''
+            payload=message
         )
-        self.control_output.publish(message)
+        self.control_output.send(message)
 
     def _ack_flush_control_message(self, client_id, msgs_sent):
         '''
@@ -223,9 +225,9 @@ class FilterWorker:
         message = self.internal_packet_serializer.create_packet(
             msg_type=message_protocol.common.MessageType.FLUSH_ACK,
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
-            payload=b''
+            payload=message
         )
-        self.control_output.publish(message)    
+        self.control_output.send(message)
 
     def _cleanup_client(self, client_id):
         '''
@@ -258,13 +260,13 @@ class FilterWorker:
             payload=payload
         )
         if CONFIGURATION == C_Q1:
-            self.output_queues[GATEWAY_QUEUE].publish(message)
+            self.output_queues[GATEWAY_QUEUE].send(message)
         if CONFIGURATION == C_Q5:
-            self.output_queues[FILTER_Q5_USD_QUEUE].publish(message)
+            self.output_queues[FILTER_Q5_USD_QUEUE].send(message)
         if CONFIGURATION == C_USD:
-            self.output_queues[FILTER_Q1_QUEUE].publish(message)
-            self.output_queues[SUM_Q2_QUEUE].publish(message)
-            self.output_queues[FILTER_DATE_QUEUE].publish(message)
+            self.output_queues[FILTER_Q1_QUEUE].send(message)
+            self.output_queues[SUM_Q2_QUEUE].send(message)
+            self.output_queues[FILTER_DATE_QUEUE].send(message)
         if CONFIGURATION == C_DATE:
             # Si la transaccion esta entre las fechas 2022-09-06 y 2022-09-15, va al sum de Q3 por sharding
             # Si la transaccion esta entre las fechas 2022-09-01 y 2022-09-05, va al filtro de Q3
@@ -272,10 +274,10 @@ class FilterWorker:
             if self._filter_transaction(transaction, start_date="2022-09-06", end_date="2022-09-15"):
                 # Shardeo por el id de la transaccion
                 shard = transaction.hash_by_payment_format(SUM_Q3_AMOUNT)
-                self.output_exchanges[shard].publish(message)
+                self.output_exchanges[shard].send(message)
             if self._filter_transaction(transaction, start_date="2022-09-01", end_date="2022-09-05"):
-                self.output_queues[FILTER_Q3_QUEUE].publish(message)
-                self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].publish(message)
+                self.output_queues[FILTER_Q3_QUEUE].send(message)
+                self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(message)
 
     def _forward_eof(self, client_id: int, expected_total: int):
         '''
@@ -294,18 +296,18 @@ class FilterWorker:
             payload=message
         )
         if CONFIGURATION == C_Q1:
-            self.output_queues[GATEWAY_QUEUE].publish(message)
+            self.output_queues[GATEWAY_QUEUE].send(message)
         if CONFIGURATION == C_Q5:
-            self.output_queues[FILTER_Q5_USD_QUEUE].publish(message)
+            self.output_queues[FILTER_Q5_USD_QUEUE].send(message)
         if CONFIGURATION == C_USD:
-            self.output_queues[FILTER_Q1_QUEUE].publish(message)
-            self.output_queues[SUM_Q2_QUEUE].publish(message)
-            self.output_queues[FILTER_DATE_QUEUE].publish(message)
+            self.output_queues[FILTER_Q1_QUEUE].send(message)
+            self.output_queues[SUM_Q2_QUEUE].send(message)
+            self.output_queues[FILTER_DATE_QUEUE].send(message)
         if CONFIGURATION == C_DATE:
             for exchange in self.output_exchanges:
-                exchange.publish(message)
-            self.output_queues[FILTER_Q3_QUEUE].publish(message)
-            self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].publish(message)
+                exchange.send(message)
+            self.output_queues[FILTER_Q3_QUEUE].send(message)
+            self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(message)
 
     
     def _filter_transaction(self, transaction: Transaction, start_date=None, end_date=None):
@@ -342,8 +344,58 @@ class FilterWorker:
                 return
 
         if msg_type == message_protocol.common.MessageType.DATA:
-            # Deserializamos la transaccion
+            with self.lock:
+                if client_id not in self.first_data_logged_by_client:
+                    self.first_data_logged_by_client.add(client_id)
+                    logging.info(
+                        "filter_first_chunk_received | filter=%s | id=%s | "
+                        "client_id=%s | message_bytes=%s | payload_bytes=%s",
+                        CONFIGURATION,
+                        ID,
+                        client_id,
+                        len(message),
+                        len(payload),
+                    )
+
+            # Deserializamos la transaccion.
             transaction = self.transaction_serializer.deserialize(payload)
+
+            with self.lock:
+                if client_id not in self.deserialized_by_client:
+                    self.deserialized_by_client[client_id] = 0
+                self.deserialized_by_client[client_id] += 1
+                deserialized_count = self.deserialized_by_client[client_id]
+
+            if deserialized_count <= 3:
+                logging.info(
+                    "filter_transaction_deserialized | filter=%s | id=%s | "
+                    "client_id=%s | transaction_number=%s | date=%s | "
+                    "from_bank=%s | from_account=%s | to_bank=%s | "
+                    "to_account=%s | amount=%s | currency=%s | format=%s",
+                    CONFIGURATION,
+                    ID,
+                    client_id,
+                    deserialized_count,
+                    transaction.date,
+                    transaction.from_bank,
+                    transaction.from_account,
+                    transaction.to_bank,
+                    transaction.to_account,
+                    transaction.amount,
+                    transaction.currency,
+                    transaction.format,
+                )
+
+            if deserialized_count == 3:
+                logging.info(
+                    "==================== Forward pass successful - Mate | "
+                    "filter=%s | id=%s | client_id=%s | "
+                    "transactions_deserialized=%s ====================",
+                    CONFIGURATION,
+                    ID,
+                    client_id,
+                    deserialized_count,
+                )
 
             # Aplicamos el filtro y forwrdeamos
             if CONFIGURATION == C_DATE or self._filter_transaction(transaction):
@@ -372,7 +424,12 @@ class FilterWorker:
 
             logging.info(f"Received EOF for client {client_id} in filter_{CONFIGURATION}. Expected total: {expected_total}.")
             
-            if self.is_leader:
+            if self.is_leader and FILTER_AMOUNT == 1:
+                with self.lock:
+                    msgs_sent = self.forwarded_by_client.get(client_id, 0)
+                self._forward_eof(client_id, msgs_sent)
+                self._cleanup_client(client_id)
+            elif self.is_leader:
                 self._request_control_message(client_id, expected_total)
             else:
                 self._pass_eof_control_message(client_id, expected_total)
@@ -495,7 +552,7 @@ class FilterWorker:
         # Se inicia un thread para procesar los mensajes de control
         self.control_thread = threading.Thread(
             target=self.control_input.start_consuming,
-            args=(self.process_control_messages)
+            args=(self.process_control_messages,)
         )
         self.control_thread.start()
 

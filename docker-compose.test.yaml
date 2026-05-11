@@ -1,0 +1,117 @@
+services:
+  rabbitmq:
+    build:
+      context: ./rabbitmq
+      dockerfile: Dockerfile
+    environment:
+    - RABBITMQ_LOG_LEVELS=error
+    healthcheck:
+      interval: 5s
+      retries: 10
+      start_period: 20s
+      test: rabbitmq-diagnostics check_port_connectivity
+      timeout: 3s
+
+  gateway:
+    build:
+      context: ./src/
+      dockerfile: gateway/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - FILE_INGESTOR_EXCHANGE=file_ingestor_exchange
+    - FILE_INGESTOR_PARTITIONS=1
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SERVER_HOST=gateway
+    - SERVER_PORT=5678
+
+  file_ingestor_0:
+    build:
+      context: ./src/
+      dockerfile: workers/file_ingestor/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - FILE_INGESTOR_EXCHANGE=file_ingestor_exchange
+    - FILE_INGESTOR_QUEUE_PREFIX=file_ingestor
+    - ID=0
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - TRANSACTION_OUTPUT_QUEUE=filter_usd_queue
+
+  filter_usd_0:
+    build:
+      context: ./src/
+      dockerfile: workers/filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - CONFIGURATION=USD
+    - FILTER_AMOUNT=1
+    - FILTER_DATE_QUEUE=filter_date_queue
+    - FILTER_PREFIX=filter
+    - FILTER_Q1_QUEUE=filter_q1_queue
+    - FILTER_Q3_QUEUE=filter_q3_queue
+    - FILTER_Q5_USD_QUEUE=filter_q5_usd_queue
+    - GATEWAY_QUEUE=gateway_results_queue
+    - ID=0
+    - INPUT_QUEUE=filter_usd_queue
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
+    - SUM_PREFIX=sum_q3
+    - SUM_Q2_QUEUE=sum_q2_queue
+    - SUM_Q3_AMOUNT=1
+
+  filter_q1_0:
+    build:
+      context: ./src/
+      dockerfile: workers/filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - CONFIGURATION=Q1
+    - FILTER_AMOUNT=1
+    - FILTER_DATE_QUEUE=filter_date_queue
+    - FILTER_PREFIX=filter
+    - FILTER_Q1_QUEUE=filter_q1_queue
+    - FILTER_Q3_QUEUE=filter_q3_queue
+    - FILTER_Q5_USD_QUEUE=filter_q5_usd_queue
+    - GATEWAY_QUEUE=gateway_results_queue
+    - ID=0
+    - INPUT_QUEUE=filter_q1_queue
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
+    - SUM_PREFIX=sum_q3
+    - SUM_Q2_QUEUE=sum_q2_queue
+    - SUM_Q3_AMOUNT=1
+
+  client_0:
+    build:
+      context: ./src/
+      dockerfile: client/Dockerfile
+    depends_on:
+    - gateway
+    environment:
+    - ACCOUNTS_FILE=LI-Mini_accounts.csv
+    - CHUNK_MAX_BYTES=65536
+    - CLIENT_ID=0
+    - CONNECT_TIMEOUT_SECONDS=30
+    - DATA_DIR=/data
+    - IO_TIMEOUT_SECONDS=3600
+    - LOGGING_LEVEL=INFO
+    - PYTHONUNBUFFERED=1
+    - RESULT_LINE_MAX_BYTES=1048576
+    - SERVER_HOST=gateway
+    - SERVER_PORT=5678
+    - TRANSACTIONS_FILE=LI-Mini_Trans.csv
+    volumes:
+    - ./data/datasets/client-1/LI-Mini:/data:ro
