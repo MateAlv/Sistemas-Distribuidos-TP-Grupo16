@@ -2,6 +2,8 @@ import json
 import struct
 from common.message_protocol.common.message_type import MessageType
 from common.domain.transaction import Transaction
+from common.message_protocol.control_message_serializer import ControlMessageSerializer
+from common.message_protocol.transaction_serializer import TransactionSerializer
 
 
 class InternalProtocol:
