@@ -1,7 +1,7 @@
 import logging
 import signal
 
-from workers.filter.filters import FilterWorker
+from filters import FilterWorker
 
 def main():
     logging.basicConfig(level=logging.INFO)
