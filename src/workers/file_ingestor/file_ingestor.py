@@ -16,7 +16,23 @@ class FileIngestorConfig:
     mom_host: str
     file_ingestor_exchange: str
     queue_name: str
+    max_line_bytes: int
     logging_level: str
+
+
+@dataclass(frozen=True)
+class FileKey:
+    client_id: int
+    rel_path: str
+
+
+@dataclass
+class FileState:
+    pending: bytes = b""
+    expected_offset: int = 0
+    chunks_received: int = 0
+    lines_received: int = 0
+    bytes_received: int = 0
 
 
 class FileIngestor:
@@ -26,6 +42,7 @@ class FileIngestor:
         self._consumer: MessageMiddlewareExchangeRabbitMQ | None = None
         self._chunks_received = 0
         self._eofs_received = 0
+        self._files: dict[FileKey, FileState] = {}
 
     def start(self) -> None:
         routing_key = file_ingestor_routing_key(self._config.id)
@@ -83,25 +100,90 @@ class FileIngestor:
             nack()
 
     def _handle_chunk(self, chunk: FileChunk) -> None:
+        key = FileKey(client_id=chunk.client_id(), rel_path=chunk.path())
+        state = self._files.setdefault(key, FileState())
+
+        if chunk.offset() != state.expected_offset:
+            raise ValueError(
+                "unexpected chunk offset "
+                f"(client_id={key.client_id}, path={key.rel_path}, "
+                f"expected={state.expected_offset}, received={chunk.offset()})"
+            )
+
+        complete_lines, state.pending = _split_complete_lines(
+            state.pending + chunk.payload(),
+            self._config.max_line_bytes,
+        )
+
+        for line in complete_lines:
+            self._handle_line(key, state, line)
+
+        state.expected_offset += chunk.payload_size()
+        state.bytes_received += chunk.payload_size()
+        state.chunks_received += 1
         self._chunks_received += 1
+
         logging.info(
             "file_ingestor_chunk | id=%s | client_id=%s | path=%s | offset=%s | "
-            "payload_bytes=%s | chunks_received=%s",
+            "payload_bytes=%s | complete_lines=%s | pending_bytes=%s | "
+            "file_chunks=%s | chunks_received=%s",
             self._config.id,
-            chunk.client_id(),
-            chunk.path(),
+            key.client_id,
+            key.rel_path,
             chunk.offset(),
             chunk.payload_size(),
+            len(complete_lines),
+            len(state.pending),
+            state.chunks_received,
             self._chunks_received,
         )
 
     def _handle_eof(self, client_id: int) -> None:
+        keys = [key for key in self._files if key.client_id == client_id]
+
+        for key in keys:
+            state = self._files[key]
+            if state.pending:
+                self._handle_line(key, state, state.pending)
+                state.pending = b""
+
+            logging.info(
+                "file_ingestor_file_finished | id=%s | client_id=%s | path=%s | "
+                "chunks=%s | lines=%s | bytes=%s",
+                self._config.id,
+                key.client_id,
+                key.rel_path,
+                state.chunks_received,
+                state.lines_received,
+                state.bytes_received,
+            )
+            del self._files[key]
+
         self._eofs_received += 1
         logging.info(
-            "file_ingestor_eof | id=%s | client_id=%s | eofs_received=%s",
+            "file_ingestor_eof | id=%s | client_id=%s | files_finished=%s | "
+            "eofs_received=%s",
             self._config.id,
             client_id,
+            len(keys),
             self._eofs_received,
+        )
+
+    def _handle_line(self, key: FileKey, state: FileState, line: bytes) -> None:
+        clean_line = line[:-1] if line.endswith(b"\r") else line
+        if not clean_line:
+            return
+
+        _validate_line_size(clean_line, self._config.max_line_bytes)
+        state.lines_received += 1
+        logging.debug(
+            "file_ingestor_line | id=%s | client_id=%s | path=%s | line_bytes=%s | "
+            "file_lines=%s",
+            self._config.id,
+            key.client_id,
+            key.rel_path,
+            len(clean_line),
+            state.lines_received,
         )
 
 
@@ -109,3 +191,15 @@ def _deserialize_eof(payload: bytes) -> int:
     if len(payload) != 4:
         raise ValueError(f"invalid EOF payload size: {len(payload)}")
     return int.from_bytes(payload, byteorder="big")
+
+
+def _split_complete_lines(data: bytes, max_line_bytes: int) -> tuple[list[bytes], bytes]:
+    lines = data.split(b"\n")
+    pending = lines[-1]
+    _validate_line_size(pending, max_line_bytes)
+    return lines[:-1], pending
+
+
+def _validate_line_size(line: bytes, max_line_bytes: int) -> None:
+    if len(line) > max_line_bytes:
+        raise ValueError(f"line exceeded max_line_bytes={max_line_bytes}")

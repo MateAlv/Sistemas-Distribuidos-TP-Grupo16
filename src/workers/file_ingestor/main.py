@@ -9,6 +9,7 @@ DEFAULT_ID = 0
 DEFAULT_MOM_HOST = "rabbitmq"
 DEFAULT_FILE_INGESTOR_EXCHANGE = "file_ingestor_exchange"
 DEFAULT_FILE_INGESTOR_QUEUE_PREFIX = "file_ingestor"
+DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024
 DEFAULT_LOGGING_LEVEL = "INFO"
 
 
@@ -32,6 +33,10 @@ def load_config() -> FileIngestorConfig:
     if ingestor_id < 0:
         raise ValueError("ID must be greater than or equal to 0")
 
+    max_line_bytes = get_int("MAX_LINE_BYTES", DEFAULT_MAX_LINE_BYTES)
+    if max_line_bytes <= 0:
+        raise ValueError("MAX_LINE_BYTES must be greater than 0")
+
     return FileIngestorConfig(
         id=ingestor_id,
         mom_host=os.getenv("MOM_HOST", DEFAULT_MOM_HOST),
@@ -40,6 +45,7 @@ def load_config() -> FileIngestorConfig:
             DEFAULT_FILE_INGESTOR_EXCHANGE,
         ),
         queue_name=file_ingestor_queue_name(ingestor_id),
+        max_line_bytes=max_line_bytes,
         logging_level=os.getenv("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
     )
 
