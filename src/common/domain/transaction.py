@@ -33,3 +33,15 @@ class Transaction:
     def is_in_date_range(self, start_date, end_date):
         return start_date <= self.date <= end_date
     
+    def get_payment_format(self):
+        return self.format
+    
+    def get_currency(self):
+        return self.currency
+    
+    def hash_by_payment_format(self, num_buckets):
+        h = 0
+        for c in self.format:
+            h = (h * 31 + ord(c))
+        return h % num_buckets
+    
