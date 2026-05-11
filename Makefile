@@ -1,6 +1,9 @@
 SHELL := /bin/bash
 PWD := $(shell pwd)
 COMPOSE_FILE := docker-compose.yaml
+TEST_COMPOSE_FILE := docker-compose.test.yaml
+TEST_PROJECT := mla-forward-pass-test
+TEST_SUCCESS_PATTERN := Forward pass successful - Mate | filter=Q1
 SCENARIOS_DIR := config/scenarios
 
 up:
@@ -19,7 +22,14 @@ logs:
 .PHONY: logs
 
 test:
-	docker compose -f $(COMPOSE_FILE) config --quiet
+	bash -lc 'set -euo pipefail; \
+		cleanup() { docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) down --volumes --remove-orphans >/dev/null; }; \
+		trap cleanup EXIT; \
+		cleanup; \
+		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) config --quiet; \
+		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) up --build --remove-orphans --detach; \
+		timeout 120s sh -c '\''docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) logs --follow 2>&1 | tee /tmp/$(TEST_PROJECT).log /dev/stderr | grep -m1 --quiet "$(TEST_SUCCESS_PATTERN)"'\''; \
+		echo "forward_pass_test_success"'
 .PHONY: test
 
 switch:
