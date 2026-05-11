@@ -9,6 +9,7 @@ DEFAULT_ID = 0
 DEFAULT_MOM_HOST = "rabbitmq"
 DEFAULT_FILE_INGESTOR_EXCHANGE = "file_ingestor_exchange"
 DEFAULT_FILE_INGESTOR_QUEUE_PREFIX = "file_ingestor"
+DEFAULT_TRANSACTION_OUTPUT_QUEUE = "filter_usd_queue"
 DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024
 DEFAULT_LOGGING_LEVEL = "INFO"
 
@@ -45,6 +46,10 @@ def load_config() -> FileIngestorConfig:
             DEFAULT_FILE_INGESTOR_EXCHANGE,
         ),
         queue_name=file_ingestor_queue_name(ingestor_id),
+        transaction_output_queue=os.getenv(
+            "TRANSACTION_OUTPUT_QUEUE",
+            DEFAULT_TRANSACTION_OUTPUT_QUEUE,
+        ),
         max_line_bytes=max_line_bytes,
         logging_level=os.getenv("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
     )

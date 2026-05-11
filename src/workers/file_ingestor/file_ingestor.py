@@ -1,6 +1,8 @@
+import csv
 import logging
 from dataclasses import dataclass
 
+from common.domain.transaction import Transaction
 from common.message_protocol.external import FileChunk
 from common.message_protocol.external.types import (
     FILE_TYPE_ACCOUNTS,
@@ -10,6 +12,11 @@ from common.message_protocol.external.types import (
     file_type_name,
     file_ingestor_routing_key,
 )
+from common.message_protocol.common import ControlMessage, MessageType
+from common.message_protocol.control_message_serializer import ControlMessageSerializer
+from common.message_protocol.internal import InternalProtocol
+from common.message_protocol.transaction_serializer import TransactionSerializer
+from common.middleware import MessageMiddlewareQueueRabbitMQ
 from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
 
 
@@ -19,6 +26,7 @@ class FileIngestorConfig:
     mom_host: str
     file_ingestor_exchange: str
     queue_name: str
+    transaction_output_queue: str
     max_line_bytes: int
     logging_level: str
 
@@ -33,9 +41,11 @@ class FileKey:
 class FileState:
     pending: bytes = b""
     file_type: int | None = None
+    header: tuple[str, ...] | None = None
     expected_offset: int = 0
     chunks_received: int = 0
     lines_received: int = 0
+    transactions_sent: int = 0
     bytes_received: int = 0
 
 
@@ -47,6 +57,10 @@ class FileIngestor:
         self._chunks_received = 0
         self._eofs_received = 0
         self._files: dict[FileKey, FileState] = {}
+        self._transaction_output: MessageMiddlewareQueueRabbitMQ | None = None
+        self._transaction_serializer = TransactionSerializer()
+        self._control_serializer = ControlMessageSerializer()
+        self._internal_protocol = InternalProtocol()
 
     def start(self) -> None:
         routing_key = file_ingestor_routing_key(self._config.id)
@@ -75,6 +89,8 @@ class FileIngestor:
         logging.info("file_ingestor_stop | id=%s", self._config.id)
         if self._consumer is not None:
             self._consumer.stop_consuming()
+        if self._transaction_output is not None:
+            self._transaction_output.close()
 
     def _on_message(self, message: bytes, ack, nack) -> None:
         try:
@@ -154,6 +170,8 @@ class FileIngestor:
 
     def _handle_eof(self, client_id: int) -> None:
         keys = [key for key in self._files if key.client_id == client_id]
+        transactions_sent = 0
+        saw_transactions_file = False
 
         for key in keys:
             state = self._files[key]
@@ -161,26 +179,36 @@ class FileIngestor:
                 self._handle_line(key, state, state.pending)
                 state.pending = b""
 
+            if state.file_type == FILE_TYPE_TRANSACTIONS:
+                saw_transactions_file = True
+                transactions_sent += state.transactions_sent
+
             logging.info(
                 "file_ingestor_file_finished | id=%s | client_id=%s | file_type=%s | "
-                "path=%s | chunks=%s | lines=%s | bytes=%s",
+                "path=%s | chunks=%s | lines=%s | transactions_sent=%s | bytes=%s",
                 self._config.id,
                 key.client_id,
                 file_type_name(state.file_type),
                 key.rel_path,
                 state.chunks_received,
                 state.lines_received,
+                state.transactions_sent,
                 state.bytes_received,
             )
             del self._files[key]
 
+        if saw_transactions_file:
+            self._send_eof(client_id, transactions_sent)
+
         self._eofs_received += 1
         logging.info(
             "file_ingestor_eof | id=%s | client_id=%s | files_finished=%s | "
-            "eofs_received=%s",
+            "transactions_file=%s | transactions_sent=%s | eofs_received=%s",
             self._config.id,
             client_id,
             len(keys),
+            saw_transactions_file,
+            transactions_sent,
             self._eofs_received,
         )
 
@@ -192,7 +220,11 @@ class FileIngestor:
         _validate_line_size(clean_line, self._config.max_line_bytes)
         state.lines_received += 1
 
-        if state.file_type in (FILE_TYPE_TRANSACTIONS, FILE_TYPE_ACCOUNTS):
+        if state.file_type == FILE_TYPE_TRANSACTIONS:
+            self._handle_transaction_line(key, state, clean_line)
+            return
+
+        if state.file_type == FILE_TYPE_ACCOUNTS:
             logging.debug(
                 "file_ingestor_line | id=%s | client_id=%s | file_type=%s | "
                 "path=%s | line_bytes=%s | file_lines=%s",
@@ -211,6 +243,62 @@ class FileIngestor:
             f"file_type={state.file_type})"
         )
 
+    def _handle_transaction_line(
+        self,
+        key: FileKey,
+        state: FileState,
+        line: bytes,
+    ) -> None:
+        fields = _parse_csv_line(line)
+
+        if state.header is None:
+            state.header = tuple(fields)
+            logging.debug(
+                "file_ingestor_transaction_header | id=%s | client_id=%s | path=%s | "
+                "columns=%s",
+                self._config.id,
+                key.client_id,
+                key.rel_path,
+                len(fields),
+            )
+            return
+
+        transaction = _parse_transaction(state.header, fields)
+        self._send_transaction(key.client_id, transaction)
+        state.transactions_sent += 1
+
+    def _send_transaction(self, client_id: int, transaction: Transaction) -> None:
+        payload = self._transaction_serializer.serialize(transaction)
+        message = self._internal_protocol.create_packet(
+            msg_type=MessageType.DATA,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            payload=payload,
+        )
+        self._transaction_sender().send(message)
+
+    def _send_eof(self, client_id: int, expected_total: int) -> None:
+        payload = self._control_serializer.serialize(
+            ControlMessage(
+                sender_id=self._config.id,
+                expected_total=expected_total,
+                processed_count=0,
+            )
+        )
+        message = self._internal_protocol.create_packet(
+            msg_type=MessageType.EOF,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            payload=payload,
+        )
+        self._transaction_sender().send(message)
+
+    def _transaction_sender(self) -> MessageMiddlewareQueueRabbitMQ:
+        if self._transaction_output is None:
+            self._transaction_output = MessageMiddlewareQueueRabbitMQ(
+                self._config.mom_host,
+                self._config.transaction_output_queue,
+            )
+        return self._transaction_output
+
 
 def _deserialize_eof(payload: bytes) -> int:
     if len(payload) != 4:
@@ -228,3 +316,57 @@ def _split_complete_lines(data: bytes, max_line_bytes: int) -> tuple[list[bytes]
 def _validate_line_size(line: bytes, max_line_bytes: int) -> None:
     if len(line) > max_line_bytes:
         raise ValueError(f"line exceeded max_line_bytes={max_line_bytes}")
+
+
+def _parse_csv_line(line: bytes) -> list[str]:
+    rows = list(csv.reader([line.decode("utf-8")]))
+    if len(rows) != 1:
+        raise ValueError("expected exactly one CSV row")
+    return rows[0]
+
+
+def _parse_transaction(header: tuple[str, ...], fields: list[str]) -> Transaction:
+    if len(fields) != len(header):
+        raise ValueError(
+            f"transaction row has {len(fields)} fields, expected {len(header)}"
+        )
+
+    from_bank_idx = _column_index(header, "From Bank")
+    to_bank_idx = _column_index(header, "To Bank")
+    return Transaction(
+        date=_required(fields, _column_index(header, "Timestamp")),
+        from_bank=_required(fields, from_bank_idx),
+        from_account=_required(
+            fields,
+            _column_index_after(header, "Account", from_bank_idx),
+        ),
+        to_bank=_required(fields, to_bank_idx),
+        to_account=_required(
+            fields,
+            _column_index_after(header, "Account", to_bank_idx),
+        ),
+        amount=float(_required(fields, _column_index(header, "Amount Paid"))),
+        currency=_required(fields, _column_index(header, "Payment Currency")),
+        format=_required(fields, _column_index(header, "Payment Format")),
+    )
+
+
+def _column_index(header: tuple[str, ...], name: str) -> int:
+    try:
+        return header.index(name)
+    except ValueError as exc:
+        raise ValueError(f"missing required transaction column: {name}") from exc
+
+
+def _column_index_after(header: tuple[str, ...], name: str, start_index: int) -> int:
+    for index in range(start_index + 1, len(header)):
+        if header[index] == name:
+            return index
+    raise ValueError(f"missing required transaction column after {start_index}: {name}")
+
+
+def _required(fields: list[str], index: int) -> str:
+    value = fields[index].strip()
+    if not value:
+        raise ValueError(f"empty required transaction field at index {index}")
+    return value
