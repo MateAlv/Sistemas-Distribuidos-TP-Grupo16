@@ -357,7 +357,7 @@ class FilterWorker:
                         len(payload),
                     )
 
-            # Deserializamos la transaccion - Si loggea esto le llegan al menos 3 transacciones jajaja !!
+            # Deserializamos la transaccion.
             transaction = self.transaction_serializer.deserialize(payload)
 
             with self.lock:
