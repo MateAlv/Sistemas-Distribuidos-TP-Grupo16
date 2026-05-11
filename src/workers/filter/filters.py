@@ -129,6 +129,8 @@ class FilterWorker:
         self.all_processed_by_client = {}
         self.all_forwarded_by_client = {}
         self.flushed_acks_by_client = {}
+        self.first_data_logged_by_client = set()
+        self.deserialized_by_client = {}
 
     def _pass_eof_control_message(
             self, client_id, expected_total
@@ -342,8 +344,58 @@ class FilterWorker:
                 return
 
         if msg_type == message_protocol.common.MessageType.DATA:
-            # Deserializamos la transaccion
+            with self.lock:
+                if client_id not in self.first_data_logged_by_client:
+                    self.first_data_logged_by_client.add(client_id)
+                    logging.info(
+                        "filter_first_chunk_received | filter=%s | id=%s | "
+                        "client_id=%s | message_bytes=%s | payload_bytes=%s",
+                        CONFIGURATION,
+                        ID,
+                        client_id,
+                        len(message),
+                        len(payload),
+                    )
+
+            # Deserializamos la transaccion - Si loggea esto le llegan al menos 3 transacciones jajaja !!
             transaction = self.transaction_serializer.deserialize(payload)
+
+            with self.lock:
+                if client_id not in self.deserialized_by_client:
+                    self.deserialized_by_client[client_id] = 0
+                self.deserialized_by_client[client_id] += 1
+                deserialized_count = self.deserialized_by_client[client_id]
+
+            if deserialized_count <= 3:
+                logging.info(
+                    "filter_transaction_deserialized | filter=%s | id=%s | "
+                    "client_id=%s | transaction_number=%s | date=%s | "
+                    "from_bank=%s | from_account=%s | to_bank=%s | "
+                    "to_account=%s | amount=%s | currency=%s | format=%s",
+                    CONFIGURATION,
+                    ID,
+                    client_id,
+                    deserialized_count,
+                    transaction.date,
+                    transaction.from_bank,
+                    transaction.from_account,
+                    transaction.to_bank,
+                    transaction.to_account,
+                    transaction.amount,
+                    transaction.currency,
+                    transaction.format,
+                )
+
+            if deserialized_count == 3:
+                logging.info(
+                    "==================== Forward pass successful - Mate | "
+                    "filter=%s | id=%s | client_id=%s | "
+                    "transactions_deserialized=%s ====================",
+                    CONFIGURATION,
+                    ID,
+                    client_id,
+                    deserialized_count,
+                )
 
             # Aplicamos el filtro y forwrdeamos
             if CONFIGURATION == C_DATE or self._filter_transaction(transaction):

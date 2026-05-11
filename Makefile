@@ -19,7 +19,24 @@ logs:
 .PHONY: logs
 
 test:
-	docker compose -f $(COMPOSE_FILE) config --quiet
+	bash -lc 'set -euo pipefail; \
+		trap "docker compose -f $(COMPOSE_FILE) stop rabbitmq >/dev/null" EXIT; \
+		docker compose -f $(COMPOSE_FILE) config --quiet; \
+		docker compose -f $(COMPOSE_FILE) up -d rabbitmq; \
+		for i in $$(seq 1 30); do \
+			status=$$(docker inspect -f "{{.State.Health.Status}}" rabbitmq 2>/dev/null || true); \
+			if [[ "$$status" == "healthy" ]]; then \
+				echo "rabbitmq_healthy"; \
+				break; \
+			fi; \
+			if [[ "$$i" == "30" ]]; then \
+				echo "rabbitmq did not become healthy"; \
+				exit 1; \
+			fi; \
+			echo "rabbitmq_status=$$status"; \
+			sleep 2; \
+		done; \
+		PYTHONPATH=src conda run -n base python scripts/forward_pass_test.py'
 .PHONY: test
 
 switch:
