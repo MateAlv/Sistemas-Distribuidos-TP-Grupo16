@@ -19,5 +19,6 @@ class InternalProtocol:
     def unpack_packet(cls, packet: bytes):
         header_data = packet[:cls.HEADER_SIZE]
         payload = packet[cls.HEADER_SIZE:]
-        msg_type, client_id = struct.unpack(cls.HEADER_FORMAT, header_data)
+        msg_type, client_id_bytes = struct.unpack(cls.HEADER_FORMAT, header_data)
+        client_id = int.from_bytes(client_id_bytes, byteorder="big")
         return msg_type, client_id, payload
