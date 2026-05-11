@@ -1,7 +1,7 @@
 import json
 import struct
 from common.message_protocol.common.message_type import MessageType
-from src.common.domain.transaction import Transaction
+from common.domain.transaction import Transaction
 
 
 class InternalProtocol:
