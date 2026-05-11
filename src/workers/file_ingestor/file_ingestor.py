@@ -3,8 +3,11 @@ from dataclasses import dataclass
 
 from common.message_protocol.external import FileChunk
 from common.message_protocol.external.types import (
+    FILE_TYPE_ACCOUNTS,
+    FILE_TYPE_TRANSACTIONS,
     MSG_CHUNK,
     MSG_EOF,
+    file_type_name,
     file_ingestor_routing_key,
 )
 from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
@@ -29,6 +32,7 @@ class FileKey:
 @dataclass
 class FileState:
     pending: bytes = b""
+    file_type: int | None = None
     expected_offset: int = 0
     chunks_received: int = 0
     lines_received: int = 0
@@ -103,6 +107,15 @@ class FileIngestor:
         key = FileKey(client_id=chunk.client_id(), rel_path=chunk.path())
         state = self._files.setdefault(key, FileState())
 
+        if state.file_type is None:
+            state.file_type = chunk.file_type()
+        elif state.file_type != chunk.file_type():
+            raise ValueError(
+                "file_type changed for file "
+                f"(client_id={key.client_id}, path={key.rel_path}, "
+                f"expected={state.file_type}, received={chunk.file_type()})"
+            )
+
         if chunk.offset() != state.expected_offset:
             raise ValueError(
                 "unexpected chunk offset "
@@ -124,11 +137,12 @@ class FileIngestor:
         self._chunks_received += 1
 
         logging.info(
-            "file_ingestor_chunk | id=%s | client_id=%s | path=%s | offset=%s | "
-            "payload_bytes=%s | complete_lines=%s | pending_bytes=%s | "
+            "file_ingestor_chunk | id=%s | client_id=%s | file_type=%s | path=%s | "
+            "offset=%s | payload_bytes=%s | complete_lines=%s | pending_bytes=%s | "
             "file_chunks=%s | chunks_received=%s",
             self._config.id,
             key.client_id,
+            file_type_name(state.file_type),
             key.rel_path,
             chunk.offset(),
             chunk.payload_size(),
@@ -148,10 +162,11 @@ class FileIngestor:
                 state.pending = b""
 
             logging.info(
-                "file_ingestor_file_finished | id=%s | client_id=%s | path=%s | "
-                "chunks=%s | lines=%s | bytes=%s",
+                "file_ingestor_file_finished | id=%s | client_id=%s | file_type=%s | "
+                "path=%s | chunks=%s | lines=%s | bytes=%s",
                 self._config.id,
                 key.client_id,
+                file_type_name(state.file_type),
                 key.rel_path,
                 state.chunks_received,
                 state.lines_received,
@@ -176,14 +191,24 @@ class FileIngestor:
 
         _validate_line_size(clean_line, self._config.max_line_bytes)
         state.lines_received += 1
-        logging.debug(
-            "file_ingestor_line | id=%s | client_id=%s | path=%s | line_bytes=%s | "
-            "file_lines=%s",
-            self._config.id,
-            key.client_id,
-            key.rel_path,
-            len(clean_line),
-            state.lines_received,
+
+        if state.file_type in (FILE_TYPE_TRANSACTIONS, FILE_TYPE_ACCOUNTS):
+            logging.debug(
+                "file_ingestor_line | id=%s | client_id=%s | file_type=%s | "
+                "path=%s | line_bytes=%s | file_lines=%s",
+                self._config.id,
+                key.client_id,
+                file_type_name(state.file_type),
+                key.rel_path,
+                len(clean_line),
+                state.lines_received,
+            )
+            return
+
+        raise ValueError(
+            "unknown file_type for file "
+            f"(client_id={key.client_id}, path={key.rel_path}, "
+            f"file_type={state.file_type})"
         )
 
 

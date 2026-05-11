@@ -3,12 +3,19 @@ import os
 import signal
 from dataclasses import dataclass
 
-from common.chunk_reader import MESSAGE_TYPE_SIZE, ChunkReader
+from common.chunk_reader import MESSAGE_TYPE_SIZE, ChunkReader, InputFile
+from common.message_protocol.external.types import (
+    FILE_TYPE_ACCOUNTS,
+    FILE_TYPE_TRANSACTIONS,
+    file_type_name,
+)
 from common.sender import Sender
 
 
 DEFAULT_CLIENT_ID = 1
 DEFAULT_DATA_DIR = "/data"
+DEFAULT_TRANSACTIONS_FILE = "transactions.csv"
+DEFAULT_ACCOUNTS_FILE = "accounts.csv"
 DEFAULT_SERVER_HOST = "gateway"
 DEFAULT_SERVER_PORT = 5678
 DEFAULT_CHUNK_MAX_BYTES = 64 * 1024
@@ -26,6 +33,8 @@ CSV_EXTENSIONS = (".csv",)
 class ClientConfig:
     client_id: int
     data_dir: str
+    transactions_file: str
+    accounts_file: str
     server_host: str
     server_port: int
     chunk_max_bytes: int
@@ -49,9 +58,8 @@ class Client:
         self.config = config
         self.reader = ChunkReader(
             client_id=config.client_id,
-            root=config.data_dir,
+            input_files=build_input_files(config),
             max_message_size=config.chunk_max_bytes,
-            extensions=CSV_EXTENSIONS,
             message_type_size=MESSAGE_TYPE_SIZE,
         )
         self.sender = Sender(
@@ -125,9 +133,10 @@ class Client:
                     )
 
                 logging.debug(
-                    "client_send_chunk | client_id=%s | path=%s | offset=%s | "
-                    "payload_bytes=%s | message_bytes=%s",
+                    "client_send_chunk | client_id=%s | file_type=%s | path=%s | "
+                    "offset=%s | payload_bytes=%s | message_bytes=%s",
                     config.client_id,
+                    file_type_name(chunk.file_type()),
                     chunk.path(),
                     chunk.offset(),
                     chunk.payload_size(),
@@ -166,13 +175,15 @@ class Client:
         config = self.require_config()
         logging.info(
             "client_config | result=ok | client_id=%s | data_dir=%s | "
-            "server=%s:%s | chunk_max_bytes=%s | extensions=%s",
+            "transactions_file=%s | accounts_file=%s | server=%s:%s | "
+            "chunk_max_bytes=%s",
             config.client_id,
             config.data_dir,
+            config.transactions_file,
+            config.accounts_file,
             config.server_host,
             config.server_port,
             config.chunk_max_bytes,
-            ",".join(CSV_EXTENSIONS),
         )
 
     def log_result_lines(self) -> None:
@@ -216,6 +227,8 @@ def load_config() -> ClientConfig:
     return ClientConfig(
         client_id=get_int("CLIENT_ID", DEFAULT_CLIENT_ID),
         data_dir=os.getenv("DATA_DIR", DEFAULT_DATA_DIR),
+        transactions_file=os.getenv("TRANSACTIONS_FILE", DEFAULT_TRANSACTIONS_FILE),
+        accounts_file=os.getenv("ACCOUNTS_FILE", DEFAULT_ACCOUNTS_FILE),
         server_host=os.getenv("SERVER_HOST", DEFAULT_SERVER_HOST),
         server_port=get_int("SERVER_PORT", DEFAULT_SERVER_PORT),
         chunk_max_bytes=get_int("CHUNK_MAX_BYTES", DEFAULT_CHUNK_MAX_BYTES),
@@ -248,6 +261,17 @@ def validate_config(config: ClientConfig) -> None:
         raise ValueError(f"CLIENT_ID must be less than or equal to {MAX_CLIENT_ID}")
     if not os.path.isdir(config.data_dir):
         raise ValueError(f"DATA_DIR must be an existing directory: {config.data_dir}")
+    for input_file in build_input_files(config):
+        if not os.path.isfile(input_file.abs_path):
+            raise ValueError(
+                f"{file_type_name(input_file.file_type)} file must exist: "
+                f"{input_file.abs_path}"
+            )
+        if not input_file.abs_path.lower().endswith(CSV_EXTENSIONS):
+            raise ValueError(
+                f"{file_type_name(input_file.file_type)} file must be a CSV: "
+                f"{input_file.abs_path}"
+            )
     if config.server_port < MIN_TCP_PORT or config.server_port > MAX_TCP_PORT:
         raise ValueError(f"SERVER_PORT must be in range [{MIN_TCP_PORT}, {MAX_TCP_PORT}]")
     if config.chunk_max_bytes <= 0:
@@ -276,3 +300,37 @@ def get_env_value(name: str, default, parser, expected_type: str):
         return parser(value)
     except ValueError as exc:
         raise ValueError(f"{name} must be {expected_type}") from exc
+
+
+def build_input_files(config: ClientConfig) -> tuple[InputFile, ...]:
+    data_dir = os.path.abspath(config.data_dir)
+    transactions_path = resolve_input_path(data_dir, config.transactions_file)
+    accounts_path = resolve_input_path(data_dir, config.accounts_file)
+
+    return (
+        InputFile(
+            abs_path=transactions_path,
+            rel_path=relative_input_path(data_dir, transactions_path),
+            file_type=FILE_TYPE_TRANSACTIONS,
+        ),
+        InputFile(
+            abs_path=accounts_path,
+            rel_path=relative_input_path(data_dir, accounts_path),
+            file_type=FILE_TYPE_ACCOUNTS,
+        ),
+    )
+
+
+def resolve_input_path(data_dir: str, configured_path: str) -> str:
+    if os.path.isabs(configured_path):
+        return os.path.abspath(configured_path)
+    return os.path.abspath(os.path.join(data_dir, configured_path))
+
+
+def relative_input_path(data_dir: str, abs_path: str) -> str:
+    try:
+        if os.path.commonpath([data_dir, abs_path]) == data_dir:
+            return os.path.relpath(abs_path, data_dir)
+    except ValueError:
+        pass
+    return os.path.basename(abs_path)

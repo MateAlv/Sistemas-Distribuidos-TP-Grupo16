@@ -25,6 +25,8 @@ services:
     environment:
     - CLIENT_ID=0
     - DATA_DIR=/data
+    - TRANSACTIONS_FILE=LI-Small_Trans.csv
+    - ACCOUNTS_FILE=LI-Small_accounts.csv
     - CHUNK_MAX_BYTES=1048576
     - RESULT_LINE_MAX_BYTES=1048576
     - CONNECT_TIMEOUT_SECONDS=30
@@ -34,7 +36,7 @@ services:
     - SERVER_HOST=gateway
     - SERVER_PORT=5678
     volumes:
-    - ./data/datasets/LI-Small:/data:ro
+    - ./data/datasets/client-1/LI-Small:/data:ro
   gateway:
     build:
       context: ./src/
