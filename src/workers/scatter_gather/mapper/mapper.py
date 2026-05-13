@@ -6,6 +6,7 @@ from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareQueueRabbitMQ,
     MessageMiddlewareExchangeRabbitMQ,
 )
+from common.message_protocol.internal import partition_for_key
 from common.constants import EDGE_A_TO_M, EDGE_M_TO_B
 
 ID = int(os.environ["ID"])
@@ -13,13 +14,6 @@ MOM_HOST = os.environ["MOM_HOST"]
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
 SG_LINKER_EXCHANGE = os.environ["SG_LINKER_EXCHANGE"]
 SG_LINKER_AMOUNT = int(os.environ["SG_LINKER_AMOUNT"])
-
-
-def _hash_account(account: str, n: int) -> int:
-    h = 0
-    for c in account:
-        h = (h * 31 + ord(c)) & 0xFFFFFFFF
-    return h % n
 
 
 class ScatterGatherMapper:
@@ -44,8 +38,8 @@ class ScatterGatherMapper:
             tx = self._tx_ser.deserialize(payload)
             cid = client_id.to_bytes(16, byteorder='big')
 
-            self._emit(cid, EDGE_A_TO_M, payload, _hash_account(tx.to_account, SG_LINKER_AMOUNT))
-            self._emit(cid, EDGE_M_TO_B, payload, _hash_account(tx.from_account, SG_LINKER_AMOUNT))
+            self._emit(cid, EDGE_A_TO_M, payload, partition_for_key(tx.to_account, SG_LINKER_AMOUNT))
+            self._emit(cid, EDGE_M_TO_B, payload, partition_for_key(tx.from_account, SG_LINKER_AMOUNT))
 
             ack()
         except Exception as e:
