@@ -53,20 +53,16 @@ def validate_q1_results():
     
     print(f"✓ Dataset has {len(original_transactions)} transactions")
     
-    # 5. Verificar que TODAS las transacciones del dataset pasan Q1
+    expected_count = 0
     for i, tx in enumerate(original_transactions):
-        currency = tx['currency'].strip()
-        amount = float(tx['amount'])
+        currency = tx['Receiving Currency'].strip()
+        amount = float(tx['Amount Received'])
         
         # Q1 requires: currency == "US Dollar" AND amount < 50
-        if currency != USD_CURRENCY:
-            print(f"ERROR: Transaction {i} has currency '{currency}' != '{USD_CURRENCY}'")
-            return False
-        if amount >= Q1_MAX_AMOUNT:
-            print(f"ERROR: Transaction {i} has amount {amount} >= {Q1_MAX_AMOUNT}")
-            return False
-    
-    print(f"✓ All {len(original_transactions)} dataset transactions pass Q1 filters")
+        if currency == USD_CURRENCY and amount < Q1_MAX_AMOUNT:
+            expected_count += 1
+            
+    print(f"✓ Found {expected_count} expected transactions in dataset")
     
     # 6. Leer archivo de output y contar
     output_transactions = []
@@ -90,6 +86,10 @@ def validate_q1_results():
         return True
     
     print(f"\n✓ Total output transactions: {len(output_transactions)}")
+    
+    if len(output_transactions) != expected_count:
+        print(f"ERROR: Output has {len(output_transactions)} transactions, but expected {expected_count}")
+        return False
     
     # 8. Validar estructura de output
     for i, tx in enumerate(output_transactions):

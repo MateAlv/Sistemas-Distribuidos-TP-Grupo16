@@ -43,7 +43,7 @@ test-q1:
 		echo "Waiting for services to be ready..."; \
 		sleep 10; \
 		echo "Checking client logs for completion..."; \
-		timeout 120s sh -c '\''docker compose -f docker-compose.test.yaml logs --follow 2>&1 | grep -m1 "client_shutdown\|client_send_finished"'\''; \
+		timeout 120s sh -c '\''docker compose -f docker-compose.test.yaml logs --follow 2>&1 | grep -m1 "client_shutdown\|client_results_finished"'\''; \
 		sleep 5; \
 		echo "Validating Q1 output..."; \
 		python scripts/validate_q1_output.py && echo "✓ Q1 test PASSED" || echo "✗ Q1 test FAILED"; \
