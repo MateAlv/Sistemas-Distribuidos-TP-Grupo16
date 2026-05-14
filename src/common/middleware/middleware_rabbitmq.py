@@ -1,10 +1,15 @@
 import pika
+import uuid
+import time
+import threading
 from .middleware import (
     MessageMiddlewareQueue, 
     MessageMiddlewareExchange, 
     MessageMiddlewareCloseError, 
     MessageMiddlewareMessageError,
-    MessageMiddlewareDisconnectedError
+    MessageMiddlewareDisconnectedError,
+    MessageMiddlewareRpcClient,
+    MessageMiddlewareRpcServer,
 )
 
 _CONNECTION_ERRORS = (
@@ -187,3 +192,96 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
                     exchange=self._exchange_name,
                     routing_key=key
                 )
+
+
+class MessageMiddlewareRpcClientRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcClient):
+    def __init__(self, host, request_queue_name):
+        self._request_queue = request_queue_name
+        super().__init__(host)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+    def connect(self):
+        self._channel.queue_declare(queue=self._request_queue, durable=True)
+
+    def call(self, message, timeout=30):
+        correlation_id = str(uuid.uuid4())
+        reply_queue = self._channel.queue_declare(queue='', exclusive=True).method.queue
+        
+        response = None
+        
+        def on_response(ch, method, props, body):
+            nonlocal response
+            if props.correlation_id == correlation_id:
+                response = body
+                ch.basic_ack(delivery_tag=method.delivery_tag)
+        
+        self._channel.basic_consume(queue=reply_queue, on_message_callback=on_response, auto_ack=False)
+        
+        self._channel.basic_publish(
+            exchange="",
+            routing_key=self._request_queue,
+            body=message,
+            properties=pika.BasicProperties(
+                reply_to=reply_queue,
+                correlation_id=correlation_id,
+                delivery_mode=2,
+            )
+        )
+        
+        deadline = time.monotonic() + timeout
+        while response is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise MessageMiddlewareMessageError("RPC call timed out")
+            self._connection.process_data_events(time_limit=min(1, remaining))
+            
+        return response
+
+
+class MessageMiddlewareRpcServerRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcServer):
+    def __init__(self, host, request_queue_name):
+        self._request_queue = request_queue_name
+        super().__init__(host)
+        self._consuming = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+    def connect(self):
+        self._channel.queue_declare(queue=self._request_queue, durable=True)
+
+    def start(self, on_request_callback):
+        def _on_request(ch, method, properties, body):
+            def reply(response_message):
+                ch.basic_publish(
+                    exchange="",
+                    routing_key=properties.reply_to,
+                    body=response_message,
+                    properties=pika.BasicProperties(correlation_id=properties.correlation_id)
+                )
+            on_request_callback(body, reply)
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+        
+        self._channel.basic_qos(prefetch_count=1)
+        self._channel.basic_consume(queue=self._request_queue, on_message_callback=_on_request)
+        self._consuming = True
+        self._channel.start_consuming()
+
+    def stop(self):
+        if self._consuming:
+            self._channel.stop_consuming()
+            self._consuming = False
+
+    def close(self):
+        self.stop()
+        super().close()
