@@ -233,30 +233,29 @@ class Gateway:
                 msg_type, client_id, payload = internal_serializer.unpack_packet(message)
                 
                 with self._client_queues_lock:
-                    q = self._client_queues.get(client_id)
+                    client_queue = self._client_queues.get(client_id)
                 
-                if not q:
-                    # Client disconnected or invalid ID, ignore message
+                if not client_queue:
                     ack()
                     return
                 
                 if msg_type == MessageType.DATA:
                     tx = transaction_serializer.deserialize(payload)
                     csv_line = f"{tx.date},{tx.from_bank},{tx.from_account},{tx.to_bank},{tx.to_account},{tx.amount},{tx.currency},{tx.format}\n"
-                    q.put(csv_line)
+                    client_queue.put(csv_line)
                 elif msg_type == MessageType.EOF:
-                    q.put(None)
+                    client_queue.put(None)
                 
                 ack()
             except Exception as e:
-                logging.error(f"gateway_results_consumer_error | error={e}")
+                logging.error("gateway_results_consumer_error | error=%s", e)
                 nack()
 
         try:
             self._results_consumer.start_consuming(callback)
         except Exception as e:
             if not self._stopped:
-                logging.error(f"gateway_results_consumer_stopped | error={e}")
+                logging.error("gateway_results_consumer_stopped | error=%s", e)
 
 
 def _send_ack(sock: socket.socket) -> None:
