@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import time
 
 from common import message_protocol
 from common.domain.transaction import Transaction
@@ -232,62 +233,68 @@ class FilterWorker:
         '''
         Envia una transaccion a la cola de salida correspondiente segun la configuracion del worker
         '''
-        logging.info(f"Transaction {transaction} passed filter in filter_{CONFIGURATION} with id {ID}, forwarding to output")
-        payload = self.transaction_serializer.serialize(transaction)
-        message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.common.MessageType.DATA,
-            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
-            payload=payload
-        )
-        if CONFIGURATION == C_Q1:
-            self.output_queues[GATEWAY_QUEUE].send(message)
-        if CONFIGURATION == C_Q5:
-            self.output_queues[FILTER_Q5_USD_QUEUE].send(message)
-        if CONFIGURATION == C_USD:
-            self.output_queues[FILTER_Q1_QUEUE].send(message)
-            self.output_queues[SUM_Q2_QUEUE].send(message)
-            self.output_queues[FILTER_DATE_QUEUE].send(message)
-        if CONFIGURATION == C_DATE:
-            # Si la transaccion esta entre las fechas 2022-09-06 y 2022-09-15, va al sum de Q3 por sharding
-            # Si la transaccion esta entre las fechas 2022-09-01 y 2022-09-05, va al filtro de Q3
-            # Si la transaccion esta entre las fechas 2022-09-01 y 2022-09-05, va al scatter gather mapper de Q4
-            if self._filter_transaction(transaction, start_date="2022-09-06", end_date="2022-09-15"):
-                # Shardeo por el id de la transaccion
-                shard = transaction.hash_by_payment_format(SUM_Q3_AMOUNT)
-                self.output_exchanges[shard].send(message)
-            if self._filter_transaction(transaction, start_date="2022-09-01", end_date="2022-09-05"):
-                self.output_queues[FILTER_Q3_QUEUE].send(message)
-                self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(message)
+        try:
+            logging.info(f"Transaction {transaction} passed filter in filter_{CONFIGURATION} with id {ID}, forwarding to output")
+            payload = self.transaction_serializer.serialize(transaction)
+            message = self.internal_packet_serializer.create_packet(
+                msg_type=message_protocol.common.MessageType.DATA,
+                client_id_bytes=client_id.to_bytes(16, byteorder='big'),
+                payload=payload
+            )
+            if CONFIGURATION == C_Q1:
+                self.output_queues[GATEWAY_QUEUE].send(message)
+            if CONFIGURATION == C_Q5:
+                self.output_queues[FILTER_Q5_USD_QUEUE].send(message)
+            if CONFIGURATION == C_USD:
+                self.output_queues[FILTER_Q1_QUEUE].send(message)
+                self.output_queues[SUM_Q2_QUEUE].send(message)
+                self.output_queues[FILTER_DATE_QUEUE].send(message)
+            if CONFIGURATION == C_DATE:
+                # Si la transaccion esta entre las fechas 2022-09-06 y 2022-09-15, va al sum de Q3 por sharding
+                # Si la transaccion esta entre las fechas 2022-09-01 y 2022-09-05, va al filtro de Q3
+                # Si la transaccion esta entre las fechas 2022-09-01 y 2022-09-05, va al scatter gather mapper de Q4
+                if self._filter_transaction(transaction, start_date="2022-09-06", end_date="2022-09-15"):
+                    # Shardeo por el id de la transaccion
+                    shard = transaction.hash_by_payment_format(SUM_Q3_AMOUNT)
+                    self.output_exchanges[shard].send(message)
+                if self._filter_transaction(transaction, start_date="2022-09-01", end_date="2022-09-05"):
+                    self.output_queues[FILTER_Q3_QUEUE].send(message)
+                    self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(message)
+        except Exception as e:
+            logging.error(f"Error forwarding transaction in filter_{CONFIGURATION} with id {ID} for client {client_id}: {e}")
 
     def _forward_eof(self, client_id: int, expected_total: int):
         '''
         Envia un mensaje de EOF a la cola de salida correspondiente segun la configuracion del worker
         '''
-        message = self.control_serializer.serialize(
-            message_protocol.common.ControlMessage(
-                sender_id=ID,
-                expected_total=expected_total,
-                processed_count=0
+        try:
+            message = self.control_serializer.serialize(
+                message_protocol.common.ControlMessage(
+                    sender_id=ID,
+                    expected_total=expected_total,
+                    processed_count=0
+                )
             )
-        )
-        message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.common.MessageType.EOF,
-            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
-            payload=message
-        )
-        if CONFIGURATION == C_Q1:
-            self.output_queues[GATEWAY_QUEUE].send(message)
-        if CONFIGURATION == C_Q5:
-            self.output_queues[FILTER_Q5_USD_QUEUE].send(message)
-        if CONFIGURATION == C_USD:
-            self.output_queues[FILTER_Q1_QUEUE].send(message)
-            self.output_queues[SUM_Q2_QUEUE].send(message)
-            self.output_queues[FILTER_DATE_QUEUE].send(message)
-        if CONFIGURATION == C_DATE:
-            for exchange in self.output_exchanges:
-                exchange.send(message)
-            self.output_queues[FILTER_Q3_QUEUE].send(message)
-            self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(message)
+            message = self.internal_packet_serializer.create_packet(
+                msg_type=message_protocol.common.MessageType.EOF,
+                client_id_bytes=client_id.to_bytes(16, byteorder='big'),
+                payload=message
+            )
+            if CONFIGURATION == C_Q1:
+                self.output_queues[GATEWAY_QUEUE].send(message)
+            if CONFIGURATION == C_Q5:
+                self.output_queues[FILTER_Q5_USD_QUEUE].send(message)
+            if CONFIGURATION == C_USD:
+                self.output_queues[FILTER_Q1_QUEUE].send(message)
+                self.output_queues[SUM_Q2_QUEUE].send(message)
+                self.output_queues[FILTER_DATE_QUEUE].send(message)
+            if CONFIGURATION == C_DATE:
+                for exchange in self.output_exchanges:
+                    exchange.send(message)
+                self.output_queues[FILTER_Q3_QUEUE].send(message)
+                self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(message)
+        except Exception as e:
+            logging.error(f"Error forwarding EOF in filter_{CONFIGURATION} with id {ID} for client {client_id}: {e}")
 
     
     def _filter_transaction(self, transaction: Transaction, start_date=None, end_date=None):
@@ -315,7 +322,11 @@ class FilterWorker:
         si la transaccion pasa el filtro
         '''
         # Desempaquetamos el mensaje
-        msg_type, client_id, payload = self.internal_packet_serializer.unpack_packet(message)
+        try:
+            msg_type, client_id, payload = self.internal_packet_serializer.unpack_packet(message)
+        except Exception as e:
+            logging.error(f"Error unpacking packet in filter_{CONFIGURATION} with id {ID}: {e}")
+            return
 
         with self.lock:
             if client_id in self.closed_by_client:
@@ -327,55 +338,31 @@ class FilterWorker:
             with self.lock:
                 if client_id not in self.first_data_logged_by_client:
                     self.first_data_logged_by_client.add(client_id)
-                    logging.info(
-                        "filter_first_chunk_received | filter=%s | id=%s | "
-                        "client_id=%s | message_bytes=%s | payload_bytes=%s",
-                        CONFIGURATION,
-                        ID,
-                        client_id,
-                        len(message),
-                        len(payload),
-                    )
+                    try:
+                        logging.info(
+                            "filter_first_chunk_received | filter=%s | id=%s | "
+                            "client_id=%s | message_bytes=%s | payload_bytes=%s",
+                            CONFIGURATION,
+                            ID,
+                            client_id,
+                            len(message),
+                            len(payload),
+                        )
+                    except Exception as e:
+                        logging.error(f"Error logging first chunk received in filter_{CONFIGURATION} with id {ID} for client {client_id}: {e}")
 
             # Deserializamos la transaccion.
-            transaction = self.transaction_serializer.deserialize(payload)
+            try:
+                transaction = self.transaction_serializer.deserialize(payload)
+            except Exception as e:
+                logging.error(f"Error deserializing transaction in filter_{CONFIGURATION} with id {ID} for client {client_id}: {e}")
+                return
 
             with self.lock:
                 if client_id not in self.deserialized_by_client:
                     self.deserialized_by_client[client_id] = 0
                 self.deserialized_by_client[client_id] += 1
                 deserialized_count = self.deserialized_by_client[client_id]
-
-            if deserialized_count <= 3:
-                logging.info(
-                    "filter_transaction_deserialized | filter=%s | id=%s | "
-                    "client_id=%s | transaction_number=%s | date=%s | "
-                    "from_bank=%s | from_account=%s | to_bank=%s | "
-                    "to_account=%s | amount=%s | currency=%s | format=%s",
-                    CONFIGURATION,
-                    ID,
-                    client_id,
-                    deserialized_count,
-                    transaction.date,
-                    transaction.from_bank,
-                    transaction.from_account,
-                    transaction.to_bank,
-                    transaction.to_account,
-                    transaction.amount,
-                    transaction.currency,
-                    transaction.format,
-                )
-
-            if deserialized_count == 3:
-                logging.info(
-                    "==================== Forward pass successful - Mate | "
-                    "filter=%s | id=%s | client_id=%s | "
-                    "transactions_deserialized=%s ====================",
-                    CONFIGURATION,
-                    ID,
-                    client_id,
-                    deserialized_count,
-                )
 
             # Aplicamos el filtro y forwrdeamos
             if CONFIGURATION == C_DATE or self._filter_transaction(transaction):
@@ -393,7 +380,11 @@ class FilterWorker:
             
         elif msg_type == message_protocol.common.MessageType.EOF:
             # El worker que recibe el EOF se convierte en el lider para ese cliente
-            control_message = self.control_serializer.deserialize(payload)
+            try:
+                control_message = self.control_serializer.deserialize(payload)
+            except Exception as e:
+                logging.error(f"Error deserializing EOF message in filter_{CONFIGURATION} with id {ID} for client {client_id}: {e}")
+                return
             expected_total = control_message.expected_total
 
             logging.info(f"Received EOF for client {client_id} in filter_{CONFIGURATION}. Expected total: {expected_total}.")
@@ -420,12 +411,22 @@ class FilterWorker:
         y respondiendo a los mensajes de control correspondientes
         '''
         # Desempaquetamos el mensaje
-        msg_type, client_id, payload = self.internal_packet_serializer.unpack_packet(message)
-        control_message = self.control_serializer.deserialize(payload)
+        try:
+            msg_type, client_id, payload = self.internal_packet_serializer.unpack_packet(message)
+        except Exception as e:
+            logging.error(f"Error unpacking control packet in filter_{CONFIGURATION} with id {ID}: {e}")
+            return
+        
+        try:
+            control_message = self.control_serializer.deserialize(payload)
+        except Exception as e:
+            logging.error(f"Error deserializing control message in filter_{CONFIGURATION} with id {ID} for client {client_id}: {e}")
+            return
 
         if msg_type == message_protocol.common.MessageType.PROCESSED_REQUEST:
-            self.leader_by_client[client_id] = control_message.sender_id
-            leader_id = self.leader_by_client.get(client_id)
+            with self.lock:
+                self.leader_by_client[client_id] = control_message.sender_id
+                leader_id = self.leader_by_client.get(client_id)
             if leader_id == ID:
                 logging.warning(f"Received PROCESSED_REQUEST control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am the leader, ignoring")
                 return
@@ -436,34 +437,42 @@ class FilterWorker:
             self._answer_control_message(client_id, control_message.expected_total, processed_count)
         
         elif msg_type == message_protocol.common.MessageType.PROCESSED_ANSWER:
-            leader_id = self.leader_by_client.get(client_id)
+            with self.lock:
+                leader_id = self.leader_by_client.get(client_id)
             if leader_id != ID:
                 logging.warning(f"Received PROCESSED_ANSWER control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
                 return
             
+            should_resend = False
             with self.lock:
                 procesados = self.processed_by_client.get(client_id, 0)
 
-            if client_id not in self.control_responses_by_client:
-                self.control_responses_by_client[client_id] = set()
-            self.control_responses_by_client[client_id].add(control_message.sender_id)
-            
-            if client_id not in self.all_processed_by_client:
-                self.all_processed_by_client[client_id] = 0
-            self.all_processed_by_client[client_id] += control_message.processed_count
-            
-            if len(self.control_responses_by_client[client_id]) == FILTER_AMOUNT - 1:
-                if self.all_processed_by_client[client_id] + procesados == control_message.expected_total:
-                    logging.info(f"Received all PROCESSED_ANSWER control messages for client {client_id} in filter_{CONFIGURATION}, total processed: {procesados + control_message.processed_count}, expected: {control_message.expected_total}, sending FLUSH_ORDER")
-                    self._flush_control_message(client_id)
-                else:
-                    logging.info(f"Received all PROCESSED_ANSWER control messages for client {client_id} in filter_{CONFIGURATION}, total processed: {procesados + control_message.processed_count}, expected: {control_message.expected_total}, but counts do not match, resending PROCESSED_REQUEST")
-                    self._request_control_message(client_id, control_message.expected_total)
+                if client_id not in self.control_responses_by_client:
                     self.control_responses_by_client[client_id] = set()
+                self.control_responses_by_client[client_id].add(control_message.sender_id)
+            
+                if client_id not in self.all_processed_by_client:
                     self.all_processed_by_client[client_id] = 0
+                self.all_processed_by_client[client_id] += control_message.processed_count
+            
+                if len(self.control_responses_by_client[client_id]) == FILTER_AMOUNT - 1:
+                    if self.all_processed_by_client[client_id] + procesados == control_message.expected_total:
+                        logging.info(f"Received all PROCESSED_ANSWER control messages for client {client_id} in filter_{CONFIGURATION}, total processed: {procesados + control_message.processed_count}, expected: {control_message.expected_total}, sending FLUSH_ORDER")
+                        self._flush_control_message(client_id)
+                    else:
+                        should_resend = True
+                        logging.info(f"Received all PROCESSED_ANSWER control messages for client {client_id} in filter_{CONFIGURATION}, total processed: {procesados + control_message.processed_count}, expected: {control_message.expected_total}, but counts do not match, resending PROCESSED_REQUEST")
+                        self.control_responses_by_client[client_id] = set()
+                        self.all_processed_by_client[client_id] = 0
+                        
+            if should_resend:
+                time.sleep(0.05) # Esperamos un poco antes de reenviar para evitar busy wait
+                self._request_control_message(client_id, control_message.expected_total)
+                        
         
         elif msg_type == message_protocol.common.MessageType.FLUSH_ORDER:
-            leader_id = self.leader_by_client.get(client_id)
+            with self.lock:
+                leader_id = self.leader_by_client.get(client_id)
             if leader_id == ID:
                 logging.warning(f"Received FLUSH_ORDER control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am the leader, ignoring")
                 return
@@ -476,24 +485,26 @@ class FilterWorker:
             
         
         elif msg_type == message_protocol.common.MessageType.FLUSH_ACK:
-            leader_id = self.leader_by_client.get(client_id)
+            with self.lock:
+                leader_id = self.leader_by_client.get(client_id)
             if leader_id != ID:
                 logging.warning(f"Received FLUSH_ACK control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
                 return
             
-            if client_id not in self.flushed_acks_by_client:
-                self.flushed_acks_by_client[client_id] = set()            
-            self.flushed_acks_by_client[client_id].add(control_message.sender_id)
-            if client_id not in self.all_forwarded_by_client:
-                self.all_forwarded_by_client[client_id] = 0
-            self.all_forwarded_by_client[client_id] += control_message.processed_count
+            with self.lock:
+                if client_id not in self.flushed_acks_by_client:
+                    self.flushed_acks_by_client[client_id] = set()            
+                self.flushed_acks_by_client[client_id].add(control_message.sender_id)
+                if client_id not in self.all_forwarded_by_client:
+                    self.all_forwarded_by_client[client_id] = 0
+                self.all_forwarded_by_client[client_id] += control_message.processed_count
 
-            if len(self.flushed_acks_by_client[client_id]) == FILTER_AMOUNT - 1:
-                logging.info(f"Received all FLUSH_ACK control messages for client {client_id} in filter_{CONFIGURATION}, cleaning up client")
-                with self.lock:
+                if len(self.flushed_acks_by_client[client_id]) == FILTER_AMOUNT - 1:
+                    logging.info(f"Received all FLUSH_ACK control messages for client {client_id} in filter_{CONFIGURATION}, cleaning up client")
+                
                     msgs_sent = self.all_forwarded_by_client[client_id] + self.forwarded_by_client.get(client_id, 0)
-                self._forward_eof(client_id, msgs_sent)
-                self._cleanup_client(client_id)
+                    self._forward_eof(client_id, msgs_sent)
+                    self._cleanup_client(client_id)
 
         else:
             logging.warning(f"Received unknown control message type: {msg_type} from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}")
@@ -561,26 +572,31 @@ class FilterWorker:
         try:
             self.input_queue.close()
         except Exception as e:
-            logging.error(f"Error closing input queue in filter_{CONFIGURATION} with id {ID}: {e}")
+            if self.active:
+                logging.error(f"Error closing input queue in filter_{CONFIGURATION} with id {ID}: {e}")
 
         try:
             self.control_input.close()
         except Exception as e:
-            logging.error(f"Error closing control input in filter_{CONFIGURATION} with id {ID}: {e}")
+            if self.active:
+                logging.error(f"Error closing control input in filter_{CONFIGURATION} with id {ID}: {e}")
 
         try:
             self.control_output.close()
         except Exception as e:
-            logging.error(f"Error closing control output in filter_{CONFIGURATION} with id {ID}: {e}")
+            if self.active:
+                logging.error(f"Error closing control output in filter_{CONFIGURATION} with id {ID}: {e}")
 
         for queue in self.output_queues.values():
             try:
                 queue.close()
             except Exception as e:
-                logging.error(f"Error closing output queue in filter_{CONFIGURATION} with id {ID}: {e}")
+                if self.active:
+                    logging.error(f"Error closing output queue in filter_{CONFIGURATION} with id {ID}: {e}")
 
         for exchange in self.output_exchanges:
             try:
                 exchange.close()
             except Exception as e:
-                logging.error(f"Error closing output exchange in filter_{CONFIGURATION} with id {ID}: {e}")
+                if self.active:
+                    logging.error(f"Error closing output exchange in filter_{CONFIGURATION} with id {ID}: {e}")
