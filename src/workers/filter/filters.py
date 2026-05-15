@@ -89,17 +89,13 @@ class FilterWorker:
                 self.output_exchanges.append(data_output_exchange)
 
         # Seccion de control
-        # Primero Identificamos al Lider
-        self.is_leader = ID == 0
-
         # Definicion de las keys de los exchanges 
+        # Cada worker puede enviar a todos los demas workers
         self.personal_control_key = f"{FILTER_PREFIX}_{ID}"
         self.output_control_keys = []
-        if self.is_leader:
-            for i in range(1, FILTER_AMOUNT):
+        for i in range(FILTER_AMOUNT):
+            if i != ID:
                 self.output_control_keys.append(f"{FILTER_PREFIX}_{i}")
-        else:
-            self.output_control_keys.append(f"{FILTER_PREFIX}_0")
 
         # Definicion de la entrada del exchange de control
         self.control_input = middleware.MessageMiddlewareExchangeRabbitMQ(
@@ -131,27 +127,7 @@ class FilterWorker:
         self.flushed_acks_by_client = {}
         self.first_data_logged_by_client = set()
         self.deserialized_by_client = {}
-
-    def _pass_eof_control_message(
-            self, client_id, expected_total
-    ):
-        '''
-        Envia un mensaje de control al lider indicando que se recibio un EOF para un cliente, 
-        con la cantidad total de mensajes que se esperan para ese cliente
-        '''
-        message = self.control_serializer.serialize(
-            message_protocol.common.ControlMessage(
-                sender_id=ID,
-                expected_total=expected_total,
-                processed_count=0
-            )
-        )
-        message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.common.MessageType.EOF_RECEIVED,
-            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
-            payload=message
-        )
-        self.control_output.send(message)
+        self.leader_by_client = {}
 
     def _answer_control_message(
             self, client_id, expected_total, processed_count
@@ -246,6 +222,10 @@ class FilterWorker:
                 del self.control_responses_by_client[client_id]
             if client_id in self.flushed_acks_by_client:
                 del self.flushed_acks_by_client[client_id]
+            if client_id in self.leader_by_client:
+                del self.leader_by_client[client_id]
+            if client_id in self.deserialized_by_client:
+                del self.deserialized_by_client[client_id]
             self.closed_by_client.add(client_id)
     
     def _forward_transaction(self, transaction: Transaction, client_id: int):
@@ -412,27 +392,24 @@ class FilterWorker:
                 self.processed_by_client[client_id] += 1
             
         elif msg_type == message_protocol.common.MessageType.EOF:
-            # Cuando recibimos un EOF:
-            # - Si se es el lider, se le avisa a los demas workers que se recibio un EOF 
-            #     para este cliente y cuantos mensajes se esperan en total, para que ellos puedan 
-            #     responder con su conteo de procesados
-            # - Si no se es el lider, se le avisa al lider que se recibio un EOF para este cliente y 
-            #     cuantos mensajes se esperan en total, para que el lider pueda solicitar el 
-            #     conteo de procesados a los demas workers            
+            # El worker que recibe el EOF se convierte en el lider para ese cliente
             control_message = self.control_serializer.deserialize(payload)
             expected_total = control_message.expected_total
 
             logging.info(f"Received EOF for client {client_id} in filter_{CONFIGURATION}. Expected total: {expected_total}.")
             
-            if self.is_leader and FILTER_AMOUNT == 1:
+            with self.lock:
+                self.leader_by_client[client_id] = ID
+            
+            if FILTER_AMOUNT == 1:
+                # Solo un filter, enviar EOF directamente
                 with self.lock:
                     msgs_sent = self.forwarded_by_client.get(client_id, 0)
                 self._forward_eof(client_id, msgs_sent)
                 self._cleanup_client(client_id)
-            elif self.is_leader:
-                self._request_control_message(client_id, expected_total)
             else:
-                self._pass_eof_control_message(client_id, expected_total)
+                # Solicitar conteos de los demas workers
+                self._request_control_message(client_id, expected_total)
         
         else:
             logging.warning(f"Received unknown message type: {msg_type} for filter_{CONFIGURATION}")
@@ -446,15 +423,10 @@ class FilterWorker:
         msg_type, client_id, payload = self.internal_packet_serializer.unpack_packet(message)
         control_message = self.control_serializer.deserialize(payload)
 
-        if msg_type == message_protocol.common.MessageType.EOF_RECEIVED:
-            if not self.is_leader:
-                logging.warning(f"Received EOF_RECEIVED control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
-                return
-            # Si se recibe un mensaje indicando que se recibio un EOF para un cliente, se responde con una solicitud de conteo de procesados para ese cliente
-            self._request_control_message(client_id, control_message.expected_total)
-
-        elif msg_type == message_protocol.common.MessageType.PROCESSED_REQUEST:
-            if self.is_leader:
+        if msg_type == message_protocol.common.MessageType.PROCESSED_REQUEST:
+            self.leader_by_client[client_id] = control_message.sender_id
+            leader_id = self.leader_by_client.get(client_id)
+            if leader_id == ID:
                 logging.warning(f"Received PROCESSED_REQUEST control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am the leader, ignoring")
                 return
             # Si se recibe una solicitud de conteo procesados, se responde con un mensaje indicando
@@ -464,7 +436,8 @@ class FilterWorker:
             self._answer_control_message(client_id, control_message.expected_total, processed_count)
         
         elif msg_type == message_protocol.common.MessageType.PROCESSED_ANSWER:
-            if not self.is_leader:
+            leader_id = self.leader_by_client.get(client_id)
+            if leader_id != ID:
                 logging.warning(f"Received PROCESSED_ANSWER control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
                 return
             
@@ -490,7 +463,8 @@ class FilterWorker:
                     self.all_processed_by_client[client_id] = 0
         
         elif msg_type == message_protocol.common.MessageType.FLUSH_ORDER:
-            if self.is_leader:
+            leader_id = self.leader_by_client.get(client_id)
+            if leader_id == ID:
                 logging.warning(f"Received FLUSH_ORDER control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am the leader, ignoring")
                 return
             # Si se recibe una orden de flush, se limpian los recursos asociados a ese cliente y se responde con un mensaje de ack
@@ -502,7 +476,8 @@ class FilterWorker:
             
         
         elif msg_type == message_protocol.common.MessageType.FLUSH_ACK:
-            if not self.is_leader:
+            leader_id = self.leader_by_client.get(client_id)
+            if leader_id != ID:
                 logging.warning(f"Received FLUSH_ACK control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
                 return
             
