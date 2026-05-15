@@ -100,21 +100,36 @@ class Gateway:
                 pass
 
     def _handle_client(self, client_sock: socket.socket) -> None:
+        client_id = None
         try:
-            self._serve_client(client_sock)
+            client_id = self._serve_client(client_sock)
         except Exception as e:
-            logging.error("gateway_client_error | error=%s", e)
+            logging.error("gateway_client_error | client_id=%s | error=%s", client_id, e)
         finally:
             try:
                 client_sock.close()
             except OSError:
                 pass
+            if client_id is not None:
+                logging.info("gateway_session_terminated | client_id=%s", client_id)
 
-    def _serve_client(self, client_sock: socket.socket) -> None:
+    def _serve_client(self, client_sock: socket.socket) -> int:
         client_id = self._recv_handshake(client_sock)
         session = ClientSession(client_id=client_id, sock=client_sock)
-        self._forward_chunks(session)
-        self._wait_for_results(session)
+        
+        # Register client queue early to avoid race condition with results consumer
+        q = queue.Queue()
+        with self._client_queues_lock:
+            self._client_queues[client_id] = q
+        
+        try:
+            self._forward_chunks(session)
+            self._wait_for_results(session, q)
+        finally:
+            with self._client_queues_lock:
+                self._client_queues.pop(client_id, None)
+        
+        return client_id
 
     def _recv_handshake(self, client_sock: socket.socket) -> int:
         msg_type = int.from_bytes(recv_exact(client_sock, 1), "big")
@@ -191,31 +206,23 @@ class Gateway:
         finally:
             publisher.close()
 
-    def _wait_for_results(self, session: ClientSession) -> None:
+    def _wait_for_results(self, session: ClientSession, q: queue.Queue) -> None:
         logging.info("gateway_results_wait | client_id=%s", session.client_id)
         
-        q = queue.Queue()
-        with self._client_queues_lock:
-            self._client_queues[session.client_id] = q
-
-        try:
-            while not self._stopped:
-                try:
-                    result = q.get(timeout=1.0)
-                    if result is None:
-                        logging.info("gateway_results_eof | client_id=%s", session.client_id)
-                        break
-                    sendall(session.sock, result.encode("utf-8"))
-                except queue.Empty:
-                    readable, _, _ = select.select([session.sock], [], [], 0.0)
-                    if readable:
-                        data = session.sock.recv(1, socket.MSG_PEEK)
-                        if not data:
-                            logging.info("gateway_client_closed | client_id=%s", session.client_id)
-                            return
-        finally:
-            with self._client_queues_lock:
-                self._client_queues.pop(session.client_id, None)
+        while not self._stopped:
+            try:
+                result = q.get(timeout=1.0)
+                if result is None:
+                    logging.info("gateway_results_eof | client_id=%s", session.client_id)
+                    break
+                sendall(session.sock, result.encode("utf-8"))
+            except queue.Empty:
+                readable, _, _ = select.select([session.sock], [], [], 0.0)
+                if readable:
+                    data = session.sock.recv(1, socket.MSG_PEEK)
+                    if not data:
+                        logging.info("gateway_client_closed | client_id=%s", session.client_id)
+                        return  
 
     def _consume_results_loop(self) -> None:
         internal_serializer = InternalProtocol()
