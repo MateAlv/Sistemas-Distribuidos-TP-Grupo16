@@ -105,7 +105,8 @@ services:
     - CHUNK_MAX_BYTES=65536
     - CLIENT_ID=0
     - CONNECT_TIMEOUT_SECONDS=30
-    - DATA_DIR=/data
+    - DATA_DIR=/data/input
+    - OUTPUT_DIR=/data/output
     - IO_TIMEOUT_SECONDS=3600
     - LOGGING_LEVEL=INFO
     - PYTHONUNBUFFERED=1
@@ -114,4 +115,5 @@ services:
     - SERVER_PORT=5678
     - TRANSACTIONS_FILE=LI-Mini_Trans.csv
     volumes:
-    - ./data/datasets/client-1/LI-Mini:/data:ro
+    - ./data/datasets/client-1/LI-Mini:/data/input:ro
+    - ./data/output:/data/output:rw

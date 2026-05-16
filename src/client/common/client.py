@@ -27,7 +27,7 @@ MIN_TCP_PORT = 1
 MAX_TCP_PORT = 65535
 MAX_CLIENT_ID = 2**32 - 1
 CSV_EXTENSIONS = (".csv",)
-
+MAX_LOGGED_RESULT_LINES = 5
 
 @dataclass(frozen=True)
 class ClientConfig:
@@ -191,20 +191,29 @@ class Client:
         sender = self.require_sender()
         logging.info("client_results_wait | client_id=%s", config.client_id)
 
+        output_dir = os.getenv("OUTPUT_DIR", os.path.join(config.data_dir, "output"))
+        os.makedirs(output_dir, exist_ok=True)
+        output_file = os.path.join(output_dir, f"results_q1_{config.client_id}.csv")
+        
         result_lines = 0
-        for line in sender.iter_result_lines(config.result_line_max_bytes):
-            result_lines += 1
-            logging.info(
-                "client_result_line | client_id=%s | line_number=%s | data=%s",
-                config.client_id,
-                result_lines,
-                line,
-            )
+        with open(output_file, "w") as f:
+            f.write("date,from_bank,from_account,to_bank,to_account,amount,currency,format\n")
+            for line in sender.iter_result_lines(config.result_line_max_bytes):
+                result_lines += 1
+                f.write(line + "\n")
+                if result_lines <= MAX_LOGGED_RESULT_LINES:
+                    logging.info(
+                        "client_result_line | client_id=%s | line_number=%s | data=%s",
+                        config.client_id,
+                        result_lines,
+                        line,
+                    )
 
         logging.info(
-            "client_results_finished | client_id=%s | lines=%s",
+            "client_results_finished | client_id=%s | lines=%s | file=%s",
             config.client_id,
             result_lines,
+            output_file,
         )
 
     def require_config(self) -> ClientConfig:
