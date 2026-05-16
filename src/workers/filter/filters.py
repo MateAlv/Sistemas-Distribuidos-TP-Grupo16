@@ -252,7 +252,7 @@ class FilterWorker:
         '''
         Envia una transaccion a la cola de salida correspondiente segun la configuracion del worker
         '''
-        logging.info(f"Transaction {transaction} passed filter in filter_{CONFIGURATION} with id {ID}, forwarding to output")
+        logging.debug(f"Transaction {transaction} passed filter in filter_{CONFIGURATION} with id {ID}, forwarding to output")
         payload = self.transaction_serializer.serialize(transaction)
         message = self.internal_packet_serializer.create_packet(
             msg_type=message_protocol.common.MessageType.DATA,

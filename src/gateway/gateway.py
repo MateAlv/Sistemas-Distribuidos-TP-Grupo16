@@ -3,6 +3,8 @@ import logging
 import select
 import socket
 import threading
+import queue
+import os
 from dataclasses import dataclass, field
 
 from common.message_protocol.external import FileChunk, recv_exact, sendall
@@ -11,7 +13,9 @@ from common.message_protocol.external.types import (
     MSG_CHUNK, MSG_EOF,
     file_ingestor_routing_key,
 )
-from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
+from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ, MessageMiddlewareQueueRabbitMQ
+from common.message_protocol.internal import InternalProtocol, TransactionSerializer
+from common.message_protocol.common import MessageType
 
 
 @dataclass(frozen=True)
@@ -37,8 +41,20 @@ class Gateway:
         self._config = config
         self._server_sock: socket.socket | None = None
         self._stopped = False
+        
+        self._client_queues = {}
+        self._client_queues_lock = threading.Lock()
+        self._results_consumer = None
+        self._results_thread = None
 
     def run(self) -> None:
+        gateway_queue = os.environ.get("GATEWAY_QUEUE", "gateway_results_queue")
+        self._results_consumer = MessageMiddlewareQueueRabbitMQ(
+            self._config.mom_host, gateway_queue
+        )
+        self._results_thread = threading.Thread(target=self._consume_results_loop, daemon=True)
+        self._results_thread.start()
+
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
             self._server_sock = server_sock
             server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -67,6 +83,12 @@ class Gateway:
 
     def stop(self) -> None:
         self._stopped = True
+        if self._results_consumer is not None:
+            try:
+                self._results_consumer.stop_consuming()
+                self._results_consumer.close()
+            except Exception:
+                pass
         if self._server_sock is not None:
             try:
                 self._server_sock.shutdown(socket.SHUT_RDWR)
@@ -78,21 +100,36 @@ class Gateway:
                 pass
 
     def _handle_client(self, client_sock: socket.socket) -> None:
+        client_id = None
         try:
-            self._serve_client(client_sock)
+            client_id = self._serve_client(client_sock)
         except Exception as e:
-            logging.error("gateway_client_error | error=%s", e)
+            logging.error("gateway_client_error | client_id=%s | error=%s", client_id, e)
         finally:
             try:
                 client_sock.close()
             except OSError:
                 pass
+            if client_id is not None:
+                logging.info("gateway_session_terminated | client_id=%s", client_id)
 
-    def _serve_client(self, client_sock: socket.socket) -> None:
+    def _serve_client(self, client_sock: socket.socket) -> int:
         client_id = self._recv_handshake(client_sock)
         session = ClientSession(client_id=client_id, sock=client_sock)
-        self._forward_chunks(session)
-        self._wait_for_results(session)
+        
+        # Register client queue early to avoid race condition with results consumer
+        q = queue.Queue()
+        with self._client_queues_lock:
+            self._client_queues[client_id] = q
+        
+        try:
+            self._forward_chunks(session)
+            self._wait_for_results(session, q)
+        finally:
+            with self._client_queues_lock:
+                self._client_queues.pop(client_id, None)
+        
+        return client_id
 
     def _recv_handshake(self, client_sock: socket.socket) -> int:
         msg_type = int.from_bytes(recv_exact(client_sock, 1), "big")
@@ -169,25 +206,56 @@ class Gateway:
         finally:
             publisher.close()
 
-    def _wait_for_results(self, session: ClientSession) -> None:
-        logging.info(
-            "gateway_results_wait | client_id=%s | status=not_implemented",
-            session.client_id,
-        )
-
+    def _wait_for_results(self, session: ClientSession, q: queue.Queue) -> None:
+        logging.info("gateway_results_wait | client_id=%s", session.client_id)
+        
         while not self._stopped:
-            readable, _, _ = select.select([session.sock], [], [], 1.0)
-            if not readable:
-                continue
+            try:
+                result = q.get(timeout=1.0)
+                if result is None:
+                    logging.info("gateway_results_eof | client_id=%s", session.client_id)
+                    break
+                sendall(session.sock, result.encode("utf-8"))
+            except queue.Empty:
+                readable, _, _ = select.select([session.sock], [], [], 0.0)
+                if readable:
+                    data = session.sock.recv(1, socket.MSG_PEEK)
+                    if not data:
+                        logging.info("gateway_client_closed | client_id=%s", session.client_id)
+                        return  
 
-            data = session.sock.recv(1, socket.MSG_PEEK)
-            if not data:
-                logging.info("gateway_client_closed | client_id=%s", session.client_id)
-                return
+    def _consume_results_loop(self) -> None:
+        internal_serializer = InternalProtocol()
+        transaction_serializer = TransactionSerializer()
+        
+        def callback(message, ack, nack):
+            try:
+                msg_type, client_id, payload = internal_serializer.unpack_packet(message)
+                
+                with self._client_queues_lock:
+                    client_queue = self._client_queues.get(client_id)
+                
+                if not client_queue:
+                    ack()
+                    return
+                
+                if msg_type == MessageType.DATA:
+                    tx = transaction_serializer.deserialize(payload)
+                    csv_line = f"{tx.date},{tx.from_bank},{tx.from_account},{tx.to_bank},{tx.to_account},{tx.amount},{tx.currency},{tx.format}\n"
+                    client_queue.put(csv_line)
+                elif msg_type == MessageType.EOF:
+                    client_queue.put(None)
+                
+                ack()
+            except Exception as e:
+                logging.error("gateway_results_consumer_error | error=%s", e)
+                nack()
 
-            raise RuntimeError(
-                f"unexpected client data after finish for client_id={session.client_id}"
-            )
+        try:
+            self._results_consumer.start_consuming(callback)
+        except Exception as e:
+            if not self._stopped:
+                logging.error("gateway_results_consumer_stopped | error=%s", e)
 
 
 def _send_ack(sock: socket.socket) -> None:
