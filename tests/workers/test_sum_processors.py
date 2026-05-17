@@ -1,9 +1,16 @@
+import pytest
+
+from common.constants import C_Q2, C_Q3
 from common.domain.transaction import Transaction
 from common.message_protocol.partial_result_serializer import (
     Q2BankMaxPartialSerializer,
     Q3PaymentFormatPartialSerializer,
 )
-from workers.sum.processors import Q2SumProcessor, Q3SumProcessor
+from workers.sum.processors import (
+    Q2SumProcessor,
+    Q3SumProcessor,
+    create_sum_processor,
+)
 
 
 def transaction(
@@ -59,6 +66,19 @@ def test_q3_processor_accumulates_amount_and_count_by_payment_format():
         "ACH": 2,
         "Wire": 1,
     }
+
+
+def test_create_sum_processor_dispatches_by_configuration():
+    assert isinstance(create_sum_processor(C_Q2), Q2SumProcessor)
+    assert isinstance(create_sum_processor(C_Q3), Q3SumProcessor)
+
+    with pytest.raises(ValueError):
+        create_sum_processor("Q1")
+
+
+def test_processors_emit_no_partials_when_empty():
+    assert Q2SumProcessor().partials() == []
+    assert Q3SumProcessor().partials() == []
 
 
 def test_q2_processor_emits_serialized_partials_by_bank():
