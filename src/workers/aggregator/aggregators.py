@@ -91,10 +91,6 @@ class AggregatorWorker:
         self.max_tx_by_client: dict[int, dict[str, Transaction]] = {}
         self.exchange_threads = []
 
-        # TODO: borrar esto
-        self.input_queue = next(iter(self.input_queues.values()), None)
-        self.output_queue = next(iter(self.output_queues.values()), None)
-
     def _increment_count(self, client_id: int) -> int:
         with self.lock:
             current = self.counts_by_client.get(client_id, 0) + 1
@@ -111,7 +107,8 @@ class AggregatorWorker:
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
             payload=self.aggregation_serializer.serialize(count),
         )
-        self.output_queue.send(packet)
+        # como estamos mandando count, estamos en Q5
+        self.output_queues[DATA_QUEUE].send(packet)
 
     def _record_max_transaction(self, client_id: int, transaction: Transaction) -> None:
         with self.lock:
@@ -119,6 +116,26 @@ class AggregatorWorker:
             current = current_by_bank.get(transaction.from_bank)
             if current is None or transaction.amount > current.amount:
                 current_by_bank[transaction.from_bank] = transaction
+
+    def _deliver_output(self, packet: bytes) -> None:
+        try:
+            if CONFIGURATION == C_Q2:
+                queue = self.output_queues.get(AGG_Q2_OUTPUT_QUEUE)
+            elif CONFIGURATION == C_Q5:
+                queue = self.output_queues.get(DATA_QUEUE)
+            elif CONFIGURATION == C_Q3:
+                queue = self.output_queues.get(AGG_Q3_OUTPUT_QUEUE)
+            else:
+                # fallback: primera queue disponible
+                queue = next(iter(self.output_queues.values()), None)
+
+            if queue is None:
+                logging.warning("No output queue configured for mode %s", CONFIGURATION)
+                return
+
+            queue.send(packet)
+        except Exception as e:
+            logging.error("aggregation_output_send_error | id=%s | error=%s", ID, e)
 
     def _send_max_transactions(self, client_id: int) -> None:
         with self.lock:
@@ -130,7 +147,7 @@ class AggregatorWorker:
                 client_id_bytes=client_id.to_bytes(16, byteorder="big"),
                 payload=self.transaction_serializer.serialize(transaction),
             )
-            self.output_queue.send(packet)
+            self._deliver_output(packet)
 
     def _process_data_message(self, message: bytes) -> None:
         try:
@@ -170,7 +187,7 @@ class AggregatorWorker:
                             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
                             payload=self.transaction_serializer.serialize(transaction),
                         )
-                        self.output_queue.send(packet)
+                        self._deliver_output(packet)
 
                     # send EOF with expected_total = msgs_sent using control message format
                     control_payload = ControlMessageSerializer().serialize(
@@ -181,7 +198,7 @@ class AggregatorWorker:
                         client_id_bytes=client_id.to_bytes(16, byteorder="big"),
                         payload=control_payload,
                     )
-                    self.output_queue.send(eof_packet)
+                    self._deliver_output(eof_packet)
 
                     # cleanup memory for this client
                     with self.lock:
