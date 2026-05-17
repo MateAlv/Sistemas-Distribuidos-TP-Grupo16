@@ -7,3 +7,4 @@ class MessageType(IntEnum):
     PROCESSED_ANSWER = 3
     FLUSH_ORDER = 4
     FLUSH_ACK = 5
+    AGGREGATED_COUNT = 6
