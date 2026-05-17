@@ -284,14 +284,30 @@ class SumWorker:
             control_message = self.control_serializer.deserialize(payload)
             leader_id = control_message.sender_id
             expected_total = control_message.expected_total
+            duplicate_eof = False
 
             with self.lock:
-                processed_count = self.processed_by_client.get(client_id, 0)
-                partials = self._partials_for_client(client_id)
-                self.pending_eof_by_client[client_id] = (
-                    expected_total,
+                if client_id in self.pending_eof_by_client:
+                    duplicate_eof = True
+                else:
+                    processed_count = self.processed_by_client.get(client_id, 0)
+                    partials = self._partials_for_client(client_id)
+                    self.pending_eof_by_client[client_id] = (
+                        expected_total,
+                        leader_id,
+                    )
+
+            if duplicate_eof:
+                logging.info(
+                    "sum_duplicate_eof_control | configuration=%s | "
+                    "id=%s | client_id=%s | leader_id=%s",
+                    CONFIGURATION,
+                    ID,
+                    client_id,
                     leader_id,
                 )
+                ack()
+                return
 
             forwarded_count = self._forward_partials(
                 client_id,

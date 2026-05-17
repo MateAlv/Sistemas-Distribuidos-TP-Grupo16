@@ -2,6 +2,8 @@ import importlib
 import sys
 import types
 
+import pytest
+
 from common.message_protocol.common import ControlMessage, MessageType
 
 
@@ -112,3 +114,48 @@ def test_eof_broadcast_snapshots_partials_while_holding_lock(monkeypatch):
     assert client_id in worker.pending_eof_by_client
     assert len(output_exchange.sent) == 1
     assert reports == [(client_id, 0, 3, 1)]
+
+
+def test_duplicate_eof_broadcast_is_acked_without_reflushing(monkeypatch):
+    module = import_sum_module(monkeypatch)
+    worker = module.SumWorker()
+    client_id = 7
+    output_exchange = FakeExchange()
+    events = []
+
+    worker.pending_eof_by_client[client_id] = (3, 0)
+
+    monkeypatch.setattr(
+        worker,
+        "_partials_for_client",
+        lambda client_id: pytest.fail("partials should not be read again"),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_forward_partials",
+        lambda *args: pytest.fail("partials should not be forwarded again"),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_report_to_leader",
+        lambda *args, **kwargs: pytest.fail("leader should not be reported again"),
+    )
+
+    payload = worker.control_serializer.serialize(
+        ControlMessage(sender_id=0, expected_total=3, processed_count=0)
+    )
+    message = worker.internal_protocol.create_packet(
+        msg_type=MessageType.EOF_RECEIVED,
+        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        payload=payload,
+    )
+
+    worker._handle_eof_broadcast(
+        message,
+        ack=lambda: events.append("ack"),
+        nack=lambda: events.append("nack"),
+        output_exchanges=[output_exchange],
+    )
+
+    assert events == ["ack"]
+    assert output_exchange.sent == []
