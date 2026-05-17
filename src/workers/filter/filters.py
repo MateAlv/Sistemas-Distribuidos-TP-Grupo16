@@ -28,9 +28,10 @@ SUM_Q2_QUEUE = os.environ["SUM_Q2_QUEUE"]
 FILTER_Q3_QUEUE = os.environ["FILTER_Q3_QUEUE"]
 SCATTER_GATHER_MAPPER_QUEUE = os.environ["SCATTER_GATHER_MAPPER_QUEUE"]
 FILTER_Q5_USD_QUEUE = os.environ["FILTER_Q5_USD_QUEUE"]
-# Exchanges de Salida Posibles (necesario hacer sharding)
+# Cola de salida para el sum de Q3. SUM_PREFIX se conserva para compatibilidad
+# con configuraciones anteriores y para los nombres de control de Sum.
 SUM_PREFIX = os.environ["SUM_PREFIX"]
-SUM_Q3_AMOUNT = int(os.environ["SUM_Q3_AMOUNT"])
+SUM_Q3_QUEUE = os.getenv("SUM_Q3_QUEUE", SUM_PREFIX)
 # Para control en token ring
 FILTER_AMOUNT = int(os.environ["FILTER_AMOUNT"])
 FILTER_PREFIX = os.environ["FILTER_PREFIX"] + "_" + CONFIGURATION
@@ -72,21 +73,19 @@ class FilterWorker:
                 MOM_HOST, FILTER_DATE_QUEUE
             )
         if CONFIGURATION == C_DATE:
-            # Para el filtro de tipo de moneda, se necesitan dos colas de salida y un exchange para los Sum:
+            # Para el filtro de fecha, se necesitan tres colas de salida:
             #    - Una para el filtro de Q3
             #    - Una para el scatter gather mapper de Q4
-            #    - Un exchange para el sum de Q3, con N colas dependiendo del sharding
+            #    - Una para el sum de Q3
             self.output_queues[FILTER_Q3_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
                 MOM_HOST, FILTER_Q3_QUEUE
             )
             self.output_queues[SCATTER_GATHER_MAPPER_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
                 MOM_HOST, SCATTER_GATHER_MAPPER_QUEUE
             )
-            for i in range(SUM_Q3_AMOUNT):
-                data_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
-                    MOM_HOST, SUM_PREFIX, [f"{SUM_PREFIX}_{i}"]
-                )
-                self.output_exchanges.append(data_output_exchange)
+            self.output_queues[SUM_Q3_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                MOM_HOST, SUM_Q3_QUEUE
+            )
 
         # Seccion de control
         # Primero Identificamos al Lider
@@ -272,9 +271,7 @@ class FilterWorker:
             # Si la transaccion esta entre las fechas 2022-09-01 y 2022-09-05, va al filtro de Q3
             # Si la transaccion esta entre las fechas 2022-09-01 y 2022-09-05, va al scatter gather mapper de Q4
             if self._filter_transaction(transaction, start_date="2022-09-06", end_date="2022-09-15"):
-                # Shardeo por el id de la transaccion
-                shard = transaction.hash_by_payment_format(SUM_Q3_AMOUNT)
-                self.output_exchanges[shard].send(message)
+                self.output_queues[SUM_Q3_QUEUE].send(message)
             if self._filter_transaction(transaction, start_date="2022-09-01", end_date="2022-09-05"):
                 self.output_queues[FILTER_Q3_QUEUE].send(message)
                 self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(message)
@@ -304,8 +301,7 @@ class FilterWorker:
             self.output_queues[SUM_Q2_QUEUE].send(message)
             self.output_queues[FILTER_DATE_QUEUE].send(message)
         if CONFIGURATION == C_DATE:
-            for exchange in self.output_exchanges:
-                exchange.send(message)
+            self.output_queues[SUM_Q3_QUEUE].send(message)
             self.output_queues[FILTER_Q3_QUEUE].send(message)
             self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(message)
 
