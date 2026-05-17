@@ -3,6 +3,6 @@ FROM python:3-alpine
 RUN pip3 install pika
 
 COPY common ./common
-COPY workers/scatter_gather .
+COPY workers/scatter_gather/mapper .
 
 ENTRYPOINT ["python3", "main.py"]
