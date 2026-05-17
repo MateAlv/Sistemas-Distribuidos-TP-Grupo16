@@ -175,9 +175,9 @@ class SumWorker:
             return []
         return processor.partials()
 
-    def _flush_client_partials(self, client_id: int, exchanges) -> int:
+    def _forward_partials(self, client_id: int, partials, exchanges) -> int:
         forwarded = 0
-        for partition_key, payload in self._partials_for_client(client_id):
+        for partition_key, payload in partials:
             self._forward_partial(client_id, partition_key, payload, exchanges)
             forwarded += 1
         return forwarded
@@ -287,13 +287,15 @@ class SumWorker:
 
             with self.lock:
                 processed_count = self.processed_by_client.get(client_id, 0)
+                partials = self._partials_for_client(client_id)
                 self.pending_eof_by_client[client_id] = (
                     expected_total,
                     leader_id,
                 )
 
-            forwarded_count = self._flush_client_partials(
+            forwarded_count = self._forward_partials(
                 client_id,
+                partials,
                 output_exchanges,
             )
             self._report_to_leader(
