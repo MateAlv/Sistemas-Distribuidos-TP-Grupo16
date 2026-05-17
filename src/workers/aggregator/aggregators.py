@@ -107,8 +107,7 @@ class AggregatorWorker:
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
             payload=self.aggregation_serializer.serialize(count),
         )
-        # como estamos mandando count, estamos en Q5
-        self.output_queues[DATA_QUEUE].send(packet)
+        self._deliver_output(packet)
 
     def _record_max_transaction(self, client_id: int, transaction: Transaction) -> None:
         with self.lock:
@@ -247,9 +246,10 @@ class AggregatorWorker:
             self.exchange_threads.append(t)
 
         try:
+            primary_queue = next(iter(self.input_queues.values()), None)
             # La input queue principal corre en el thread principal.
-            if self.input_queue is not None:
-                self.input_queue.start_consuming(self.process_data_messages)
+            if primary_queue is not None:
+                primary_queue.start_consuming(self.process_data_messages)
             elif self.exchange_threads:
                 # Si no hay cola principal (ej. Q2), bloqueamos en los exchanges activos.
                 for t in self.exchange_threads:
