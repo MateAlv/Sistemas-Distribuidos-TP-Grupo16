@@ -12,6 +12,11 @@ from common.message_protocol.control_message_serializer import ControlMessageSer
 from common.message_protocol.internal import InternalProtocol
 from common.message_protocol.transaction_serializer import TransactionSerializer
 
+try:
+    from processors import create_sum_processor
+except ImportError:
+    from workers.sum.processors import create_sum_processor
+
 
 ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
@@ -52,6 +57,7 @@ class SumWorker:
         self.leader_processed_by_client = {}
         self.leader_forwarded_by_client = {}
         self.leader_expected_by_client = {}
+        self.processors_by_client = {}
 
         self.control_consumer = None
         self.response_consumer = None
@@ -136,6 +142,7 @@ class SumWorker:
             exchange.send(self._packet(MessageType.EOF, client_id, payload))
 
     def _process_transaction(self, client_id: int, transaction: Transaction) -> None:
+        self._processor_for_client(client_id).process(transaction)
         logging.debug(
             "sum_transaction | configuration=%s | id=%s | client_id=%s | "
             "from_bank=%s | payment_format=%s | amount=%s",
@@ -147,11 +154,26 @@ class SumWorker:
             transaction.amount,
         )
 
-    def _partials_for_transaction(self, transaction: Transaction):
-        return []
+    def _processor_for_client(self, client_id: int):
+        return self.processors_by_client.setdefault(
+            client_id,
+            create_sum_processor(CONFIGURATION),
+        )
+
+    def _partials_for_transaction(
+        self,
+        client_id: int,
+        transaction: Transaction,
+    ):
+        return self._processor_for_client(client_id).partials_for_transaction(
+            transaction
+        )
 
     def _partials_for_client(self, client_id: int):
-        return []
+        processor = self.processors_by_client.get(client_id)
+        if processor is None:
+            return []
+        return processor.partials()
 
     def _flush_client_partials(self, client_id: int, exchanges) -> int:
         forwarded = 0
@@ -166,7 +188,10 @@ class SumWorker:
         transaction: Transaction,
     ) -> int:
         forwarded = 0
-        for partition_key, payload in self._partials_for_transaction(transaction):
+        for partition_key, payload in self._partials_for_transaction(
+            client_id,
+            transaction,
+        ):
             self._forward_partial(
                 client_id,
                 partition_key,
@@ -329,6 +354,7 @@ class SumWorker:
         self.leader_processed_by_client.pop(client_id, None)
         self.leader_forwarded_by_client.pop(client_id, None)
         self.leader_expected_by_client.pop(client_id, None)
+        self.processors_by_client.pop(client_id, None)
 
     def process_message(self, message: bytes, ack, nack) -> None:
         try:
