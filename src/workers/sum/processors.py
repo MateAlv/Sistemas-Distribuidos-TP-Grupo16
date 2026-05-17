@@ -13,11 +13,14 @@ class SumProcessor:
 
 
 class Q2SumProcessor(SumProcessor):
-    pass
+    def __init__(self) -> None:
+        self.max_by_bank = {}
 
 
 class Q3SumProcessor(SumProcessor):
-    pass
+    def __init__(self) -> None:
+        self.amount_sum_by_payment_format = {}
+        self.count_by_payment_format = {}
 
 
 def create_sum_processor(configuration: str) -> SumProcessor:
