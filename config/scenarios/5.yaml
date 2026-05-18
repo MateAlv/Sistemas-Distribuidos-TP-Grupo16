@@ -69,6 +69,7 @@ services:
     environment:
     - AGGREGATION_AMOUNT=3
     - AGGREGATION_PREFIX=ckcariaxuf
+    - CONFIGURATION=Q5
     - ID=0
     - MOM_HOST=szgpulnqog
     - OUTPUT_QUEUE=bqdchp
@@ -85,6 +86,7 @@ services:
     environment:
     - AGGREGATION_AMOUNT=3
     - AGGREGATION_PREFIX=ckcariaxuf
+    - CONFIGURATION=Q5
     - ID=1
     - MOM_HOST=szgpulnqog
     - OUTPUT_QUEUE=bqdchp
@@ -101,6 +103,7 @@ services:
     environment:
     - AGGREGATION_AMOUNT=3
     - AGGREGATION_PREFIX=ckcariaxuf
+    - CONFIGURATION=Q5
     - ID=2
     - MOM_HOST=szgpulnqog
     - OUTPUT_QUEUE=bqdchp

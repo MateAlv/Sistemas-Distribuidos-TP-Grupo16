@@ -1,22 +1,21 @@
 import os
 
-from common.constants import C_Q2, C_Q5
-from common.domain.transaction import Transaction
+from common.constants import C_Q2, C_Q3, C_Q5
+from common.domain.partial_result import Q2BankMaxPartial, Q3PaymentFormatPartial
+from common.message_protocol.aggregation_serializer import AggregationSerializer
+from common.message_protocol.partial_result_serializer import (
+    Q2BankMaxPartialSerializer,
+    Q3AverageResultSerializer,
+    Q3PaymentFormatPartialSerializer,
+)
 from common import middleware as _middleware
 
 
 os.environ.setdefault("ID", "1")
 os.environ.setdefault("MOM_HOST", "localhost")
 os.environ.setdefault("CONFIGURATION", C_Q5)
-os.environ.setdefault("INPUT_QUEUE", "test_input")
-os.environ.setdefault("DATA_QUEUE", "test_data")
-os.environ.setdefault("SUM_Q2_EXCHANGE", "test_sum_q2_exchange")
-os.environ.setdefault("AGG_Q2_OUTPUT_QUEUE", "test_agg_q2_output")
 os.environ.setdefault("AGGREGATION_PREFIX", "test_aggregation")
 os.environ.setdefault("OUTPUT_QUEUE", "test_output_queue")
-os.environ.setdefault("JOIN_Q3_EXCHANGE", "test_join_q3_exchange")
-os.environ.setdefault("AGG_Q3_DATA_QUEUE", "test_agg_q3_data")
-os.environ.setdefault("AGG_Q3_OUTPUT_QUEUE", "test_agg_q3_output")
 
 
 # Replace real RabbitMQ middleware with a dummy that doesn't connect
@@ -64,102 +63,135 @@ class DummyQueue:
         self.sent.append(packet)
 
 
-def test_q5_streaming_counts():
-    # Ensure module is in Q5 mode
+def _send_data(worker, client_id: int, payload: bytes) -> None:
+    packet = worker.internal_protocol.create_packet(
+        msg_type=MessageType.DATA,
+        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        payload=payload,
+    )
+    worker._process_data_message(packet)
+
+
+def _send_eof(worker, client_id: int) -> None:
+    packet = worker.internal_protocol.create_packet(
+        msg_type=MessageType.EOF,
+        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        payload=b"",
+    )
+    worker._process_data_message(packet)
+
+
+def test_q5_counts_each_data_message():
     import workers.aggregator.aggregators as ag
 
     ag.CONFIGURATION = C_Q5
 
     worker = AggregatorWorker()
     out = DummyQueue()
-    worker.output_queues[ag.DATA_QUEUE] = out
+    worker.output_queue = out
 
     client_id = 1
-    for i in range(1, 4):
-        tx = Transaction(
-            "2020-01-01",
-            "A",
-            "acctA",
-            "B",
-            "acctB",
-            i * 10,
-            "USD",
-            "LI-Mini",
-        )
-        packet = worker.internal_packet_serializer.create_packet(
-            msg_type=MessageType.DATA,
-            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-            payload=worker.transaction_serializer.serialize(tx),
-        )
-        worker._process_data_message(packet)
-    # Now send EOF and expect a single EOF with the final count (3)
-    eof_packet_in = worker.internal_packet_serializer.create_packet(
-        msg_type=MessageType.EOF,
-        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-        payload=b"",
-    )
-    worker._process_data_message(eof_packet_in)
+    # Q5 has no Sum: Filter Q5 USD<1 forwards each filtered Transaction.
+    # The payload content is irrelevant; every DATA counts as one.
+    for _ in range(5):
+        _send_data(worker, client_id, b"any-transaction-payload")
+    _send_eof(worker, client_id)
 
-    # last sent packet should be EOF with aggregated count == 3
-    last = out.sent[-1]
-    msg_type, cid, payload = worker.internal_packet_serializer.unpack_packet(last)
-    assert msg_type == MessageType.EOF
-    val = worker.aggregation_serializer.deserialize(payload)
-    assert val == 3
+    # Expect a DATA message with the partial total (5) followed by an EOF.
+    assert len(out.sent) == 2
+    data_packet, eof_packet = out.sent
+
+    m_type, _, payload = worker.internal_protocol.unpack_packet(data_packet)
+    assert m_type == MessageType.DATA
+    assert AggregationSerializer.deserialize(payload) == 5
+
+    m_type, _, payload = worker.internal_protocol.unpack_packet(eof_packet)
+    assert m_type == MessageType.EOF
+    ctrl = ControlMessageSerializer().deserialize(payload)
+    assert ctrl.expected_total == 1
 
 
-def test_q2_eof_expected_total_and_maxima():
+def test_q2_keeps_max_per_bank():
     import workers.aggregator.aggregators as ag
 
     ag.CONFIGURATION = C_Q2
 
     worker = AggregatorWorker()
     out = DummyQueue()
-    worker.output_queues[ag.AGG_Q2_OUTPUT_QUEUE] = out
+    worker.output_queue = out
 
     client_id = 2
-    # send multiple transactions for two banks
-    tx1 = Transaction("2020-01-01", "X", "a1", "Y", "b1", 10, "USD", "LI-Mini")
-    tx2 = Transaction("2020-01-01", "X", "a2", "Y", "b2", 30, "USD", "LI-Mini")
-    tx3 = Transaction("2020-01-01", "Z", "a3", "Y", "b3", 20, "USD", "LI-Mini")
+    # Partials arriving (possibly out of order) from the Sum workers.
+    partials = [
+        Q2BankMaxPartial(bank_id="X", from_account="a1", amount=10.0),
+        Q2BankMaxPartial(bank_id="X", from_account="a2", amount=30.0),
+        Q2BankMaxPartial(bank_id="Z", from_account="a3", amount=20.0),
+    ]
+    for partial in partials:
+        _send_data(worker, client_id, Q2BankMaxPartialSerializer.serialize(partial))
+    _send_eof(worker, client_id)
 
-    for tx in (tx1, tx2, tx3):
-        packet = worker.internal_packet_serializer.create_packet(
-            msg_type=MessageType.DATA,
-            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-            payload=worker.transaction_serializer.serialize(tx),
-        )
-        worker._process_data_message(packet)
-
-    # send EOF
-    eof_packet_in = worker.internal_packet_serializer.create_packet(
-        msg_type=MessageType.EOF,
-        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-        payload=b"",
-    )
-    worker._process_data_message(eof_packet_in)
-
-    # output_queue should have DATA packets for each bank max (2 banks) and an EOF
     sent = out.sent
-    assert len(sent) == 3
+    assert len(sent) == 3  # 2 bank maxima + EOF
 
     data_packets = sent[:-1]
     eof_packet = sent[-1]
 
     max_by_bank = {}
     for packet in data_packets:
-        m_type, _, tx_payload = worker.internal_packet_serializer.unpack_packet(packet)
+        m_type, _, payload = worker.internal_protocol.unpack_packet(packet)
         assert m_type == MessageType.DATA
-        tx = worker.transaction_serializer.deserialize(tx_payload)
-        max_by_bank[tx.from_bank] = tx.amount
+        result = Q2BankMaxPartialSerializer.deserialize(payload)
+        max_by_bank[result.bank_id] = result.amount
 
-    assert max_by_bank["X"] == 30
-    assert max_by_bank["Z"] == 20
+    assert max_by_bank["X"] == 30.0
+    assert max_by_bank["Z"] == 20.0
 
-    # last packet should be EOF
-    msg_type, cid, payload = worker.internal_packet_serializer.unpack_packet(eof_packet)
-    assert msg_type == MessageType.EOF
-
+    m_type, _, payload = worker.internal_protocol.unpack_packet(eof_packet)
+    assert m_type == MessageType.EOF
     ctrl = ControlMessageSerializer().deserialize(payload)
-    # expected_total should equal number of DATA messages sent (2 banks)
+    assert ctrl.expected_total == 2
+
+
+def test_q3_averages_per_payment_format():
+    import workers.aggregator.aggregators as ag
+
+    ag.CONFIGURATION = C_Q3
+
+    worker = AggregatorWorker()
+    out = DummyQueue()
+    worker.output_queue = out
+
+    client_id = 3
+    # Two Sum workers each contribute partials for the same payment format.
+    partials = [
+        Q3PaymentFormatPartial(payment_format="Wire", amount_sum=100.0, count=4),
+        Q3PaymentFormatPartial(payment_format="Wire", amount_sum=50.0, count=1),
+        Q3PaymentFormatPartial(payment_format="ACH", amount_sum=30.0, count=3),
+    ]
+    for partial in partials:
+        _send_data(
+            worker, client_id, Q3PaymentFormatPartialSerializer.serialize(partial)
+        )
+    _send_eof(worker, client_id)
+
+    sent = out.sent
+    assert len(sent) == 3  # 2 payment formats + EOF
+
+    data_packets = sent[:-1]
+    eof_packet = sent[-1]
+
+    avg_by_format = {}
+    for packet in data_packets:
+        m_type, _, payload = worker.internal_protocol.unpack_packet(packet)
+        assert m_type == MessageType.DATA
+        result = Q3AverageResultSerializer.deserialize(payload)
+        avg_by_format[result.payment_format] = result.average
+
+    assert avg_by_format["Wire"] == 150.0 / 5
+    assert avg_by_format["ACH"] == 30.0 / 3
+
+    m_type, _, payload = worker.internal_protocol.unpack_packet(eof_packet)
+    assert m_type == MessageType.EOF
+    ctrl = ControlMessageSerializer().deserialize(payload)
     assert ctrl.expected_total == 2
