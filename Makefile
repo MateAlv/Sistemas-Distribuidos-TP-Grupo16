@@ -3,7 +3,11 @@ PWD := $(shell pwd)
 COMPOSE_FILE := docker-compose.yaml
 TEST_COMPOSE_FILE := docker-compose.test.yaml
 TEST_PROJECT := mla-forward-pass-test
-TEST_SUCCESS_PATTERN := Forward pass successful - Mate | filter=Q1
+TEST_Q1_SUCCESS_PATTERN := Forward pass successful - Mate | filter=Q1
+TEST_Q2_SUM_PARTIAL_PATTERN := sum_forward_partial | configuration=Q2
+TEST_Q3_SUM_PARTIAL_PATTERN := sum_forward_partial | configuration=Q3
+TEST_Q2_SUM_EOF_PATTERN := sum_forward_eof_to_aggregator | configuration=Q2
+TEST_Q3_SUM_EOF_PATTERN := sum_forward_eof_to_aggregator | configuration=Q3
 SCENARIOS_DIR := config/scenarios
 
 up:
@@ -23,12 +27,39 @@ logs:
 
 test:
 	bash -lc 'set -euo pipefail; \
+		log_file=/tmp/$(TEST_PROJECT).log; \
+		logs_pid=""; \
+		tail_pid=""; \
 		cleanup() { docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) down --volumes --remove-orphans >/dev/null; }; \
-		trap cleanup EXIT; \
+		stop_logs() { \
+			if [ -n "$$tail_pid" ]; then kill "$$tail_pid" >/dev/null 2>&1 || true; wait "$$tail_pid" >/dev/null 2>&1 || true; fi; \
+			if [ -n "$$logs_pid" ]; then kill "$$logs_pid" >/dev/null 2>&1 || true; wait "$$logs_pid" >/dev/null 2>&1 || true; fi; \
+		}; \
+		wait_for_pattern() { \
+			pattern="$$1"; \
+			while ! grep -q -- "$$pattern" "$$log_file"; do \
+				if [ "$$SECONDS" -ge "$$deadline" ]; then \
+					echo "missing smoke pattern: $$pattern" >&2; \
+					exit 124; \
+				fi; \
+				sleep 1; \
+			done; \
+		}; \
+		trap "stop_logs; cleanup" EXIT; \
+		: > "$$log_file"; \
 		cleanup; \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) config --quiet; \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) up --build --remove-orphans --detach; \
-		timeout 120s sh -c '\''docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) logs --follow 2>&1 | tee /tmp/$(TEST_PROJECT).log /dev/stderr | grep -m1 --quiet "$(TEST_SUCCESS_PATTERN)"'\''; \
+		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) logs --follow > "$$log_file" 2>&1 & \
+		logs_pid=$$!; \
+		tail -n +1 -f "$$log_file" >&2 & \
+		tail_pid=$$!; \
+		deadline=$$((SECONDS + 120)); \
+		wait_for_pattern "$(TEST_Q1_SUCCESS_PATTERN)"; \
+		wait_for_pattern "$(TEST_Q2_SUM_PARTIAL_PATTERN)"; \
+		wait_for_pattern "$(TEST_Q3_SUM_PARTIAL_PATTERN)"; \
+		wait_for_pattern "$(TEST_Q2_SUM_EOF_PATTERN)"; \
+		wait_for_pattern "$(TEST_Q3_SUM_EOF_PATTERN)"; \
 		echo "forward_pass_test_success"'
 .PHONY: test
 
