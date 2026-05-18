@@ -50,6 +50,7 @@ class AggregatorWorker:
         self.lock = threading.Lock()
         self.closed = False
         self.processors_by_client = {}
+        self.closed_by_client = set()
 
     def _processor_for_client(self, client_id: int):
         return self.processors_by_client.setdefault(
@@ -67,6 +68,7 @@ class AggregatorWorker:
     def _emit_results(self, client_id: int) -> None:
         with self.lock:
             processor = self.processors_by_client.pop(client_id, None)
+            self.closed_by_client.add(client_id)
 
         payloads = processor.results() if processor is not None else []
         for payload in payloads:
@@ -85,6 +87,18 @@ class AggregatorWorker:
 
     def _process_data_message(self, message: bytes) -> None:
         msg_type, client_id, payload = self.internal_protocol.unpack_packet(message)
+
+        with self.lock:
+            if client_id in self.closed_by_client:
+                logging.info(
+                    "aggregation_message_for_closed_client | configuration=%s | "
+                    "id=%s | client_id=%s | msg_type=%s",
+                    CONFIGURATION,
+                    ID,
+                    client_id,
+                    msg_type,
+                )
+                return
 
         if msg_type == MessageType.DATA:
             with self.lock:

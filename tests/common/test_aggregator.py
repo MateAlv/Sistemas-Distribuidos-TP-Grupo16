@@ -111,6 +111,31 @@ def test_q5_counts_each_data_message():
     assert ctrl.expected_total == 1
 
 
+def test_duplicate_eof_and_late_data_are_ignored():
+    import workers.aggregator.aggregators as ag
+
+    ag.CONFIGURATION = C_Q5
+
+    worker = AggregatorWorker()
+    out = DummyQueue()
+    worker.output_queue = out
+
+    client_id = 7
+    for _ in range(3):
+        _send_data(worker, client_id, b"tx")
+    _send_eof(worker, client_id)
+
+    # First EOF emits exactly: 1 DATA (count=3) + 1 EOF.
+    assert len(out.sent) == 2
+
+    # Duplicate EOF and late DATA for a closed client must be ignored.
+    _send_eof(worker, client_id)
+    _send_data(worker, client_id, b"late-tx")
+    _send_eof(worker, client_id)
+
+    assert len(out.sent) == 2
+
+
 def test_q2_keeps_max_per_bank():
     import workers.aggregator.aggregators as ag
 
