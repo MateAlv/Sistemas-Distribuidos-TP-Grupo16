@@ -1,7 +1,7 @@
 import struct
 
 from common.constants import C_Q2, C_Q3
-from common.domain.partial_result import Q2BankMaxPartial, Q3PaymentFormatPartial
+from common.domain.partial_result import Q2BankMaxPartial, Q3AverageResult, Q3PaymentFormatPartial
 from common.message_protocol.transaction_serializer import TransactionSerializer
 
 
@@ -55,6 +55,28 @@ class Q3PaymentFormatPartialSerializer:
             payment_format=_decode_fixed(payment_format),
             amount_sum=amount_sum,
             count=count,
+        )
+
+
+class Q3AverageResultSerializer:
+    PAYMENT_FORMAT_SIZE = TransactionSerializer.FORMAT_SIZE
+    FORMAT = f"!{PAYMENT_FORMAT_SIZE}sd"
+    SIZE = struct.calcsize(FORMAT)
+
+    @classmethod
+    def serialize(cls, result: Q3AverageResult) -> bytes:
+        return struct.pack(
+            cls.FORMAT,
+            _encode_fixed(result.payment_format, cls.PAYMENT_FORMAT_SIZE, "payment_format"),
+            float(result.average),
+        )
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> Q3AverageResult:
+        payment_format, average = struct.unpack(cls.FORMAT, data)
+        return Q3AverageResult(
+            payment_format=_decode_fixed(payment_format),
+            average=average,
         )
 
 

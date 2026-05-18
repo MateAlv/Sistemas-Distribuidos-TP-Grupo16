@@ -13,3 +13,9 @@ class Q3PaymentFormatPartial:
     payment_format: str
     amount_sum: float
     count: int
+
+
+@dataclass(frozen=True)
+class Q3AverageResult:
+    payment_format: str
+    average: float
