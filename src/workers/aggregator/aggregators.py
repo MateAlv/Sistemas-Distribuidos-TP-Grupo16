@@ -1,5 +1,6 @@
 import logging
 import os
+import struct
 import threading
 
 from common import middleware
@@ -17,24 +18,69 @@ ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
 CONFIGURATION = os.environ["CONFIGURATION"]
 
-# Q5
+# Contrato (Sum -> Agg -> Join) usado por Q3
+AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
+AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
+SUM_AMOUNT = int(os.environ["SUM_AMOUNT"])
+SUM_PREFIX = os.environ["SUM_PREFIX"]
+OUTPUT_QUEUE = os.environ["OUTPUT_QUEUE"]
+
+# Contrato (Q5)
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
 DATA_QUEUE = os.environ["DATA_QUEUE"]
 
-# Q2
+# Contrato (Q2)
 SUM_Q2_EXCHANGE = os.environ["SUM_Q2_EXCHANGE"]
 AGG_Q2_OUTPUT_QUEUE = os.environ["AGG_Q2_OUTPUT_QUEUE"]
 
-# Q3
+# TODO: ver si borrar
 JOIN_Q3_EXCHANGE = os.environ["JOIN_Q3_EXCHANGE"]
 AGG_Q3_DATA_QUEUE = os.environ["AGG_Q3_DATA_QUEUE"]
 AGG_Q3_OUTPUT_QUEUE = os.environ["AGG_Q3_OUTPUT_QUEUE"]
 
-# Este worker solo implementa agregación para:
+# Este worker implementa agregación para:
 #   - "Q2": conserva el máximo monto por banco emisor y, al EOF, emite esos máximos como DATA seguido de un EOF con expected_total.
 #   - "Q5": cuenta transacciones por cliente y emite el total final en el EOF.
-#   - "Q3": TODO
+#   - "Q3": acumula parciales (sum, count) por payment_format provenientes de
+#           los Sum Q3 y, al recibir un EOF de cada Sum, emite el promedio por
+#           payment_format hacia Join Q3.
 
+
+class Q3PartialSerializer:
+    """Wire de los parciales Sum Q3 -> Agg Q3: len(pf) | pf utf-8 | sum(d) | count(Q).
+    """
+
+    _TAIL = struct.calcsize("!dQ")
+
+    @staticmethod
+    def serialize(payment_format: str, total: float, count: int) -> bytes:
+        pf = payment_format.encode("utf-8")
+        return struct.pack("!H", len(pf)) + pf + struct.pack("!dQ", float(total), int(count))
+
+    @staticmethod
+    def deserialize(data: bytes):
+        (pf_len,) = struct.unpack("!H", data[:2])
+        pf = data[2:2 + pf_len].decode("utf-8")
+        total, count = struct.unpack(
+            "!dQ", data[2 + pf_len:2 + pf_len + Q3PartialSerializer._TAIL]
+        )
+        return pf, total, count
+
+
+class Q3ResultSerializer:
+    """Wire del resultado Agg Q3 -> Join Q3: len(pf) | pf utf-8 | average(d)."""
+
+    @staticmethod
+    def serialize(payment_format: str, average: float) -> bytes:
+        pf = payment_format.encode("utf-8")
+        return struct.pack("!H", len(pf)) + pf + struct.pack("!d", float(average))
+
+    @staticmethod
+    def deserialize(data: bytes):
+        (pf_len,) = struct.unpack("!H", data[:2])
+        pf = data[2:2 + pf_len].decode("utf-8")
+        (average,) = struct.unpack("!d", data[2 + pf_len:2 + pf_len + 8])
+        return pf, average
 
 
 class AggregatorWorker:
@@ -59,18 +105,18 @@ class AggregatorWorker:
                 MOM_HOST, AGG_Q2_OUTPUT_QUEUE
             )
 
-        # caso query 3
+        # caso query 3 (Sum -> Agg -> Join)
         if CONFIGURATION == C_Q3:
+            # Entrada: parciales (sum, count) por payment_format desde los
+            # Sum Q3, shardeados por hash(payment_format) % AGGREGATION_AMOUNT.
             self.input_exchanges.append(
                 middleware.MessageMiddlewareExchangeRabbitMQ(
-                    MOM_HOST, JOIN_Q3_EXCHANGE, [f"{JOIN_Q3_EXCHANGE}_{ID}"]
+                    MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{ID}"]
                 )
             )
-            self.input_queues[INPUT_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                MOM_HOST, INPUT_QUEUE
-            )
-            self.output_queues[AGG_Q3_OUTPUT_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                MOM_HOST, AGG_Q3_OUTPUT_QUEUE
+            # Salida: promedio por payment_format hacia Join Q3.
+            self.output_queues[OUTPUT_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                MOM_HOST, OUTPUT_QUEUE
             )
 
         # caso query 5
@@ -90,6 +136,11 @@ class AggregatorWorker:
         self.counts_by_client: dict[int, int] = {}
         self.max_tx_by_client: dict[int, dict[str, Transaction]] = {}
         self.exchange_threads = []
+
+        # Q3: acumulación de parciales por (client_id, payment_format)
+        # y conteo de EOFs recibidos desde los Sum Q3.
+        self.q3_partials: dict[int, dict[str, list]] = {}
+        self.q3_sum_eofs: dict[int, int] = {}
 
     def _increment_count(self, client_id: int) -> int:
         with self.lock:
@@ -123,7 +174,7 @@ class AggregatorWorker:
             elif CONFIGURATION == C_Q5:
                 queue = self.output_queues.get(DATA_QUEUE)
             elif CONFIGURATION == C_Q3:
-                queue = self.output_queues.get(AGG_Q3_OUTPUT_QUEUE)
+                queue = self.output_queues.get(OUTPUT_QUEUE)
             else:
                 # fallback: primera queue disponible
                 queue = next(iter(self.output_queues.values()), None)
@@ -155,6 +206,15 @@ class AggregatorWorker:
             )
 
             if msg_type == MessageType.DATA:
+                if CONFIGURATION == C_Q3:
+                    pf, partial_sum, partial_count = Q3PartialSerializer.deserialize(payload)
+                    with self.lock:
+                        client_acc = self.q3_partials.setdefault(client_id, {})
+                        acc = client_acc.setdefault(pf, [0.0, 0])
+                        acc[0] += partial_sum
+                        acc[1] += partial_count
+                    return
+
                 transaction: Transaction = self.transaction_serializer.deserialize(payload)
                 logging.debug(
                     "aggregation_data | id=%s | client_id=%s | date=%s | amount=%s | format=%s | mode=%s",
@@ -173,6 +233,34 @@ class AggregatorWorker:
                 return
 
             if msg_type == MessageType.EOF:
+                if CONFIGURATION == C_Q3:
+                    with self.lock:
+                        received = self.q3_sum_eofs.get(client_id, 0) + 1
+                        self.q3_sum_eofs[client_id] = received
+                    # Esperamos un EOF por cada Sum Q3 antes de promediar.
+                    if received < SUM_AMOUNT:
+                        return
+                    with self.lock:
+                        partials = self.q3_partials.pop(client_id, {})
+                        self.q3_sum_eofs.pop(client_id, None)
+                    for pf, (total, count) in partials.items():
+                        average = total / count if count else 0.0
+                        packet = self.internal_packet_serializer.create_packet(
+                            msg_type=MessageType.DATA,
+                            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+                            payload=Q3ResultSerializer.serialize(pf, average),
+                        )
+                        self._deliver_output(packet)
+                    control_payload = ControlMessageSerializer().serialize(
+                        ControlMessage(sender_id=ID, expected_total=len(partials), processed_count=0)
+                    )
+                    eof_packet = self.internal_packet_serializer.create_packet(
+                        msg_type=MessageType.EOF,
+                        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+                        payload=control_payload,
+                    )
+                    self._deliver_output(eof_packet)
+                    return
                 if CONFIGURATION == C_Q2:
                     # send DATA messages for each max transaction
                     with self.lock:
