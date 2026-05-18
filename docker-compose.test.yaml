@@ -257,5 +257,6 @@ services:
     - SERVER_HOST=gateway
     - SERVER_PORT=5678
     volumes:
-    - ./tests/fixtures/smoke/LI-Mini:/data/input:ro
+    - ./data/datasets/client-1/LI-Mini:/data/input:ro
     - ./data/output:/data/output:rw
+
