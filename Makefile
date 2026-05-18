@@ -3,7 +3,8 @@ PWD := $(shell pwd)
 COMPOSE_FILE := docker-compose.yaml
 TEST_COMPOSE_FILE := docker-compose.test.yaml
 TEST_PROJECT := mla-forward-pass-test
-TEST_SUCCESS_PATTERN := Forward pass successful - Mate | filter=Q1
+TEST_Q1_SUCCESS_PATTERN := Forward pass successful - Mate | filter=Q1
+TEST_SUM_SUCCESS_PATTERN := sum_forward_eof_to_aggregator
 SCENARIOS_DIR := config/scenarios
 
 up:
@@ -28,7 +29,9 @@ test:
 		cleanup; \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) config --quiet; \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) up --build --remove-orphans --detach; \
-		timeout 120s sh -c '\''docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) logs --follow 2>&1 | tee /tmp/$(TEST_PROJECT).log /dev/stderr | grep -m1 --quiet "$(TEST_SUCCESS_PATTERN)"'\''; \
+		timeout 120s bash -lc '\''set -o pipefail; \
+			docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) logs --follow 2>&1 | \
+			awk '\''\'\''/$(TEST_Q1_SUCCESS_PATTERN)/ { q1=1; print } /$(TEST_SUM_SUCCESS_PATTERN)/ { sum=1; print } q1 && sum { exit 0 }'\''\'\'''\''; \
 		echo "forward_pass_test_success"'
 .PHONY: test
 

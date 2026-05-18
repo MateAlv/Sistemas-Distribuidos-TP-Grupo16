@@ -94,6 +94,24 @@ services:
     - SUM_Q2_QUEUE=sum_q2_queue
     - SUM_Q3_AMOUNT=1
 
+  sum_0:
+    build:
+      context: ./src/
+      dockerfile: workers/sum/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_PREFIX=aggregation
+    - CONFIGURATION=Q2
+    - ID=0
+    - INPUT_QUEUE=sum_q2_queue
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=1
+    - SUM_PREFIX=sum_q2
+
   client_0:
     build:
       context: ./src/

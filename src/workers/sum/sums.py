@@ -126,6 +126,18 @@ class SumWorker:
         exchanges[index].send(
             self._packet(MessageType.DATA, client_id, payload)
         )
+        logging.info(
+            "sum_forward_partial | configuration=%s | id=%s | client_id=%s | "
+            "partition_key=%s | aggregation_index=%s | routing_key=%s | "
+            "payload_bytes=%s",
+            CONFIGURATION,
+            ID,
+            client_id,
+            partition_key,
+            index,
+            f"{AGGREGATION_PREFIX}_{index}",
+            len(payload),
+        )
 
     def _forward_eof_to_aggregators(
         self,
@@ -138,8 +150,19 @@ class SumWorker:
             expected_total=expected_total,
             processed_count=0,
         )
-        for exchange in exchanges:
+        for index, exchange in enumerate(exchanges):
             exchange.send(self._packet(MessageType.EOF, client_id, payload))
+            logging.info(
+                "sum_forward_eof_to_aggregator | configuration=%s | id=%s | "
+                "client_id=%s | aggregation_index=%s | routing_key=%s | "
+                "expected_total=%s",
+                CONFIGURATION,
+                ID,
+                client_id,
+                index,
+                f"{AGGREGATION_PREFIX}_{index}",
+                expected_total,
+            )
 
     def _process_transaction(self, client_id: int, transaction: Transaction) -> None:
         self._processor_for_client(client_id).process(transaction)
