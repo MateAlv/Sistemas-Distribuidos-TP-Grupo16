@@ -1,6 +1,7 @@
 import logging
 import os
 import threading
+import time
 
 from common import middleware
 from common.constants import C_Q2, C_Q3, C_Q5
@@ -21,6 +22,8 @@ CONFIGURATION = os.environ["CONFIGURATION"]
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
 OUTPUT_QUEUE = os.environ["OUTPUT_QUEUE"]
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
+MAX_CLIENTS = 500  
+
 
 
 class JoinerWorker:
@@ -31,9 +34,7 @@ class JoinerWorker:
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
         )
-        self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST, OUTPUT_QUEUE
-        )
+        self.output_resource = self._build_output(CONFIGURATION)
 
         self.internal_protocol = InternalProtocol()
         self.control_serializer = ControlMessageSerializer()
@@ -42,7 +43,8 @@ class JoinerWorker:
         self.closed = False
         self.processors_by_client = {}
         self.eof_count_by_client = {}
-        self.closed_by_client = set()
+        self.closed_by_client = {}  # client_id -> close_timestamp
+        self._max_closed_clients = MAX_CLIENTS  # Limpiar cuando exceda este límite
 
     def _processor_for_client(self, client_id: int):
         return self.processors_by_client.setdefault(
@@ -61,11 +63,15 @@ class JoinerWorker:
         with self.lock:
             processor = self.processors_by_client.pop(client_id, None)
             self.eof_count_by_client.pop(client_id, None)
-            self.closed_by_client.add(client_id)
+            self.closed_by_client[client_id] = time.monotonic()
+            
+            # Limpiar entries antiguas si excedemos el límite
+            if len(self.closed_by_client) > self._max_closed_clients:
+                self._cleanup_closed_clients()
 
         payloads = processor.results() if processor is not None else []
         for payload in payloads:
-            self.output_queue.send(
+            self.output_resource.send(
                 self._packet(MessageType.DATA, client_id, payload)
             )
 
@@ -74,13 +80,32 @@ class JoinerWorker:
                 sender_id=ID, expected_total=len(payloads), processed_count=0
             )
         )
-        self.output_queue.send(
+        self.output_resource.send(
             self._packet(MessageType.EOF, client_id, control_payload)
         )
         logging.info(
             "joiner_emit | configuration=%s | id=%s | client_id=%s | results=%s",
             CONFIGURATION, ID, client_id, len(payloads),
         )
+
+    def _cleanup_closed_clients(self) -> None:
+        """Limpia clientes cerrados más antiguos cuando excede el límite (debe llamarse dentro del lock)."""
+        # Ordenar por timestamp y mantener solo los más recientes
+        sorted_clients = sorted(self.closed_by_client.items(), key=lambda x: x[1])
+        to_remove = len(sorted_clients) - self._max_closed_clients // 2
+        for client_id, _ in sorted_clients[:to_remove]:
+            self.closed_by_client.pop(client_id, None)
+        logging.debug(
+            "joiner_cleanup | configuration=%s | id=%s | removed=%s | remaining=%s",
+            CONFIGURATION, ID, to_remove, len(self.closed_by_client),
+        )
+
+    def _build_output(self, configuration: str):
+        if configuration == C_Q3:
+            return middleware.MessageMiddlewareExchangeRabbitMQ(
+                MOM_HOST, OUTPUT_QUEUE, routing_keys=[], exchange_type="fanout"
+            )
+        return middleware.MessageMiddlewareQueueRabbitMQ(MOM_HOST, OUTPUT_QUEUE)
 
     def _process_message(self, message: bytes) -> None:
         msg_type, client_id, payload = self.internal_protocol.unpack_packet(message)
@@ -94,22 +119,20 @@ class JoinerWorker:
                 )
                 return
 
-        if msg_type == MessageType.DATA:
-            with self.lock:
+            if msg_type == MessageType.DATA:
                 self._processor_for_client(client_id).accept(payload)
-            return
+                return
 
-        if msg_type == MessageType.EOF:
-            with self.lock:
+            if msg_type == MessageType.EOF:
                 count = self.eof_count_by_client.get(client_id, 0) + 1
                 self.eof_count_by_client[client_id] = count
                 should_emit = count == AGGREGATION_AMOUNT
+            else:
+                raise ValueError(f"unsupported message type: {msg_type}")
 
-            if should_emit:
-                self._emit_results(client_id)
-            return
-
-        raise ValueError(f"unsupported message type: {msg_type}")
+        # Emitir fuera del lock para no bloquear otros mensajes
+        if msg_type == MessageType.EOF and should_emit:
+            self._emit_results(client_id)
 
     def process_messages(self, message, ack, nack):
         try:
@@ -155,7 +178,7 @@ class JoinerWorker:
             return
         self.closed = True
         logging.info("joiner_close | configuration=%s | id=%s", CONFIGURATION, ID)
-        for resource in (self.input_queue, self.output_queue):
+        for resource in (self.input_queue, self.output_resource):
             try:
                 resource.close()
             except Exception as e:
