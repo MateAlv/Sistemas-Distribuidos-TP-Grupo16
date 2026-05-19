@@ -1,7 +1,10 @@
-from common.constants import C_Q2, C_Q5
+from common.constants import C_Q2, C_Q3, C_Q5
 from common.domain.partial_result import Q2BankMaxPartial
 from common.message_protocol.aggregation_serializer import AggregationSerializer
-from common.message_protocol.partial_result_serializer import Q2BankMaxPartialSerializer
+from common.message_protocol.partial_result_serializer import (
+    Q2BankMaxPartialSerializer,
+    Q3AverageResultSerializer,
+)
 
 
 class JoinerProcessor:
@@ -44,9 +47,25 @@ class Q5JoinerProcessor(JoinerProcessor):
         return [AggregationSerializer.serialize(self.total)]
 
 
+class Q3JoinerProcessor(JoinerProcessor):
+    """Colecciona Q3AverageResult de cada shard y los reenvía al BarrierFilter.
+    """
+
+    def __init__(self) -> None:
+        self.payloads: list[bytes] = []
+
+    def accept(self, payload: bytes) -> None:
+        self.payloads.append(payload)
+
+    def results(self) -> list[bytes]:
+        return list(self.payloads)
+
+
 def create_joiner_processor(configuration: str) -> JoinerProcessor:
     if configuration == C_Q2:
         return Q2JoinerProcessor()
+    if configuration == C_Q3:
+        return Q3JoinerProcessor()
     if configuration == C_Q5:
         return Q5JoinerProcessor()
     raise ValueError(f"Invalid joiner processor configuration: {configuration}")

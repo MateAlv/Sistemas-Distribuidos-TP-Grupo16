@@ -3,7 +3,7 @@ import os
 import threading
 
 from common import middleware
-from common.constants import C_Q2, C_Q5
+from common.constants import C_Q2, C_Q3, C_Q5
 from common.message_protocol.common import MessageType
 from common.message_protocol.common.control_message import ControlMessage
 from common.message_protocol.control_message_serializer import ControlMessageSerializer
@@ -25,7 +25,7 @@ AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 
 class JoinerWorker:
     def __init__(self):
-        if CONFIGURATION not in (C_Q2, C_Q5):
+        if CONFIGURATION not in (C_Q2, C_Q3, C_Q5):
             raise ValueError(f"Invalid joiner configuration: {CONFIGURATION}")
 
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
