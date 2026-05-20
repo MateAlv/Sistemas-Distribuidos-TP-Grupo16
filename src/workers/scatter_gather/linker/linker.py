@@ -20,7 +20,6 @@ MOM_HOST = os.environ["MOM_HOST"]
 SG_LINKER_EXCHANGE = os.environ["SG_LINKER_EXCHANGE"]
 SG_DETECTOR_EXCHANGE = os.environ["SG_DETECTOR_EXCHANGE"]
 SG_DETECTOR_AMOUNT = int(os.environ["SG_DETECTOR_AMOUNT"])
-SG_MAPPER_AMOUNT = int(os.environ.get("SG_MAPPER_AMOUNT", "1"))
 
 
 class ScatterGatherLinker:
@@ -122,9 +121,10 @@ class ScatterGatherLinker:
 
     def _handle_eof(self, client_id: int, payload: bytes):
         control_message = self._control_serializer.deserialize(payload)
-        self._eofs_by_client[client_id].add(control_message.sender_id)
-        if len(self._eofs_by_client[client_id]) < SG_MAPPER_AMOUNT:
+        if control_message.sender_id in self._eofs_by_client[client_id]:
             return
+
+        self._eofs_by_client[client_id].add(control_message.sender_id)
 
         control_payload = self._control_serializer.serialize(
             ControlMessage(

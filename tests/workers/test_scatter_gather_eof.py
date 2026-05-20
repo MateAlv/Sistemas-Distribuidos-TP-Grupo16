@@ -170,7 +170,7 @@ def test_mapper_reports_late_data_after_pending_eof(monkeypatch):
     ]
 
 
-def test_linker_waits_for_distinct_mapper_eofs(monkeypatch):
+def test_linker_forwards_on_mapper_group_eof(monkeypatch):
     module = _import_module(
         monkeypatch,
         "workers.scatter_gather.linker.linker",
@@ -180,7 +180,6 @@ def test_linker_waits_for_distinct_mapper_eofs(monkeypatch):
             "SG_LINKER_EXCHANGE": "sg_linker_exchange",
             "SG_DETECTOR_EXCHANGE": "sg_detector_exchange",
             "SG_DETECTOR_AMOUNT": "1",
-            "SG_MAPPER_AMOUNT": "2",
         },
     )
     worker = module.ScatterGatherLinker()
@@ -188,11 +187,6 @@ def test_linker_waits_for_distinct_mapper_eofs(monkeypatch):
     worker._emitted_count_by_client[client_id] = 3
 
     worker._handle_eof(client_id, _control_payload(0, 0, 0))
-    worker._handle_eof(client_id, _control_payload(0, 0, 0))
-
-    assert worker._detectors[0].sent == []
-
-    worker._handle_eof(client_id, _control_payload(1, 0, 0))
 
     assert len(worker._detectors[0].sent) == 1
     msg_type, received_client_id, payload = worker._proto.unpack_packet(
