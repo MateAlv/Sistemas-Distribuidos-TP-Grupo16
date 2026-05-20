@@ -1,13 +1,18 @@
 import os
 import logging
-import struct
 from collections import defaultdict
 
 from common import message_protocol
 from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
 )
+from common.message_protocol.common import ControlMessage, MessageType
+from common.message_protocol.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal import partition_for_pair
+from common.message_protocol.scatter_gather_serializer import (
+    ScatterGatherRelation,
+    ScatterGatherRelationSerializer,
+)
 from common.constants import EDGE_A_TO_M, EDGE_M_TO_B
 
 ID = int(os.environ["ID"])
@@ -15,19 +20,6 @@ MOM_HOST = os.environ["MOM_HOST"]
 SG_LINKER_EXCHANGE = os.environ["SG_LINKER_EXCHANGE"]
 SG_DETECTOR_EXCHANGE = os.environ["SG_DETECTOR_EXCHANGE"]
 SG_DETECTOR_AMOUNT = int(os.environ["SG_DETECTOR_AMOUNT"])
-
-# (A, M, B) payload: three account strings, each up to 32 bytes
-_TRIPLE_FORMAT = "!32s32s32s"
-_TRIPLE_SIZE = struct.calcsize(_TRIPLE_FORMAT)
-
-
-def _encode_triple(a: str, m: str, b: str) -> bytes:
-    return struct.pack(
-        _TRIPLE_FORMAT,
-        a.encode()[:32].ljust(32, b"\x00"),
-        m.encode()[:32].ljust(32, b"\x00"),
-        b.encode()[:32].ljust(32, b"\x00"),
-    )
 
 
 class ScatterGatherLinker:
@@ -47,16 +39,33 @@ class ScatterGatherLinker:
         ]
         self._tx_ser = message_protocol.internal.TransactionSerializer()
         self._proto = message_protocol.internal.InternalProtocol()
+        self._control_serializer = ControlMessageSerializer()
 
         # per-client state: client_id -> { M -> set(A) / set(B) / set((A,B)) }
         self._incoming = defaultdict(lambda: defaultdict(set))  # [client][M] = {A}
         self._outgoing = defaultdict(lambda: defaultdict(set))  # [client][M] = {B}
         self._emitted  = defaultdict(lambda: defaultdict(set))  # [client][M] = {(A,B)}
+        self._emitted_count_by_client = defaultdict(int)
+        self._eofs_by_client = defaultdict(set)
+        self._closed_by_client = set()
 
     def _on_message(self, raw, ack, nack):
         try:
             msg_type, client_id, payload = self._proto.unpack_packet(raw)
-            if msg_type != message_protocol.common.MessageType.DATA:
+            if client_id in self._closed_by_client:
+                logging.info(
+                    "linker_%s message_for_closed_client | client_id=%s",
+                    ID,
+                    client_id,
+                )
+                ack()
+                return
+
+            if msg_type == MessageType.EOF:
+                self._handle_eof(client_id, payload)
+                ack()
+                return
+            if msg_type != MessageType.DATA:
                 ack()
                 return
 
@@ -78,32 +87,72 @@ class ScatterGatherLinker:
             nack()
 
     def _add_incoming(self, client_id: int, m: str, a: str):
-        if a in self._incoming[client_id][m]:
-            return
-        self._incoming[client_id][m].add(a)
+        if a not in self._incoming[client_id][m]:
+            self._incoming[client_id][m].add(a)
         for b in self._outgoing[client_id][m]:
             self._try_emit(client_id, a, m, b)
 
     def _add_outgoing(self, client_id: int, m: str, b: str):
-        if b in self._outgoing[client_id][m]:
-            return
-        self._outgoing[client_id][m].add(b)
+        if b not in self._outgoing[client_id][m]:
+            self._outgoing[client_id][m].add(b)
         for a in self._incoming[client_id][m]:
             self._try_emit(client_id, a, m, b)
 
     def _try_emit(self, client_id: int, a: str, m: str, b: str):
         if (a, b) in self._emitted[client_id][m]:
             return
-        self._emitted[client_id][m].add((a, b))
 
         partition = partition_for_pair(a, b, SG_DETECTOR_AMOUNT)
         msg = self._proto.create_packet(
-            msg_type=message_protocol.common.MessageType.DATA,
+            msg_type=MessageType.DATA,
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-            payload=_encode_triple(a, m, b),
+            payload=ScatterGatherRelationSerializer.serialize(
+                ScatterGatherRelation(
+                    from_account=a,
+                    intermediate_account=m,
+                    to_account=b,
+                )
+            ),
         )
         self._detectors[partition].send(msg)
+        self._emitted[client_id][m].add((a, b))
+        self._emitted_count_by_client[client_id] += 1
         logging.debug("linker_%s emitted (%s, %s, %s)", ID, a, m, b)
+
+    def _handle_eof(self, client_id: int, payload: bytes):
+        control_message = self._control_serializer.deserialize(payload)
+        if control_message.sender_id in self._eofs_by_client[client_id]:
+            return
+
+        self._eofs_by_client[client_id].add(control_message.sender_id)
+
+        control_payload = self._control_serializer.serialize(
+            ControlMessage(
+                sender_id=ID,
+                expected_total=self._emitted_count_by_client.get(client_id, 0),
+                processed_count=0,
+            )
+        )
+        msg = self._proto.create_packet(
+            msg_type=MessageType.EOF,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            payload=control_payload,
+        )
+        for detector in self._detectors:
+            detector.send(msg)
+
+        self._incoming.pop(client_id, None)
+        self._outgoing.pop(client_id, None)
+        self._emitted.pop(client_id, None)
+        self._emitted_count_by_client.pop(client_id, None)
+        self._eofs_by_client.pop(client_id, None)
+        self._closed_by_client.add(client_id)
+        logging.info(
+            "linker_%s forwarded_eof | client_id=%s | detectors=%s",
+            ID,
+            client_id,
+            len(self._detectors),
+        )
 
     def start(self):
         logging.info("linker_%s starting", ID)

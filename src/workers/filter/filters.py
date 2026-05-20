@@ -320,7 +320,8 @@ class FilterWorker:
         if CONFIGURATION == C_DATE:
             if start_date is None or end_date is None:
                 return True
-            return transaction.is_in_date_range(start_date, end_date)
+            tx_date = transaction.date[:10].replace("/", "-")
+            return start_date <= tx_date <= end_date
         raise ValueError(f"Invalid configuration: {CONFIGURATION}")
     
     
