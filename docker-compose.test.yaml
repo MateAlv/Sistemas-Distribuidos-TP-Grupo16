@@ -23,6 +23,7 @@ services:
     - FILE_INGESTOR_EXCHANGE=file_ingestor_exchange
     - FILE_INGESTOR_PARTITIONS=1
     - GATEWAY_Q2_QUEUE=join_q2_results_queue
+    - GATEWAY_Q4_QUEUE=gateway_q4_results_queue
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
@@ -265,6 +266,53 @@ services:
     - SUM_AMOUNT=3
     - SUM_PREFIX=sum_q3
 
+  scatter_gather_detector_0:
+    build:
+      context: ./src/
+      dockerfile: workers/scatter_gather/detector/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - GATEWAY_Q4_QUEUE=gateway_q4_results_queue
+    - ID=0
+    - MIN_INTERMEDIARIES=5
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SG_DETECTOR_EXCHANGE=sg_detector_exchange
+    - SG_LINKER_AMOUNT=1
+
+  scatter_gather_linker_0:
+    build:
+      context: ./src/
+      dockerfile: workers/scatter_gather/linker/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - ID=0
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SG_DETECTOR_AMOUNT=1
+    - SG_DETECTOR_EXCHANGE=sg_detector_exchange
+    - SG_LINKER_EXCHANGE=sg_linker_exchange
+
+  scatter_gather_mapper_0:
+    build:
+      context: ./src/
+      dockerfile: workers/scatter_gather/mapper/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - ID=0
+    - INPUT_QUEUE=scatter_gather_mapper_queue
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SG_LINKER_AMOUNT=1
+    - SG_LINKER_EXCHANGE=sg_linker_exchange
+    - SG_MAPPER_AMOUNT=1
+
   client_0:
     build:
       context: ./src/
@@ -280,6 +328,9 @@ services:
     - sum_q3_0
     - sum_q3_1
     - sum_q3_2
+    - scatter_gather_detector_0
+    - scatter_gather_linker_0
+    - scatter_gather_mapper_0
     - aggregation_q2_0
     - join_q2
     environment:
@@ -299,4 +350,3 @@ services:
     volumes:
     - ./data/datasets/client-1/LI-Mini:/data/input:ro
     - ./data/output:/data/output:rw
-
