@@ -7,6 +7,7 @@ from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
 )
 from common.message_protocol.internal import partition_for_key
+from common.message_protocol.common import MessageType
 from common.constants import EDGE_A_TO_M, EDGE_M_TO_B
 
 ID = int(os.environ["ID"])
@@ -31,7 +32,11 @@ class ScatterGatherMapper:
     def _on_message(self, raw, ack, nack):
         try:
             msg_type, client_id, payload = self._proto.unpack_packet(raw)
-            if msg_type != message_protocol.common.MessageType.DATA:
+            if msg_type == MessageType.EOF:
+                self._forward_eof(client_id, payload)
+                ack()
+                return
+            if msg_type != MessageType.DATA:
                 ack()
                 return
 
@@ -48,11 +53,26 @@ class ScatterGatherMapper:
 
     def _emit(self, cid: bytes, tag: int, tx_bytes: bytes, partition: int):
         msg = self._proto.create_packet(
-            msg_type=message_protocol.common.MessageType.DATA,
+            msg_type=MessageType.DATA,
             client_id_bytes=cid,
             payload=bytes([tag]) + tx_bytes,
         )
         self._linkers[partition].send(msg)
+
+    def _forward_eof(self, client_id: int, payload: bytes):
+        msg = self._proto.create_packet(
+            msg_type=MessageType.EOF,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            payload=payload,
+        )
+        for linker in self._linkers:
+            linker.send(msg)
+        logging.info(
+            "mapper_%s forwarded_eof | client_id=%s | linkers=%s",
+            ID,
+            client_id,
+            len(self._linkers),
+        )
 
     def start(self):
         logging.info("mapper_%s starting", ID)

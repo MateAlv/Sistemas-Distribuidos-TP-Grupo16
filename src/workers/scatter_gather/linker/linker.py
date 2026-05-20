@@ -1,13 +1,17 @@
 import os
 import logging
-import struct
 from collections import defaultdict
 
 from common import message_protocol
 from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
 )
+from common.message_protocol.common import MessageType
 from common.message_protocol.internal import partition_for_pair
+from common.message_protocol.scatter_gather_serializer import (
+    ScatterGatherRelation,
+    ScatterGatherRelationSerializer,
+)
 from common.constants import EDGE_A_TO_M, EDGE_M_TO_B
 
 ID = int(os.environ["ID"])
@@ -15,19 +19,7 @@ MOM_HOST = os.environ["MOM_HOST"]
 SG_LINKER_EXCHANGE = os.environ["SG_LINKER_EXCHANGE"]
 SG_DETECTOR_EXCHANGE = os.environ["SG_DETECTOR_EXCHANGE"]
 SG_DETECTOR_AMOUNT = int(os.environ["SG_DETECTOR_AMOUNT"])
-
-# (A, M, B) payload: three account strings, each up to 32 bytes
-_TRIPLE_FORMAT = "!32s32s32s"
-_TRIPLE_SIZE = struct.calcsize(_TRIPLE_FORMAT)
-
-
-def _encode_triple(a: str, m: str, b: str) -> bytes:
-    return struct.pack(
-        _TRIPLE_FORMAT,
-        a.encode()[:32].ljust(32, b"\x00"),
-        m.encode()[:32].ljust(32, b"\x00"),
-        b.encode()[:32].ljust(32, b"\x00"),
-    )
+SG_MAPPER_AMOUNT = int(os.environ.get("SG_MAPPER_AMOUNT", "1"))
 
 
 class ScatterGatherLinker:
@@ -52,11 +44,16 @@ class ScatterGatherLinker:
         self._incoming = defaultdict(lambda: defaultdict(set))  # [client][M] = {A}
         self._outgoing = defaultdict(lambda: defaultdict(set))  # [client][M] = {B}
         self._emitted  = defaultdict(lambda: defaultdict(set))  # [client][M] = {(A,B)}
+        self._eofs_by_client = defaultdict(int)
 
     def _on_message(self, raw, ack, nack):
         try:
             msg_type, client_id, payload = self._proto.unpack_packet(raw)
-            if msg_type != message_protocol.common.MessageType.DATA:
+            if msg_type == MessageType.EOF:
+                self._handle_eof(client_id, payload)
+                ack()
+                return
+            if msg_type != MessageType.DATA:
                 ack()
                 return
 
@@ -98,12 +95,42 @@ class ScatterGatherLinker:
 
         partition = partition_for_pair(a, b, SG_DETECTOR_AMOUNT)
         msg = self._proto.create_packet(
-            msg_type=message_protocol.common.MessageType.DATA,
+            msg_type=MessageType.DATA,
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-            payload=_encode_triple(a, m, b),
+            payload=ScatterGatherRelationSerializer.serialize(
+                ScatterGatherRelation(
+                    from_account=a,
+                    intermediate_account=m,
+                    to_account=b,
+                )
+            ),
         )
         self._detectors[partition].send(msg)
         logging.debug("linker_%s emitted (%s, %s, %s)", ID, a, m, b)
+
+    def _handle_eof(self, client_id: int, payload: bytes):
+        self._eofs_by_client[client_id] += 1
+        if self._eofs_by_client[client_id] < SG_MAPPER_AMOUNT:
+            return
+
+        msg = self._proto.create_packet(
+            msg_type=MessageType.EOF,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            payload=payload,
+        )
+        for detector in self._detectors:
+            detector.send(msg)
+
+        self._incoming.pop(client_id, None)
+        self._outgoing.pop(client_id, None)
+        self._emitted.pop(client_id, None)
+        self._eofs_by_client.pop(client_id, None)
+        logging.info(
+            "linker_%s forwarded_eof | client_id=%s | detectors=%s",
+            ID,
+            client_id,
+            len(self._detectors),
+        )
 
     def start(self):
         logging.info("linker_%s starting", ID)
