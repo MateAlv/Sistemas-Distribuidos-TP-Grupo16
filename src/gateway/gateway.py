@@ -17,6 +17,7 @@ from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbi
 from common.message_protocol.internal import InternalProtocol, TransactionSerializer
 from common.message_protocol.common import MessageType
 from common.message_protocol.partial_result_serializer import Q2BankMaxPartialSerializer
+from common.message_protocol.scatter_gather_serializer import ScatterGatherResultSerializer
 
 
 @dataclass(frozen=True)
@@ -48,11 +49,14 @@ class Gateway:
         self._client_queues_lock = threading.Lock()
 
         q2_queue = os.environ.get("GATEWAY_Q2_QUEUE")
+        q4_queue = os.environ.get("GATEWAY_Q4_QUEUE")
         self._q2_queue_name = q2_queue
-        self._num_result_queues = 2 if q2_queue else 1
+        self._q4_queue_name = q4_queue
+        self._num_result_queues = 1 + int(bool(q2_queue)) + int(bool(q4_queue))
 
         self._q1_consumer = None
         self._q2_consumer = None
+        self._q4_consumer = None
 
     def run(self) -> None:
         q1_queue = os.environ.get("GATEWAY_QUEUE", "gateway_results_queue")
@@ -70,6 +74,16 @@ class Gateway:
             threading.Thread(
                 target=self._run_result_consumer,
                 args=(self._q2_consumer, self._q2_csv, "Q2|"),
+                daemon=True,
+            ).start()
+
+        if self._q4_queue_name:
+            self._q4_consumer = MessageMiddlewareQueueRabbitMQ(
+                self._config.mom_host, self._q4_queue_name
+            )
+            threading.Thread(
+                target=self._run_result_consumer,
+                args=(self._q4_consumer, self._q4_csv, "Q4|"),
                 daemon=True,
             ).start()
 
@@ -101,7 +115,7 @@ class Gateway:
 
     def stop(self) -> None:
         self._stopped = True
-        for consumer in (self._q1_consumer, self._q2_consumer):
+        for consumer in (self._q1_consumer, self._q2_consumer, self._q4_consumer):
             if consumer is not None:
                 try:
                     consumer.stop_consuming()
@@ -296,6 +310,11 @@ class Gateway:
     def _q2_csv(payload: bytes) -> str:
         partial = Q2BankMaxPartialSerializer.deserialize(payload)
         return f"{partial.bank_id},{partial.from_account},{partial.amount}"
+
+    @staticmethod
+    def _q4_csv(payload: bytes) -> str:
+        result = ScatterGatherResultSerializer.deserialize(payload)
+        return f"{result.from_account},{result.to_account}"
 
 
 def _send_ack(sock: socket.socket) -> None:
