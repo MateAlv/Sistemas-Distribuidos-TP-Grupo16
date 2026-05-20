@@ -132,6 +132,7 @@ services:
     environment:
     - AGGREGATION_AMOUNT=3
     - AGGREGATION_PREFIX=aggregation
+    - CONFIGURATION=Q2
     - INPUT_QUEUE=join_queue
     - MOM_HOST=rabbitmq
     - OUTPUT_QUEUE=results_queue

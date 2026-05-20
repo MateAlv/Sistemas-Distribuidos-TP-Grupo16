@@ -193,27 +193,37 @@ class Client:
 
         output_dir = os.getenv("OUTPUT_DIR", os.path.join(config.data_dir, "output"))
         os.makedirs(output_dir, exist_ok=True)
-        output_file = os.path.join(output_dir, f"results_q1_{config.client_id}.csv")
-        
-        result_lines = 0
-        with open(output_file, "w") as f:
-            f.write("date,from_bank,from_account,to_bank,to_account,amount,currency,format\n")
+
+        q1_file = os.path.join(output_dir, f"results_q1_{config.client_id}.csv")
+        q2_file = os.path.join(output_dir, f"results_q2_{config.client_id}.csv")
+
+        counts: dict[str, int] = {"q1": 0, "q2": 0}
+        with open(q1_file, "w") as f1, open(q2_file, "w") as f2:
+            f1.write("date,from_bank,from_account,to_bank,to_account,amount,currency,format\n")
+            f2.write("bank_id,from_account,max_amount\n")
+
             for line in sender.iter_result_lines(config.result_line_max_bytes):
-                result_lines += 1
-                f.write(line + "\n")
-                if result_lines <= MAX_LOGGED_RESULT_LINES:
-                    logging.info(
-                        "client_result_line | client_id=%s | line_number=%s | data=%s",
-                        config.client_id,
-                        result_lines,
-                        line,
-                    )
+                if line.startswith("Q2|"):
+                    data = line[3:]
+                    counts["q2"] += 1
+                    f2.write(data + "\n")
+                    if counts["q2"] <= MAX_LOGGED_RESULT_LINES:
+                        logging.info(
+                            "client_result_line | query=q2 | client_id=%s | line_number=%s | data=%s",
+                            config.client_id, counts["q2"], data,
+                        )
+                else:
+                    counts["q1"] += 1
+                    f1.write(line + "\n")
+                    if counts["q1"] <= MAX_LOGGED_RESULT_LINES:
+                        logging.info(
+                            "client_result_line | query=q1 | client_id=%s | line_number=%s | data=%s",
+                            config.client_id, counts["q1"], line,
+                        )
 
         logging.info(
-            "client_results_finished | client_id=%s | lines=%s | file=%s",
-            config.client_id,
-            result_lines,
-            output_file,
+            "client_results_finished | client_id=%s | q1_lines=%s | q2_lines=%s | q1_file=%s | q2_file=%s",
+            config.client_id, counts["q1"], counts["q2"], q1_file, q2_file,
         )
 
     def require_config(self) -> ClientConfig:

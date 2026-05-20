@@ -22,6 +22,7 @@ services:
     environment:
     - FILE_INGESTOR_EXCHANGE=file_ingestor_exchange
     - FILE_INGESTOR_PARTITIONS=1
+    - GATEWAY_Q2_QUEUE=join_q2_results_queue
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
@@ -128,7 +129,7 @@ services:
         condition: service_healthy
     environment:
     - AGGREGATION_AMOUNT=1
-    - AGGREGATION_PREFIX=aggregation
+    - AGGREGATION_PREFIX=aggregation_q2
     - CONFIGURATION=Q2
     - ID=0
     - INPUT_QUEUE=sum_q2_queue
@@ -146,7 +147,7 @@ services:
         condition: service_healthy
     environment:
     - AGGREGATION_AMOUNT=1
-    - AGGREGATION_PREFIX=aggregation
+    - AGGREGATION_PREFIX=aggregation_q2
     - CONFIGURATION=Q2
     - ID=1
     - INPUT_QUEUE=sum_q2_queue
@@ -164,11 +165,48 @@ services:
         condition: service_healthy
     environment:
     - AGGREGATION_AMOUNT=1
-    - AGGREGATION_PREFIX=aggregation
+    - AGGREGATION_PREFIX=aggregation_q2
     - CONFIGURATION=Q2
     - ID=2
     - INPUT_QUEUE=sum_q2_queue
     - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=3
+    - SUM_PREFIX=sum_q2
+
+  aggregation_q2_0:
+    build:
+      context: ./src/
+      dockerfile: workers/aggregator/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_PREFIX=aggregation_q2
+    - CONFIGURATION=Q2
+    - ID=0
+    - MOM_HOST=rabbitmq
+    - OUTPUT_QUEUE=join_q2_queue
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=3
+    - SUM_PREFIX=sum_q2
+
+  join_q2:
+    build:
+      context: ./src/
+      dockerfile: workers/joiner/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_PREFIX=aggregation_q2
+    - CONFIGURATION=Q2
+    - ID=0
+    - INPUT_QUEUE=join_q2_queue
+    - MOM_HOST=rabbitmq
+    - OUTPUT_QUEUE=join_q2_results_queue
     - PYTHONUNBUFFERED=1
     - SUM_AMOUNT=3
     - SUM_PREFIX=sum_q2
@@ -242,6 +280,8 @@ services:
     - sum_q3_0
     - sum_q3_1
     - sum_q3_2
+    - aggregation_q2_0
+    - join_q2
     environment:
     - ACCOUNTS_FILE=LI-Mini_accounts.csv
     - TRANSACTIONS_FILE=LI-Mini_Trans.csv
