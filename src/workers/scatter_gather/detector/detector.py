@@ -39,13 +39,23 @@ class ScatterGatherDetector:
         # client_id -> (A, B) -> {M}
         self._intermediaries = defaultdict(lambda: defaultdict(set))
         self._emitted = defaultdict(set)
-        self._eofs_by_client = defaultdict(int)
+        self._eofs_by_client = defaultdict(set)
+        self._closed_by_client = set()
 
     def _on_message(self, raw, ack, nack):
         try:
             msg_type, client_id, payload = self._proto.unpack_packet(raw)
+            if client_id in self._closed_by_client:
+                logging.info(
+                    "detector_%s message_for_closed_client | client_id=%s",
+                    ID,
+                    client_id,
+                )
+                ack()
+                return
+
             if msg_type == MessageType.EOF:
-                self._handle_eof(client_id)
+                self._handle_eof(client_id, payload)
                 ack()
                 return
             if msg_type != MessageType.DATA:
@@ -88,9 +98,10 @@ class ScatterGatherDetector:
         self._output.send(msg)
         logging.debug("detector_%s emitted (%s, %s)", ID, a, b)
 
-    def _handle_eof(self, client_id: int):
-        self._eofs_by_client[client_id] += 1
-        if self._eofs_by_client[client_id] < SG_LINKER_AMOUNT:
+    def _handle_eof(self, client_id: int, payload: bytes):
+        control_message = self._control_serializer.deserialize(payload)
+        self._eofs_by_client[client_id].add(control_message.sender_id)
+        if len(self._eofs_by_client[client_id]) < SG_LINKER_AMOUNT:
             return
 
         payload = self._control_serializer.serialize(
@@ -109,6 +120,7 @@ class ScatterGatherDetector:
         self._intermediaries.pop(client_id, None)
         self._emitted.pop(client_id, None)
         self._eofs_by_client.pop(client_id, None)
+        self._closed_by_client.add(client_id)
         logging.info("detector_%s forwarded_eof | client_id=%s", ID, client_id)
 
     def start(self):
