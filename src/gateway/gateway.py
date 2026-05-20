@@ -16,6 +16,7 @@ from common.message_protocol.external.types import (
 from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ, MessageMiddlewareQueueRabbitMQ
 from common.message_protocol.internal import InternalProtocol, TransactionSerializer
 from common.message_protocol.common import MessageType
+from common.message_protocol.partial_result_serializer import Q2BankMaxPartialSerializer
 
 
 @dataclass(frozen=True)
@@ -41,19 +42,36 @@ class Gateway:
         self._config = config
         self._server_sock: socket.socket | None = None
         self._stopped = False
-        
+
         self._client_queues = {}
+        self._pending_eofs_by_client = {}  # client_id -> pending EOF count
         self._client_queues_lock = threading.Lock()
-        self._results_consumer = None
-        self._results_thread = None
+
+        q2_queue = os.environ.get("GATEWAY_Q2_QUEUE")
+        self._q2_queue_name = q2_queue
+        self._num_result_queues = 2 if q2_queue else 1
+
+        self._q1_consumer = None
+        self._q2_consumer = None
 
     def run(self) -> None:
-        gateway_queue = os.environ.get("GATEWAY_QUEUE", "gateway_results_queue")
-        self._results_consumer = MessageMiddlewareQueueRabbitMQ(
-            self._config.mom_host, gateway_queue
-        )
-        self._results_thread = threading.Thread(target=self._consume_results_loop, daemon=True)
-        self._results_thread.start()
+        q1_queue = os.environ.get("GATEWAY_QUEUE", "gateway_results_queue")
+        self._q1_consumer = MessageMiddlewareQueueRabbitMQ(self._config.mom_host, q1_queue)
+        threading.Thread(
+            target=self._run_result_consumer,
+            args=(self._q1_consumer, self._q1_csv, ""),
+            daemon=True,
+        ).start()
+
+        if self._q2_queue_name:
+            self._q2_consumer = MessageMiddlewareQueueRabbitMQ(
+                self._config.mom_host, self._q2_queue_name
+            )
+            threading.Thread(
+                target=self._run_result_consumer,
+                args=(self._q2_consumer, self._q2_csv, "Q2|"),
+                daemon=True,
+            ).start()
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
             self._server_sock = server_sock
@@ -83,12 +101,13 @@ class Gateway:
 
     def stop(self) -> None:
         self._stopped = True
-        if self._results_consumer is not None:
-            try:
-                self._results_consumer.stop_consuming()
-                self._results_consumer.close()
-            except Exception:
-                pass
+        for consumer in (self._q1_consumer, self._q2_consumer):
+            if consumer is not None:
+                try:
+                    consumer.stop_consuming()
+                    consumer.close()
+                except Exception:
+                    pass
         if self._server_sock is not None:
             try:
                 self._server_sock.shutdown(socket.SHUT_RDWR)
@@ -121,6 +140,7 @@ class Gateway:
         q = queue.Queue()
         with self._client_queues_lock:
             self._client_queues[client_id] = q
+            self._pending_eofs_by_client[client_id] = self._num_result_queues
         
         try:
             self._forward_chunks(session)
@@ -128,7 +148,8 @@ class Gateway:
         finally:
             with self._client_queues_lock:
                 self._client_queues.pop(client_id, None)
-        
+                self._pending_eofs_by_client.pop(client_id, None)
+
         return client_id
 
     def _recv_handshake(self, client_sock: socket.socket) -> int:
@@ -224,38 +245,57 @@ class Gateway:
                         logging.info("gateway_client_closed | client_id=%s", session.client_id)
                         return  
 
-    def _consume_results_loop(self) -> None:
+    def _run_result_consumer(self, consumer, payload_to_csv, prefix: str) -> None:
         internal_serializer = InternalProtocol()
-        transaction_serializer = TransactionSerializer()
-        
+
         def callback(message, ack, nack):
             try:
                 msg_type, client_id, payload = internal_serializer.unpack_packet(message)
-                
+
                 with self._client_queues_lock:
                     client_queue = self._client_queues.get(client_id)
-                
-                if not client_queue:
-                    ack()
-                    return
-                
+                    if not client_queue:
+                        ack()
+                        return
+
+                    if msg_type == MessageType.EOF:
+                        remaining = self._pending_eofs_by_client.get(client_id, 1) - 1
+                        self._pending_eofs_by_client[client_id] = remaining
+                        should_close = remaining <= 0
+                    else:
+                        should_close = False
+
                 if msg_type == MessageType.DATA:
-                    tx = transaction_serializer.deserialize(payload)
-                    csv_line = f"{tx.date},{tx.from_bank},{tx.from_account},{tx.to_bank},{tx.to_account},{tx.amount},{tx.currency},{tx.format}\n"
-                    client_queue.put(csv_line)
+                    csv_line = payload_to_csv(payload)
+                    client_queue.put(prefix + csv_line + "\n")
                 elif msg_type == MessageType.EOF:
-                    client_queue.put(None)
-                
+                    if should_close:
+                        client_queue.put(None)
+                    logging.info(
+                        "gateway_eof | prefix=%s | client_id=%s | remaining=%s",
+                        prefix or "Q1", client_id, 0 if should_close else "pending",
+                    )
+
                 ack()
             except Exception as e:
-                logging.error("gateway_results_consumer_error | error=%s", e)
+                logging.error("gateway_results_consumer_error | prefix=%s | error=%s", prefix or "Q1", e)
                 nack()
 
         try:
-            self._results_consumer.start_consuming(callback)
+            consumer.start_consuming(callback)
         except Exception as e:
             if not self._stopped:
-                logging.error("gateway_results_consumer_stopped | error=%s", e)
+                logging.error("gateway_results_consumer_stopped | prefix=%s | error=%s", prefix or "Q1", e)
+
+    @staticmethod
+    def _q1_csv(payload: bytes) -> str:
+        tx = TransactionSerializer().deserialize(payload)
+        return f"{tx.date},{tx.from_bank},{tx.from_account},{tx.to_bank},{tx.to_account},{tx.amount},{tx.currency},{tx.format}"
+
+    @staticmethod
+    def _q2_csv(payload: bytes) -> str:
+        partial = Q2BankMaxPartialSerializer.deserialize(payload)
+        return f"{partial.bank_id},{partial.from_account},{partial.amount}"
 
 
 def _send_ack(sock: socket.socket) -> None:
