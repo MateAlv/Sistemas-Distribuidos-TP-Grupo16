@@ -77,9 +77,41 @@ test-q1:
 		timeout 120s sh -c '\''docker compose -f docker-compose.test.yaml logs --follow 2>&1 | grep -m1 "client_shutdown\|client_results_finished"'\''; \
 		sleep 5; \
 		echo "Validating Q1 output..."; \
-		python scripts/validate_q1_output.py && echo "✓ Q1 test PASSED" || echo "✗ Q1 test FAILED"; \
-		docker compose -f docker-compose.test.yaml logs'
+		python3 scripts/validate_q1_output.py && echo "✓ Q1 test PASSED" || echo "✗ Q1 test FAILED"; \
+		echo ""; \
+		echo "=== client_0 logs ==="; \
+		docker compose -f docker-compose.test.yaml logs client_0; \
+		echo "=== gateway logs ==="; \
+		docker compose -f docker-compose.test.yaml logs gateway; \
+		echo "=== filter_q1_0 logs ==="; \
+		docker compose -f docker-compose.test.yaml logs filter_q1_0'
 .PHONY: test-q1
+
+test-q2:
+	bash -lc 'set -euo pipefail; \
+		cleanup() { docker compose -f docker-compose.test.yaml down --volumes --remove-orphans >/dev/null 2>&1; }; \
+		trap cleanup EXIT; \
+		cleanup; \
+		mkdir -p data/output; \
+		echo "Starting Q2 flow test..."; \
+		docker compose -f docker-compose.test.yaml up --build --remove-orphans --detach; \
+		echo "Waiting for services to be ready..."; \
+		sleep 10; \
+		echo "Checking client logs for completion..."; \
+		timeout 120s sh -c '\''docker compose -f docker-compose.test.yaml logs --follow 2>&1 | grep -m1 "client_shutdown\|client_results_finished"'\''; \
+		sleep 5; \
+		echo "Validating Q2 output..."; \
+		python3 scripts/validate_q2_output.py && echo "✓ Q2 test PASSED" || echo "✗ Q2 test FAILED"; \
+		echo ""; \
+		echo "=== client_0 logs ==="; \
+		docker compose -f docker-compose.test.yaml logs client_0; \
+		echo "=== gateway logs ==="; \
+		docker compose -f docker-compose.test.yaml logs gateway; \
+		echo "=== join_q2 logs ==="; \
+		docker compose -f docker-compose.test.yaml logs join_q2; \
+		echo "=== aggregation_q2_0 logs ==="; \
+		docker compose -f docker-compose.test.yaml logs aggregation_q2_0'
+.PHONY: test-q2
 
 switch:
 	@echo Escenarios de prueba:
