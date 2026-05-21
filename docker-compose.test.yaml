@@ -11,7 +11,6 @@ services:
       start_period: 20s
       test: rabbitmq-diagnostics check_port_connectivity
       timeout: 3s
-
   gateway:
     build:
       context: ./src/
@@ -29,7 +28,6 @@ services:
     - PYTHONUNBUFFERED=1
     - SERVER_HOST=gateway
     - SERVER_PORT=5678
-
   file_ingestor_0:
     build:
       context: ./src/
@@ -45,7 +43,6 @@ services:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - TRANSACTION_OUTPUT_QUEUE=filter_usd_queue
-
   filter_usd_0:
     build:
       context: ./src/
@@ -64,13 +61,13 @@ services:
     - GATEWAY_QUEUE=gateway_results_queue
     - ID=0
     - INPUT_QUEUE=filter_usd_queue
+    - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
     - SUM_PREFIX=sum_q3
     - SUM_Q2_QUEUE=sum_q2_queue
     - SUM_Q3_QUEUE=sum_q3_queue
-
   filter_q1_0:
     build:
       context: ./src/
@@ -89,13 +86,13 @@ services:
     - GATEWAY_QUEUE=gateway_results_queue
     - ID=0
     - INPUT_QUEUE=filter_q1_queue
+    - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
     - SUM_PREFIX=sum_q3
     - SUM_Q2_QUEUE=sum_q2_queue
     - SUM_Q3_QUEUE=sum_q3_queue
-
   filter_date_0:
     build:
       context: ./src/
@@ -114,13 +111,13 @@ services:
     - GATEWAY_QUEUE=gateway_results_queue
     - ID=0
     - INPUT_QUEUE=filter_date_queue
+    - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
     - SUM_PREFIX=sum_q3
     - SUM_Q2_QUEUE=sum_q2_queue
     - SUM_Q3_QUEUE=sum_q3_queue
-
   sum_q2_0:
     build:
       context: ./src/
@@ -138,7 +135,6 @@ services:
     - PYTHONUNBUFFERED=1
     - SUM_AMOUNT=3
     - SUM_PREFIX=sum_q2
-
   sum_q2_1:
     build:
       context: ./src/
@@ -156,7 +152,6 @@ services:
     - PYTHONUNBUFFERED=1
     - SUM_AMOUNT=3
     - SUM_PREFIX=sum_q2
-
   sum_q2_2:
     build:
       context: ./src/
@@ -174,7 +169,57 @@ services:
     - PYTHONUNBUFFERED=1
     - SUM_AMOUNT=3
     - SUM_PREFIX=sum_q2
-
+  sum_q3_0:
+    build:
+      context: ./src/
+      dockerfile: workers/sum/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_PREFIX=aggregation_q3
+    - CONFIGURATION=Q3
+    - ID=0
+    - INPUT_QUEUE=sum_q3_queue
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=3
+    - SUM_PREFIX=sum_q3
+  sum_q3_1:
+    build:
+      context: ./src/
+      dockerfile: workers/sum/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_PREFIX=aggregation_q3
+    - CONFIGURATION=Q3
+    - ID=1
+    - INPUT_QUEUE=sum_q3_queue
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=3
+    - SUM_PREFIX=sum_q3
+  sum_q3_2:
+    build:
+      context: ./src/
+      dockerfile: workers/sum/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_PREFIX=aggregation_q3
+    - CONFIGURATION=Q3
+    - ID=2
+    - INPUT_QUEUE=sum_q3_queue
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=3
+    - SUM_PREFIX=sum_q3
   aggregation_q2_0:
     build:
       context: ./src/
@@ -192,7 +237,6 @@ services:
     - PYTHONUNBUFFERED=1
     - SUM_AMOUNT=3
     - SUM_PREFIX=sum_q2
-
   join_q2:
     build:
       context: ./src/
@@ -211,61 +255,41 @@ services:
     - PYTHONUNBUFFERED=1
     - SUM_AMOUNT=3
     - SUM_PREFIX=sum_q2
-
-  sum_q3_0:
+  aggregation_q3_0:
     build:
       context: ./src/
-      dockerfile: workers/sum/Dockerfile
+      dockerfile: workers/aggregator/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
     environment:
     - AGGREGATION_AMOUNT=1
-    - AGGREGATION_PREFIX=aggregation
+    - AGGREGATION_PREFIX=aggregation_q3
     - CONFIGURATION=Q3
     - ID=0
-    - INPUT_QUEUE=sum_q3_queue
     - MOM_HOST=rabbitmq
+    - OUTPUT_QUEUE=join_q3_queue
     - PYTHONUNBUFFERED=1
     - SUM_AMOUNT=3
     - SUM_PREFIX=sum_q3
-
-  sum_q3_1:
+  join_q3:
     build:
       context: ./src/
-      dockerfile: workers/sum/Dockerfile
+      dockerfile: workers/joiner/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
     environment:
     - AGGREGATION_AMOUNT=1
-    - AGGREGATION_PREFIX=aggregation
+    - AGGREGATION_PREFIX=aggregation_q3
     - CONFIGURATION=Q3
-    - ID=1
-    - INPUT_QUEUE=sum_q3_queue
+    - ID=0
+    - INPUT_QUEUE=join_q3_queue
     - MOM_HOST=rabbitmq
+    - OUTPUT_QUEUE=join_q3_results_queue
     - PYTHONUNBUFFERED=1
     - SUM_AMOUNT=3
     - SUM_PREFIX=sum_q3
-
-  sum_q3_2:
-    build:
-      context: ./src/
-      dockerfile: workers/sum/Dockerfile
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-    environment:
-    - AGGREGATION_AMOUNT=1
-    - AGGREGATION_PREFIX=aggregation
-    - CONFIGURATION=Q3
-    - ID=2
-    - INPUT_QUEUE=sum_q3_queue
-    - MOM_HOST=rabbitmq
-    - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
-    - SUM_PREFIX=sum_q3
-
   scatter_gather_detector_0:
     build:
       context: ./src/
@@ -282,7 +306,6 @@ services:
     - SG_DETECTOR_AMOUNT=1
     - SG_DETECTOR_EXCHANGE=sg_detector_exchange
     - SG_LINKER_AMOUNT=1
-
   scatter_gather_linker_0:
     build:
       context: ./src/
@@ -297,7 +320,6 @@ services:
     - SG_DETECTOR_AMOUNT=1
     - SG_DETECTOR_EXCHANGE=sg_detector_exchange
     - SG_LINKER_EXCHANGE=sg_linker_exchange
-
   scatter_gather_mapper_0:
     build:
       context: ./src/
@@ -313,27 +335,29 @@ services:
     - SG_LINKER_AMOUNT=1
     - SG_LINKER_EXCHANGE=sg_linker_exchange
     - SG_MAPPER_AMOUNT=1
-
   client_0:
     build:
       context: ./src/
       dockerfile: client/Dockerfile
     depends_on:
     - gateway
-    - filter_date_0
-    - filter_q1_0
+    - file_ingestor_0
     - filter_usd_0
+    - filter_q1_0
+    - filter_date_0
     - sum_q2_0
     - sum_q2_1
     - sum_q2_2
     - sum_q3_0
     - sum_q3_1
     - sum_q3_2
+    - aggregation_q2_0
+    - join_q2
+    - aggregation_q3_0
+    - join_q3
     - scatter_gather_detector_0
     - scatter_gather_linker_0
     - scatter_gather_mapper_0
-    - aggregation_q2_0
-    - join_q2
     environment:
     - ACCOUNTS_FILE=LI-Mini_accounts.csv
     - TRANSACTIONS_FILE=LI-Mini_Trans.csv

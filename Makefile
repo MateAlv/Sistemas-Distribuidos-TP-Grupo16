@@ -3,14 +3,51 @@ PWD := $(shell pwd)
 COMPOSE_FILE := docker-compose.yaml
 TEST_COMPOSE_FILE := docker-compose.test.yaml
 TEST_PROJECT := mla-forward-pass-test
+CONFIG_FILE ?= config/main-config.yaml
+CONDA_ENV ?= distribuidos
+PYTHON ?= conda run -n $(CONDA_ENV) python
+COMPOSE_SCRIPT := scripts/generate_compose.py
+SCENARIO_ARG := $(word 2,$(MAKECMDGOALS))
 TEST_Q1_SUCCESS_PATTERN := Forward pass successful - Mate | filter=Q1
-TEST_Q2_SUM_PARTIAL_PATTERN := sum_forward_partial | configuration=Q2
-TEST_Q3_SUM_PARTIAL_PATTERN := sum_forward_partial | configuration=Q3
-TEST_Q2_SUM_EOF_PATTERN := sum_forward_eof_to_aggregator | configuration=Q2
-TEST_Q3_SUM_EOF_PATTERN := sum_forward_eof_to_aggregator | configuration=Q3
+TEST_CLIENT_DONE_PATTERN := client_results_finished
+TEST_Q2_EOF_PATTERN := gateway_eof | prefix=Q2|
+TEST_Q4_EOF_PATTERN := gateway_eof | prefix=Q4|
 SCENARIOS_DIR := config/scenarios
 
+config:
+	$(PYTHON) $(COMPOSE_SCRIPT) --config $(CONFIG_FILE)
+.PHONY: config
+
+make-scenario:
+	@scenario="$(if $(SCENARIO),$(SCENARIO),$(SCENARIO_ARG))"; \
+	if [ -z "$$scenario" ]; then \
+		echo "Usage: make make-scenario <scenario-name-or-path>"; \
+		echo "Examples: make make-scenario 1"; \
+		echo "          make make-scenario config/scenarios/4.yaml"; \
+		exit 2; \
+	fi; \
+	if [ -f "$$scenario" ]; then \
+		config_file="$$scenario"; \
+	elif [ -f "$(SCENARIOS_DIR)/$$scenario" ]; then \
+		config_file="$(SCENARIOS_DIR)/$$scenario"; \
+	elif [ -f "$(SCENARIOS_DIR)/$$scenario.yaml" ]; then \
+		config_file="$(SCENARIOS_DIR)/$$scenario.yaml"; \
+	else \
+		echo "Scenario not found: $$scenario" >&2; \
+		exit 2; \
+	fi; \
+	$(PYTHON) $(COMPOSE_SCRIPT) --config "$$config_file"
+.PHONY: make-scenario
+
+ifneq ($(filter make-scenario,$(MAKECMDGOALS)),)
+ifneq ($(SCENARIO_ARG),)
+$(SCENARIO_ARG):
+	@:
+endif
+endif
+
 up:
+	$(MAKE) config
 	mkdir -p data/output
 	COMPOSE_HTTP_TIMEOUT=300 docker compose -f $(COMPOSE_FILE) up --build --remove-orphans --detach
 	docker compose -f $(COMPOSE_FILE) logs --follow
@@ -26,6 +63,7 @@ logs:
 .PHONY: logs
 
 test:
+	$(MAKE) config
 	bash -lc 'set -euo pipefail; \
 		log_file=/tmp/$(TEST_PROJECT).log; \
 		logs_pid=""; \
@@ -47,19 +85,23 @@ test:
 		}; \
 		trap "stop_logs; cleanup" EXIT; \
 		: > "$$log_file"; \
+		mkdir -p data/output; \
+		rm -f data/output/results_q*.csv; \
 		cleanup; \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) config --quiet; \
+		clients="$$(docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) config --services | grep "^client_" | tr "\n" " ")"; \
+		if [ -z "$$clients" ]; then echo "no client services generated" >&2; exit 2; fi; \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) up --build --remove-orphans --detach; \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) logs --follow > "$$log_file" 2>&1 & \
 		logs_pid=$$!; \
 		tail -n +1 -f "$$log_file" >&2 & \
 		tail_pid=$$!; \
 		deadline=$$((SECONDS + 120)); \
+		timeout 180s docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) wait $$clients >/dev/null; \
 		wait_for_pattern "$(TEST_Q1_SUCCESS_PATTERN)"; \
-		wait_for_pattern "$(TEST_Q2_SUM_PARTIAL_PATTERN)"; \
-		wait_for_pattern "$(TEST_Q3_SUM_PARTIAL_PATTERN)"; \
-		wait_for_pattern "$(TEST_Q2_SUM_EOF_PATTERN)"; \
-		wait_for_pattern "$(TEST_Q3_SUM_EOF_PATTERN)"; \
+		wait_for_pattern "$(TEST_CLIENT_DONE_PATTERN)"; \
+		wait_for_pattern "$(TEST_Q2_EOF_PATTERN)"; \
+		wait_for_pattern "$(TEST_Q4_EOF_PATTERN)"; \
 		echo "forward_pass_test_success"'
 .PHONY: test
 
@@ -119,9 +161,9 @@ switch:
 	@echo "2) Múltiples clientes, una sola réplica de cada elemento"
 	@echo "3) Múltiples clientes, sum replicado, un solo aggregator"
 	@echo "4) Múltiples clientes, múltiples réplicas"
-	@echo "5) Múltiples clientes, múltiples réplicas, nombres al azar"
+	@echo "5) Múltiples clientes, múltiples réplicas, datasets mixtos"
 	@read -p "Selecciona uno [1-5]: " option;	\
-	cp $(SCENARIOS_DIR)/$${option}.yaml $(COMPOSE_FILE)
+	$(PYTHON) $(COMPOSE_SCRIPT) --config $(SCENARIOS_DIR)/$${option}.yaml
 .PHONY: switch
 
 test-unit:
