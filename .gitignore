@@ -5,6 +5,8 @@ __pycache__/
 
 *.log
 
+docker-compose.test.yaml
+
 data/datasets/**/*
 !data/datasets/.gitkeep
 !data/datasets/*/
@@ -21,4 +23,3 @@ output/*
 
 
 /venv
-

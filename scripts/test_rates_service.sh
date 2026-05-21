@@ -2,6 +2,8 @@
 
 # Script para levantar RabbitMQ y rates_service en Docker para pruebas
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 # Detener y limpiar contenedores previos
 docker stop rates-test-rabbitmq rates-test-service 2>/dev/null || true
 docker rm rates-test-rabbitmq rates-test-service 2>/dev/null || true
@@ -23,7 +25,7 @@ for i in {1..30}; do
   sleep 2
 done
 
-if [ $i -eq 30 ]; then
+if [ "$i" -eq 30 ]; then
   echo "RabbitMQ no se inició correctamente."
   docker logs rates-test-rabbitmq
   exit 1
@@ -35,11 +37,11 @@ docker run -d --name rates-test-service --link rates-test-rabbitmq:rabbitmq \
   -e CACHE_PATH=/tmp/cache.json \
   -e START_DATE=2022-09-01 \
   -e END_DATE=2022-09-30 \
-  -v $(pwd)/src:/app/src \
+  -v "$ROOT_DIR/src:/app/src" \
   python:3.11-slim \
   bash -c "cd /app && export PYTHONPATH=/app && pip install pika requests && python src/rates_service/main.py"
 
 echo "Rates service levantado. Esperando 5s para inicialización..."
 sleep 5
 
-echo "Servicio listo. Ejecuta el script cliente ahora."
+echo "Servicio listo. Ejecuta: conda run -n distribuidos python scripts/test_rates_client.py"
