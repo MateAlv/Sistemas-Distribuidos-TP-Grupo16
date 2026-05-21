@@ -13,6 +13,7 @@ TEST_CLIENT_DONE_PATTERN := client_results_finished
 TEST_Q2_EOF_PATTERN := gateway_eof | prefix=Q2|
 TEST_Q4_EOF_PATTERN := gateway_eof | prefix=Q4|
 SCENARIOS_DIR := config/scenarios
+RABBIT_SCREEN_URL ?= http://localhost:15672/\#/queues
 
 config:
 	$(PYTHON) $(COMPOSE_SCRIPT) --config $(CONFIG_FILE)
@@ -53,14 +54,63 @@ up:
 	docker compose -f $(COMPOSE_FILE) logs --follow
 .PHONY: up
 
+build:
+	$(MAKE) config
+	docker compose -f $(COMPOSE_FILE) build
+.PHONY: build
+
+rebuild:
+	$(MAKE) config
+	$(MAKE) down
+	mkdir -p data/output
+	docker compose -f $(COMPOSE_FILE) build --no-cache
+	docker compose -f $(COMPOSE_FILE) up --detach --remove-orphans
+.PHONY: rebuild
+
 down:
 	docker compose -f $(COMPOSE_FILE) stop -t 5
 	docker compose -f $(COMPOSE_FILE) down
 .PHONY: down
 
+hard-down:
+	-docker compose -f $(COMPOSE_FILE) kill
+	-docker compose -f $(COMPOSE_FILE) down --volumes --remove-orphans --timeout 20
+	@if [ -f "$(TEST_COMPOSE_FILE)" ]; then \
+		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) kill || true; \
+		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) down --volumes --remove-orphans --timeout 20 || true; \
+	fi
+.PHONY: hard-down
+
+clean-state:
+	mkdir -p data/output
+	rm -f data/output/results_q*.csv
+	find data/datasets -mindepth 1 -maxdepth 1 -type d -name 'client-*' -exec rm -rf {} +
+.PHONY: clean-state
+
 logs:
 	docker compose -f $(COMPOSE_FILE) logs
 .PHONY: logs
+
+rabbit-screen:
+	@bash -lc 'set -euo pipefail; \
+		url="$(RABBIT_SCREEN_URL)"; \
+		echo "Opening RabbitMQ queues: $$url"; \
+		echo "Credentials: guest / guest"; \
+		if command -v xdg-open >/dev/null 2>&1; then \
+			xdg-open "$$url" >/dev/null 2>&1 & \
+		elif command -v open >/dev/null 2>&1; then \
+			open "$$url" >/dev/null 2>&1 & \
+		elif command -v python3 >/dev/null 2>&1; then \
+			python3 -m webbrowser "$$url"; \
+		else \
+			echo "No browser opener found. Open manually: $$url" >&2; \
+			exit 1; \
+		fi'
+.PHONY: rabbit-screen
+
+stats:
+	docker stats
+.PHONY: stats
 
 test:
 	$(MAKE) config
