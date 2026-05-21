@@ -12,10 +12,10 @@ from common.message_protocol.external.types import (
     file_type_name,
     file_ingestor_routing_key,
 )
-from common.message_protocol.common import ControlMessage, MessageType
-from common.message_protocol.control_message_serializer import ControlMessageSerializer
+from common.message_protocol.internal.common import ControlMessage, MessageType
+from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal import InternalProtocol
-from common.message_protocol.transaction_serializer import TransactionSerializer
+from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 from common.middleware import MessageMiddlewareQueueRabbitMQ
 from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
 

@@ -3,12 +3,12 @@ import sys
 import types
 
 from common.domain.transaction import Transaction
-from common.message_protocol.common import ControlMessage, MessageType
-from common.message_protocol.control_message_serializer import ControlMessageSerializer
-from common.message_protocol.scatter_gather_serializer import (
+from common.message_protocol.internal.common import ControlMessage, MessageType
+from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
+from common.message_protocol.internal.scatter_gather_serializer import (
     ScatterGatherResultSerializer,
 )
-from common.message_protocol.transaction_serializer import TransactionSerializer
+from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 
 
 class FakeQueue:

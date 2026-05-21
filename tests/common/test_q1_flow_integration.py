@@ -4,7 +4,7 @@ import csv
 import sys
 from pathlib import Path
 from common.domain.transaction import Transaction
-from common.message_protocol.transaction_serializer import TransactionSerializer
+from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 from common.message_protocol.internal import InternalProtocol
 
 

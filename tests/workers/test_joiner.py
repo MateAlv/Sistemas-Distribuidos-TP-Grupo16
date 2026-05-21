@@ -2,8 +2,8 @@ import os
 
 from common.constants import C_Q2, C_Q5
 from common.domain.partial_result import Q2BankMaxPartial
-from common.message_protocol.aggregation_serializer import AggregationSerializer
-from common.message_protocol.partial_result_serializer import Q2BankMaxPartialSerializer
+from common.message_protocol.internal.aggregation_serializer import AggregationSerializer
+from common.message_protocol.internal.partial_result_serializer import Q2BankMaxPartialSerializer
 from common import middleware as _middleware
 
 
@@ -27,8 +27,8 @@ class _DummyQueue:
 _middleware.MessageMiddlewareQueueRabbitMQ = _DummyQueue
 
 from workers.joiner.joiners import JoinerWorker  # noqa: E402
-from common.message_protocol.control_message_serializer import ControlMessageSerializer  # noqa: E402
-from common.message_protocol.common import MessageType  # noqa: E402
+from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer  # noqa: E402
+from common.message_protocol.internal.common import MessageType  # noqa: E402
 
 
 class DummyQueue:

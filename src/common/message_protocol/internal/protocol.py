@@ -1,10 +1,7 @@
-import json
 import hashlib
 import struct
-from common.message_protocol.common.message_type import MessageType
-from common.domain.transaction import Transaction
-from common.message_protocol.control_message_serializer import ControlMessageSerializer
-from common.message_protocol.transaction_serializer import TransactionSerializer
+
+from common.message_protocol.internal.common.message_type import MessageType
 
 
 def partition_for_key(key: str, partitions: int) -> int:
@@ -22,7 +19,7 @@ def partition_for_pair(left: str, right: str, partitions: int) -> int:
 
 
 class InternalProtocol:
-    HEADER_FORMAT = "!B 16s" 
+    HEADER_FORMAT = "!B 16s"
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
     @classmethod

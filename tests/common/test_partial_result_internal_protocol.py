@@ -1,7 +1,7 @@
 from common.domain.partial_result import Q2BankMaxPartial, Q3PaymentFormatPartial
-from common.message_protocol.common import MessageType
+from common.message_protocol.internal.common import MessageType
 from common.message_protocol.internal import InternalProtocol
-from common.message_protocol.partial_result_serializer import (
+from common.message_protocol.internal.partial_result_serializer import (
     Q2BankMaxPartialSerializer,
     Q3PaymentFormatPartialSerializer,
 )

@@ -4,9 +4,9 @@ import threading
 
 from common import middleware
 from common.constants import C_Q2, C_Q3, C_Q5
-from common.message_protocol.common import MessageType
-from common.message_protocol.common.control_message import ControlMessage
-from common.message_protocol.control_message_serializer import ControlMessageSerializer
+from common.message_protocol.internal.common import MessageType
+from common.message_protocol.internal.common.control_message import ControlMessage
+from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal import InternalProtocol
 
 try:

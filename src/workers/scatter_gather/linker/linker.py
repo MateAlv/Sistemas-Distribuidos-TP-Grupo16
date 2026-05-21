@@ -6,10 +6,10 @@ from common import message_protocol
 from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
 )
-from common.message_protocol.common import ControlMessage, MessageType
-from common.message_protocol.control_message_serializer import ControlMessageSerializer
+from common.message_protocol.internal.common import ControlMessage, MessageType
+from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal import partition_for_pair
-from common.message_protocol.scatter_gather_serializer import (
+from common.message_protocol.internal.scatter_gather_serializer import (
     ScatterGatherRelation,
     ScatterGatherRelationSerializer,
 )

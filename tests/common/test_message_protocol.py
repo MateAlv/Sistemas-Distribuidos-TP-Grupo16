@@ -2,7 +2,7 @@
 import pytest
 import uuid
 from common.domain.transaction import Transaction
-from common.message_protocol.transaction_serializer import TransactionSerializer
+from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 from common.message_protocol.internal import InternalProtocol
 
 def test_transaction_serialization_integrity():
