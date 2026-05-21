@@ -279,6 +279,7 @@ services:
     - MIN_INTERMEDIARIES=5
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
+    - SG_DETECTOR_AMOUNT=1
     - SG_DETECTOR_EXCHANGE=sg_detector_exchange
     - SG_LINKER_AMOUNT=1
 
