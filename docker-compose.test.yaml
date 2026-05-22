@@ -24,6 +24,7 @@ services:
     - FILE_INGESTOR_PARTITIONS=1
     - GATEWAY_Q2_QUEUE=join_q2_results_queue
     - GATEWAY_Q4_QUEUE=gateway_q4_results_queue
+    - GATEWAY_Q5_QUEUE=join_q5_results_queue
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
