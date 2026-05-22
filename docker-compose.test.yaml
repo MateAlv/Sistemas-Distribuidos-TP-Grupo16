@@ -270,6 +270,43 @@ services:
     - SUM_AMOUNT=3
     - SUM_PREFIX=sum_q2
 
+  aggregation_q5_0:
+    build:
+      context: ./src/
+      dockerfile: workers/aggregator/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_PREFIX=aggregation_q5
+    - CONFIGURATION=Q5
+    - ID=0
+    - MOM_HOST=rabbitmq
+    - OUTPUT_QUEUE=join_q5_queue
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=1
+    - SUM_PREFIX=filter_q5_usd
+
+  join_q5:
+    build:
+      context: ./src/
+      dockerfile: workers/joiner/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_PREFIX=aggregation_q5
+    - CONFIGURATION=Q5
+    - ID=0
+    - INPUT_QUEUE=join_q5_queue
+    - MOM_HOST=rabbitmq
+    - OUTPUT_QUEUE=join_q5_results_queue
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=1
+    - SUM_PREFIX=filter_q5_usd
+
   sum_q3_0:
     build:
       context: ./src/
@@ -394,6 +431,8 @@ services:
     - filter_q5_format_0
     - filter_q5_usd_0
     - rates_service
+    - aggregation_q5_0
+    - join_q5
     environment:
     - ACCOUNTS_FILE=LI-Mini_accounts.csv
     - TRANSACTIONS_FILE=LI-Mini_Trans.csv
