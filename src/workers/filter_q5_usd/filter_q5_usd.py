@@ -12,6 +12,43 @@ from common.message_protocol.common.control_message import ControlMessage
 from common.message_protocol.control_message_serializer import ControlMessageSerializer
 from common.rates.rates_manager import RatesManager
 
+CURRENCY_NAME_TO_ISO = {
+    "US Dollar": "USD",
+    "Euro": "EUR",
+    "UK Pound": "GBP",
+    "Yen": "JPY",
+    "Swiss Franc": "CHF",
+    "Canadian Dollar": "CAD",
+    "Australian Dollar": "AUD",
+    "Mexican Peso": "MXN",
+    "Brazil Real": "BRL",
+    "Yuan": "CNY",
+    "Rupee": "INR",
+    "Ruble": "RUB",
+    "Saudi Riyal": "SAR",
+    "Shekel": "ILS",
+    "Swedish Krona": "SEK",
+    "New Zealand Dollar": "NZD",
+    "Singapore Dollar": "SGD",
+    "Hong Kong Dollar": "HKD",
+    "Norwegian Krone": "NOK",
+    "South Korean Won": "KRW",
+    "Turkish Lira": "TRY",
+    "South African Rand": "ZAR",
+    "Thai Baht": "THB",
+    "Polish Zloty": "PLN",
+    "Czech Koruna": "CZK",
+    "Philippine Peso": "PHP",
+    "Indonesian Rupiah": "IDR",
+    "Malaysian Ringgit": "MYR",
+    "Hungarian Forint": "HUF",
+    "Icelandic Krona": "ISK",
+    "Croatian Kuna": "HRK",
+    "Romanian Leu": "RON",
+    "Danish Krone": "DKK",
+    "Bulgarian Lev": "BGN",
+}
+
 ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
@@ -58,7 +95,10 @@ class FilterQ5UsdWorker:
     def _convert_to_usd(self, amount: float, currency: str, date: str) -> float:
         if currency == "US Dollar":
             return amount
-        rate = self.rates_manager.get_rate(date, currency)
+        iso = CURRENCY_NAME_TO_ISO.get(currency)
+        if iso is None:
+            raise ValueError(f"Unknown currency: {currency}")
+        rate = self.rates_manager.get_rate(date, iso)
         return amount * rate
 
     def _in_date_range(self, date: str) -> bool:

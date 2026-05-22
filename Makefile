@@ -113,6 +113,42 @@ test-q2:
 		docker compose -f docker-compose.test.yaml logs aggregation_q2_0'
 .PHONY: test-q2
 
+test-q5:
+	bash -lc 'set -euo pipefail; \
+		compose="docker compose -f docker-compose.test-q5.yaml"; \
+		cleanup() { $$compose down --volumes --remove-orphans >/dev/null 2>&1; }; \
+		trap cleanup EXIT; \
+		cleanup; \
+		mkdir -p data/output; \
+		start_time=$$SECONDS; \
+		echo "Starting Q5 flow test (LI-Small dataset)..."; \
+		$$compose up --build --remove-orphans --detach; \
+		echo "Waiting for client to finish (timeout 1800s)..."; \
+		deadline=$$((SECONDS + 1800)); \
+		while ! $$compose logs client_0 2>&1 | grep -q "client_results_finished"; do \
+			if [ "$$SECONDS" -ge "$$deadline" ]; then echo "TIMEOUT waiting for client"; exit 124; fi; \
+			sleep 5; \
+		done; \
+		elapsed=$$((SECONDS - start_time)); \
+		echo "Client finished in $${elapsed}s"; \
+		sleep 3; \
+		echo "Validating Q5 output..."; \
+		python3 scripts/validate_q5_output.py && echo "✓ Q5 test PASSED ($${elapsed}s)" || echo "✗ Q5 test FAILED ($${elapsed}s)"; \
+		echo ""; \
+		echo "=== client_0 logs ==="; \
+		$$compose logs client_0; \
+		echo "=== gateway logs ==="; \
+		$$compose logs gateway; \
+		echo "=== filter_q5_format_0 logs ==="; \
+		$$compose logs filter_q5_format_0; \
+		echo "=== filter_q5_usd_0 logs ==="; \
+		$$compose logs filter_q5_usd_0; \
+		echo "=== aggregation_q5_0 logs ==="; \
+		$$compose logs aggregation_q5_0; \
+		echo "=== join_q5 logs ==="; \
+		$$compose logs join_q5'
+.PHONY: test-q5
+
 switch:
 	@echo Escenarios de prueba:
 	@echo "1) Un cliente, una sola réplica de cada elemento"
