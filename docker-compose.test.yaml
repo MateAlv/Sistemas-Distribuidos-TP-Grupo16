@@ -98,6 +98,37 @@ services:
     - SUM_Q3_QUEUE=sum_q3_queue
     - TRANSACTION_EXCHANGE=transaction_fanout_exchange
 
+  rates_service:
+    build:
+      context: .
+      dockerfile: src/rates_service/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - RABBIT_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    volumes:
+    - ./data/rates:/data/rates:rw
+
+  filter_q5_usd_0:
+    build:
+      context: ./src/
+      dockerfile: workers/filter_q5_usd/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_PREFIX=aggregation_q5
+    - ID=0
+    - INPUT_QUEUE=filter_q5_usd_queue
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - RATES_REQUEST_QUEUE=rates_requests
+    - Q5_START_DATE=2022-09-01
+    - Q5_END_DATE=2022-09-05
+
   filter_q1_0:
     build:
       context: ./src/
@@ -361,6 +392,8 @@ services:
     - aggregation_q2_0
     - join_q2
     - filter_q5_format_0
+    - filter_q5_usd_0
+    - rates_service
     environment:
     - ACCOUNTS_FILE=LI-Mini_accounts.csv
     - TRANSACTIONS_FILE=LI-Mini_Trans.csv
