@@ -32,10 +32,10 @@ def validate_q1_results():
         print("ERROR: No output directory found. Test may have failed.")
         return False
     
-    # 3. Buscar archivos de salida
-    output_files = list(output_dir.glob("*.csv"))
+    # 3. Buscar archivos de salida Q1
+    output_files = list(output_dir.glob("results_q1_*.csv"))
     if not output_files:
-        print("ERROR: No output files found in data/output")
+        print("ERROR: No Q1 output files found in data/output")
         return False
     
     print(f"✓ Found {len(output_files)} output file(s)")

@@ -26,7 +26,7 @@ class FileIngestorConfig:
     mom_host: str
     file_ingestor_exchange: str
     queue_name: str
-    transaction_output_queue: str
+    transaction_output_exchange: str
     max_line_bytes: int
     logging_level: str
 
@@ -57,7 +57,7 @@ class FileIngestor:
         self._chunks_received = 0
         self._eofs_received = 0
         self._files: dict[FileKey, FileState] = {}
-        self._transaction_output: MessageMiddlewareQueueRabbitMQ | None = None
+        self._transaction_output: MessageMiddlewareExchangeRabbitMQ | None = None
         self._transaction_serializer = TransactionSerializer()
         self._control_serializer = ControlMessageSerializer()
         self._internal_protocol = InternalProtocol()
@@ -291,11 +291,13 @@ class FileIngestor:
         )
         self._transaction_sender().send(message)
 
-    def _transaction_sender(self) -> MessageMiddlewareQueueRabbitMQ:
+    def _transaction_sender(self) -> MessageMiddlewareExchangeRabbitMQ:
         if self._transaction_output is None:
-            self._transaction_output = MessageMiddlewareQueueRabbitMQ(
-                self._config.mom_host,
-                self._config.transaction_output_queue,
+            self._transaction_output = MessageMiddlewareExchangeRabbitMQ(
+                host=self._config.mom_host,
+                exchange_name=self._config.transaction_output_exchange,
+                routing_keys=[],
+                exchange_type="fanout",
             )
         return self._transaction_output
 

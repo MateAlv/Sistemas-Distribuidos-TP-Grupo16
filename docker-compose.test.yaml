@@ -44,7 +44,7 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - TRANSACTION_OUTPUT_QUEUE=filter_usd_queue
+    - TRANSACTION_OUTPUT_EXCHANGE=transaction_fanout_exchange
 
   filter_usd_0:
     build:
@@ -70,6 +70,7 @@ services:
     - SUM_PREFIX=sum_q3
     - SUM_Q2_QUEUE=sum_q2_queue
     - SUM_Q3_QUEUE=sum_q3_queue
+    - TRANSACTION_EXCHANGE=transaction_fanout_exchange
 
   filter_q1_0:
     build:
