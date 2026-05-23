@@ -20,8 +20,7 @@ from common.message_protocol.internal import (
 )
 from common.middleware import MessageMiddlewareQueueRabbitMQ
 from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
-from workers.common.csv_rows import parse_csv_line
-from workers.common.line_splitter import LineSplitter
+from workers.common.line_splitter import LineSplitter, parse_csv_line
 
 
 @dataclass(frozen=True)
