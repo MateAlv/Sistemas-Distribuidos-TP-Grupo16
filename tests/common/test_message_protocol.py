@@ -25,6 +25,25 @@ def test_transaction_serialization_integrity():
     assert tx_recovered.currency == tx_original.currency
     assert tx_recovered.from_bank == tx_original.from_bank
 
+
+def test_transaction_serialization_accepts_small_dataset_currency():
+    tx_original = Transaction(
+        date="2022/09/01 00:08",
+        from_bank="123",
+        from_account="456",
+        to_bank="789",
+        to_account="101",
+        amount=50.5,
+        currency="Australian Dollar",
+        format="Wire",
+    )
+
+    data = TransactionSerializer.serialize(tx_original)
+    tx_recovered = TransactionSerializer.deserialize(data)
+
+    assert tx_recovered.currency == tx_original.currency
+
+
 def test_batch_serialization():
     txs = [
         Transaction("2022-09-01", "1", "2", "3", "4", 10.0, "US Dollar", "ACH"),

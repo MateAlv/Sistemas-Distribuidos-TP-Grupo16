@@ -6,12 +6,18 @@ TEST_PROJECT := mla-forward-pass-test
 CONFIG_FILE ?= config/main-config.yaml
 CONDA_ENV ?= distribuidos
 PYTHON ?= conda run -n $(CONDA_ENV) python
+LOG_PYTHON ?= conda run --no-capture-output -n $(CONDA_ENV) python -u
 COMPOSE_SCRIPT := scripts/generate_compose.py
+LOG_FORMATTER := scripts/pretty_logs.py
+LOG_COLOR ?= always
+LOG_ARGS ?=
 SCENARIO_ARG := $(word 2,$(MAKECMDGOALS))
 TEST_Q1_SUCCESS_PATTERN := Forward pass successful - Mate | filter=Q1
 TEST_CLIENT_DONE_PATTERN := client_results_finished
 TEST_Q2_EOF_PATTERN := gateway_eof | prefix=Q2|
 TEST_Q4_EOF_PATTERN := gateway_eof | prefix=Q4|
+TEST_CLIENT_WAIT_TIMEOUT ?= 600s
+TEST_SMOKE_DEADLINE_SECONDS ?= 600
 SCENARIOS_DIR := config/scenarios
 RABBIT_SCREEN_URL ?= http://localhost:15672/\#/queues
 
@@ -19,12 +25,12 @@ config:
 	$(PYTHON) $(COMPOSE_SCRIPT) --config $(CONFIG_FILE)
 .PHONY: config
 
-make-scenario:
+scenario:
 	@scenario="$(if $(SCENARIO),$(SCENARIO),$(SCENARIO_ARG))"; \
 	if [ -z "$$scenario" ]; then \
-		echo "Usage: make make-scenario <scenario-name-or-path>"; \
-		echo "Examples: make make-scenario 1"; \
-		echo "          make make-scenario config/scenarios/4.yaml"; \
+		echo "Usage: make scenario <scenario-name-or-path>"; \
+		echo "Examples: make scenario 1"; \
+		echo "          make scenario config/scenarios/4.yaml"; \
 		exit 2; \
 	fi; \
 	if [ -f "$$scenario" ]; then \
@@ -38,9 +44,9 @@ make-scenario:
 		exit 2; \
 	fi; \
 	$(PYTHON) $(COMPOSE_SCRIPT) --config "$$config_file"
-.PHONY: make-scenario
+.PHONY: scenario
 
-ifneq ($(filter make-scenario,$(MAKECMDGOALS)),)
+ifneq ($(filter scenario,$(MAKECMDGOALS)),)
 ifneq ($(SCENARIO_ARG),)
 $(SCENARIO_ARG):
 	@:
@@ -51,7 +57,7 @@ up:
 	$(MAKE) config
 	mkdir -p data/output
 	COMPOSE_HTTP_TIMEOUT=300 docker compose -f $(COMPOSE_FILE) up --build --remove-orphans --detach
-	docker compose -f $(COMPOSE_FILE) logs --follow
+	docker compose -f $(COMPOSE_FILE) logs --follow --timestamps --no-color | $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR)
 .PHONY: up
 
 build:
@@ -70,6 +76,10 @@ rebuild:
 down:
 	docker compose -f $(COMPOSE_FILE) stop -t 5
 	docker compose -f $(COMPOSE_FILE) down
+	@if [ -f "$(TEST_COMPOSE_FILE)" ]; then \
+		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) stop -t 5 || true; \
+		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) down --volumes --remove-orphans || true; \
+	fi
 .PHONY: down
 
 hard-down:
@@ -88,7 +98,7 @@ clean-state:
 .PHONY: clean-state
 
 logs:
-	docker compose -f $(COMPOSE_FILE) logs
+	docker compose -f $(COMPOSE_FILE) logs --timestamps --no-color $(LOG_ARGS) | $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR)
 .PHONY: logs
 
 rabbit-screen:
@@ -142,12 +152,12 @@ test:
 		clients="$$(docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) config --services | grep "^client_" | tr "\n" " ")"; \
 		if [ -z "$$clients" ]; then echo "no client services generated" >&2; exit 2; fi; \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) up --build --remove-orphans --detach; \
-		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) logs --follow > "$$log_file" 2>&1 & \
+		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) logs --follow --timestamps --no-color > "$$log_file" 2>&1 & \
 		logs_pid=$$!; \
-		tail -n +1 -f "$$log_file" >&2 & \
+		tail -n +1 -f "$$log_file" | $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR) >&2 & \
 		tail_pid=$$!; \
-		deadline=$$((SECONDS + 120)); \
-		timeout 180s docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) wait $$clients >/dev/null; \
+		deadline=$$((SECONDS + $(TEST_SMOKE_DEADLINE_SECONDS))); \
+		timeout $(TEST_CLIENT_WAIT_TIMEOUT) docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) wait $$clients >/dev/null; \
 		wait_for_pattern "$(TEST_Q1_SUCCESS_PATTERN)"; \
 		wait_for_pattern "$(TEST_CLIENT_DONE_PATTERN)"; \
 		wait_for_pattern "$(TEST_Q2_EOF_PATTERN)"; \

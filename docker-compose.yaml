@@ -362,8 +362,8 @@ services:
     - scatter_gather_linker_0
     - scatter_gather_mapper_0
     environment:
-    - ACCOUNTS_FILE=LI-Mini_accounts.csv
-    - TRANSACTIONS_FILE=LI-Mini_Trans.csv
+    - ACCOUNTS_FILE=LI-Small_accounts.csv
+    - TRANSACTIONS_FILE=LI-Small_Trans.csv
     - CHUNK_MAX_BYTES=65536
     - CLIENT_ID=0
     - CONNECT_TIMEOUT_SECONDS=30
@@ -376,5 +376,5 @@ services:
     - SERVER_HOST=gateway
     - SERVER_PORT=5678
     volumes:
-    - ./data/datasets/client-1/LI-Mini:/data/input:ro
+    - ./data/datasets/client-1/LI-Small:/data/input:ro
     - ./data/output:/data/output:rw
