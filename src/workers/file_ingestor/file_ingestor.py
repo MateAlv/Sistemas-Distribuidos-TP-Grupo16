@@ -17,11 +17,8 @@ from common.message_protocol.internal import InternalProtocol
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 from common.middleware import MessageMiddlewareQueueRabbitMQ
 from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
-from workers.file_ingestor.transaction_row_parser import (
-    TransactionRowParser,
-    parse_csv_line,
-)
-from workers.common.line_splitter import LineSplitter
+from workers.file_ingestor.transaction_row_parser import TransactionRowParser
+from workers.common.line_splitter import LineSplitter, parse_csv_line
 
 
 @dataclass(frozen=True)
