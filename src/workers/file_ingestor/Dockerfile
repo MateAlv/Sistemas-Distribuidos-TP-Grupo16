@@ -2,7 +2,12 @@ FROM python:3-alpine
 
 RUN pip3 install pika
 
-COPY common ./common
-COPY workers/file_ingestor .
+WORKDIR /app
 
-ENTRYPOINT ["python3", "main.py"]
+COPY common ./common
+COPY workers/file_ingestor ./workers/file_ingestor
+COPY workers/file_splitter ./workers/file_splitter
+
+ENV PYTHONPATH=/app
+
+ENTRYPOINT ["python3", "workers/file_ingestor/main.py"]
