@@ -7,7 +7,7 @@ import queue
 import os
 from dataclasses import dataclass, field
 
-from common.message_protocol.external import FileChunk, recv_exact, sendall
+from common.message_protocol.external import FileChunk, FileEof, recv_exact, sendall
 from common.message_protocol.external.types import (
     HANDSHAKE, FILE_CHUNK, FINISH, ACK,
     MSG_CHUNK, MSG_EOF,
@@ -36,6 +36,7 @@ class ClientSession:
     sock: socket.socket
     chunks_forwarded: int = 0
     used_partitions: set[int] = field(default_factory=set)
+    current_file: tuple[str, int, int] | None = None
 
 
 class Gateway:
@@ -200,6 +201,30 @@ class Gateway:
                         rel_path=chunk.path(),
                         partitions=cfg.file_ingestor_partitions,
                     )
+                    current_file = (chunk.path(), chunk.file_type(), partition)
+                    if session.current_file is None:
+                        session.current_file = current_file
+                    elif session.current_file[:2] != current_file[:2]:
+                        prev_path, prev_file_type, prev_partition = session.current_file
+                        publisher.send(
+                            prev_partition,
+                            _serialize_file_eof(
+                                session.client_id,
+                                prev_file_type,
+                                prev_path,
+                            ),
+                        )
+                        logging.debug(
+                            "gateway_forward_file_eof | client_id=%s | path=%s | "
+                            "file_type=%s | partition=%s | routing_key=%s",
+                            session.client_id,
+                            prev_path,
+                            prev_file_type,
+                            prev_partition,
+                            file_ingestor_routing_key(prev_partition),
+                        )
+                        session.current_file = current_file
+
                     publisher.send(partition, _serialize_chunk(chunk))
                     session.chunks_forwarded += 1
                     session.used_partitions.add(partition)
@@ -215,15 +240,22 @@ class Gateway:
                     _send_ack(session.sock)
 
                 elif msg_type == FINISH:
-                    for partition in sorted(session.used_partitions):
-                        publisher.send(partition, _serialize_eof(session.client_id))
+                    if session.current_file is not None:
+                        path, file_type, partition = session.current_file
+                        publisher.send(
+                            partition,
+                            _serialize_file_eof(session.client_id, file_type, path),
+                        )
                         logging.debug(
-                            "gateway_forward_eof | client_id=%s | partition=%s | "
-                            "routing_key=%s",
+                            "gateway_forward_file_eof | client_id=%s | path=%s | "
+                            "file_type=%s | partition=%s | routing_key=%s",
                             session.client_id,
+                            path,
+                            file_type,
                             partition,
                             file_ingestor_routing_key(partition),
                         )
+                        session.current_file = None
 
                     _send_ack(session.sock)
                     logging.info(
@@ -326,9 +358,13 @@ def _serialize_chunk(chunk: FileChunk) -> bytes:
     return MSG_CHUNK.to_bytes(1, "big") + chunk.serialize()
 
 
-def _serialize_eof(client_id: int) -> bytes:
-    # Wire layout: msg_type(1) | client_id(4)
-    return MSG_EOF.to_bytes(1, "big") + client_id.to_bytes(4, "big")
+def _serialize_file_eof(client_id: int, file_type: int, rel_path: str) -> bytes:
+    # Wire layout: msg_type(1) | FileEof bytes
+    return MSG_EOF.to_bytes(1, "big") + FileEof(
+        rel_path=rel_path,
+        client_id=client_id,
+        file_type=file_type,
+    ).serialize()
 
 
 class FileIngestorPublisher:

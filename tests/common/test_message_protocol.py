@@ -2,6 +2,8 @@
 import pytest
 import uuid
 from common.domain.transaction import Transaction
+from common.message_protocol.external import FileEof
+from common.message_protocol.external.types import FILE_TYPE_TRANSACTIONS
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 from common.message_protocol.internal import InternalProtocol
 
@@ -67,3 +69,17 @@ def test_internal_protocol_header():
     assert res_type == msg_type
     assert res_id == int(client_id)
     assert res_payload == payload
+
+
+def test_file_eof_serialization_integrity():
+    eof = FileEof(
+        rel_path="input/LI-Small_Trans.csv",
+        client_id=7,
+        file_type=FILE_TYPE_TRANSACTIONS,
+    )
+
+    recovered = FileEof.deserialize(eof.serialize())
+
+    assert recovered.path() == eof.path()
+    assert recovered.client_id() == eof.client_id()
+    assert recovered.file_type() == eof.file_type()

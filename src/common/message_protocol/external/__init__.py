@@ -1,5 +1,6 @@
 from common.message_protocol.external.socket_utils import ensure_socket, sendall, recv_exact
 from common.message_protocol.external.file_chunk import FileChunk, FileChunkHeader
+from common.message_protocol.external.file_eof import FileEof
 from common.message_protocol.external import types
 
 __all__ = [
@@ -8,5 +9,6 @@ __all__ = [
     "recv_exact",
     "FileChunk",
     "FileChunkHeader",
+    "FileEof",
     "types",
 ]
