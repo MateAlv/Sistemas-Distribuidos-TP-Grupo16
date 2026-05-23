@@ -3,7 +3,7 @@ import logging
 from dataclasses import dataclass
 
 from common.domain.transaction import Transaction
-from common.message_protocol.external import FileChunk
+from common.message_protocol.external import FileChunk, FileEof
 from common.message_protocol.external.types import (
     FILE_TYPE_ACCOUNTS,
     FILE_TYPE_TRANSACTIONS,
@@ -106,7 +106,11 @@ class FileIngestor:
                 return
 
             if msg_type == MSG_EOF:
-                self._handle_eof(_deserialize_eof(payload))
+                eof = _deserialize_eof(payload)
+                if isinstance(eof, FileEof):
+                    self._handle_file_eof(eof)
+                else:
+                    self._handle_eof(eof)
                 ack()
                 return
 
@@ -168,34 +172,40 @@ class FileIngestor:
             self._chunks_received,
         )
 
+    def _handle_file_eof(self, eof: FileEof) -> None:
+        key = FileKey(client_id=eof.client_id(), rel_path=eof.path())
+        file_finished, saw_transactions_file, transactions_sent = self._finish_file(
+            key,
+            expected_file_type=eof.file_type(),
+        )
+
+        if saw_transactions_file:
+            self._send_eof(eof.client_id(), transactions_sent)
+
+        self._eofs_received += 1
+        logging.info(
+            "file_ingestor_eof | id=%s | client_id=%s | file_type=%s | path=%s | "
+            "files_finished=%s | transactions_file=%s | transactions_sent=%s | "
+            "eofs_received=%s",
+            self._config.id,
+            eof.client_id(),
+            file_type_name(eof.file_type()),
+            eof.path(),
+            1 if file_finished else 0,
+            saw_transactions_file,
+            transactions_sent,
+            self._eofs_received,
+        )
+
     def _handle_eof(self, client_id: int) -> None:
         keys = [key for key in self._files if key.client_id == client_id]
         transactions_sent = 0
         saw_transactions_file = False
 
         for key in keys:
-            state = self._files[key]
-            if state.pending:
-                self._handle_line(key, state, state.pending)
-                state.pending = b""
-
-            if state.file_type == FILE_TYPE_TRANSACTIONS:
-                saw_transactions_file = True
-                transactions_sent += state.transactions_sent
-
-            logging.info(
-                "file_ingestor_file_finished | id=%s | client_id=%s | file_type=%s | "
-                "path=%s | chunks=%s | lines=%s | transactions_sent=%s | bytes=%s",
-                self._config.id,
-                key.client_id,
-                file_type_name(state.file_type),
-                key.rel_path,
-                state.chunks_received,
-                state.lines_received,
-                state.transactions_sent,
-                state.bytes_received,
-            )
-            del self._files[key]
+            _, file_saw_transactions, file_transactions_sent = self._finish_file(key)
+            saw_transactions_file = saw_transactions_file or file_saw_transactions
+            transactions_sent += file_transactions_sent
 
         if saw_transactions_file:
             self._send_eof(client_id, transactions_sent)
@@ -211,6 +221,50 @@ class FileIngestor:
             transactions_sent,
             self._eofs_received,
         )
+
+    def _finish_file(
+        self,
+        key: FileKey,
+        expected_file_type: int | None = None,
+    ) -> tuple[bool, bool, int]:
+        state = self._files.get(key)
+        if state is None:
+            logging.warning(
+                "file_ingestor_file_eof_missing | id=%s | client_id=%s | path=%s",
+                self._config.id,
+                key.client_id,
+                key.rel_path,
+            )
+            return False, False, 0
+
+        if expected_file_type is not None and state.file_type != expected_file_type:
+            raise ValueError(
+                "file EOF type mismatch "
+                f"(client_id={key.client_id}, path={key.rel_path}, "
+                f"expected={state.file_type}, received={expected_file_type})"
+            )
+
+        if state.pending:
+            self._handle_line(key, state, state.pending)
+            state.pending = b""
+
+        saw_transactions_file = state.file_type == FILE_TYPE_TRANSACTIONS
+        transactions_sent = state.transactions_sent if saw_transactions_file else 0
+
+        logging.info(
+            "file_ingestor_file_finished | id=%s | client_id=%s | file_type=%s | "
+            "path=%s | chunks=%s | lines=%s | transactions_sent=%s | bytes=%s",
+            self._config.id,
+            key.client_id,
+            file_type_name(state.file_type),
+            key.rel_path,
+            state.chunks_received,
+            state.lines_received,
+            state.transactions_sent,
+            state.bytes_received,
+        )
+        del self._files[key]
+        return True, saw_transactions_file, transactions_sent
 
     def _handle_line(self, key: FileKey, state: FileState, line: bytes) -> None:
         clean_line = line[:-1] if line.endswith(b"\r") else line
@@ -320,10 +374,10 @@ class FileIngestor:
         return self._transaction_output
 
 
-def _deserialize_eof(payload: bytes) -> int:
-    if len(payload) != 4:
-        raise ValueError(f"invalid EOF payload size: {len(payload)}")
-    return int.from_bytes(payload, byteorder="big")
+def _deserialize_eof(payload: bytes) -> int | FileEof:
+    if len(payload) == 4:
+        return int.from_bytes(payload, byteorder="big")
+    return FileEof.deserialize(payload)
 
 
 def _split_complete_lines(data: bytes, max_line_bytes: int) -> tuple[list[bytes], bytes]:
