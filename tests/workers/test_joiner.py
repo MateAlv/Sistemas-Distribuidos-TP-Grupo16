@@ -62,7 +62,8 @@ def _make_worker(configuration: str, aggregation_amount: int = 2) -> JoinerWorke
     jm.CONFIGURATION = configuration
     jm.AGGREGATION_AMOUNT = aggregation_amount
     worker = JoinerWorker()
-    worker.output_queue = DummyQueue()
+    worker.output_resource = DummyQueue()
+    worker.output_queue = worker.output_resource
     return worker
 
 

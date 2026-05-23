@@ -24,4 +24,3 @@ class ControlMessageSerializer:
             expected_total=vals[1],
             processed_count=vals[2]
         )
-    
