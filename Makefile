@@ -3,10 +3,9 @@ PWD := $(shell pwd)
 MAIN_PROJECT ?= $(shell basename "$(PWD)" | tr '[:upper:]' '[:lower:]')
 COMPOSE_FILE := docker-compose.yaml
 TEST_COMPOSE_FILE := docker-compose.test.yaml
-TEST_PROJECT := mla-forward-pass-test
+TEST_PROJECT := distribuidos-test
 MAIN_CONFIG_FILE ?= config/main-config.yaml
 TEST_CONFIG_FILE ?= config/test-config.yaml
-Q5_TEST_CONFIG_FILE ?= config/test-q5-config.yaml
 PYTHON ?= $(if $(wildcard venv/bin/python),venv/bin/python,python3)
 LOG_PYTHON ?= $(PYTHON) -u
 COMPOSE_SCRIPT := scripts/generate_compose.py
@@ -234,10 +233,9 @@ test-q2:
 .PHONY: test-q2
 
 Q5_DATASET ?= LI-Mini
-test-q5: TEST_CONFIG_FILE = $(if $(SCENARIO),$(SCENARIOS_DIR)/$(SCENARIO).yaml,$(Q5_TEST_CONFIG_FILE))
 test-q5:
-	$(PYTHON) $(COMPOSE_SCRIPT) --config $(TEST_CONFIG_FILE) --test-output $(TEST_COMPOSE_FILE) --skip-output
-	bash -lc 'set -euo pipefail; \
+	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q5-test --dataset $(Q5_DATASET) --test-output $(TEST_COMPOSE_FILE) --skip-output
+	@bash -lc 'set -euo pipefail; \
 		compose="docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE)"; \
 		cleanup() { $$compose down --volumes --remove-orphans >/dev/null 2>&1; }; \
 		trap cleanup EXIT; \
@@ -245,7 +243,7 @@ test-q5:
 		mkdir -p data/output; \
 		rm -f data/output/results_q5_*.csv; \
 		start_time=$$SECONDS; \
-		echo "Starting Q5 flow test (scenario=$(or $(SCENARIO),1), dataset=$(Q5_DATASET))..."; \
+		echo "Starting Q5 flow test (preset=q5-test, dataset=$(Q5_DATASET))..."; \
 		$$compose up --build --remove-orphans --detach; \
 		clients="$$($$compose config --services | grep "^client_" | tr "\n" " ")"; \
 		if [ -z "$$clients" ]; then echo "no client services found" >&2; exit 2; fi; \

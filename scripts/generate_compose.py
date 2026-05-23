@@ -50,8 +50,13 @@ SG_DETECTOR_EXCHANGE = "sg_detector_exchange"
 
 def main() -> int:
     args = parse_args()
-    config_path = resolve_path(args.config)
-    config = load_config(config_path)
+    if args.preset:
+        config = preset_config(args.preset, args.dataset)
+        config_label = f"preset:{args.preset}"
+    else:
+        config_path = resolve_path(args.config)
+        config = load_config(config_path)
+        config_label = relative(config_path)
 
     output_file = resolve_path(
         args.output or config.get("compose", {}).get("output_file") or DEFAULT_COMPOSE
@@ -69,7 +74,7 @@ def main() -> int:
     if not args.skip_test_output:
         write_compose(config, test_output_file, expose_ports=False)
         generated.append(relative(test_output_file))
-    print(f"generated {', '.join(generated)} from {relative(config_path)}")
+    print(f"generated {', '.join(generated)} from {config_label}")
     return 0
 
 
@@ -78,6 +83,8 @@ def parse_args():
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to the config YAML.")
     parser.add_argument("--output", help="Path for docker-compose.yaml.")
     parser.add_argument("--test-output", help="Path for docker-compose.test.yaml.")
+    parser.add_argument("--preset", choices=("q5-test",), help="Use a built-in compose config preset.")
+    parser.add_argument("--dataset", default="LI-Mini", help="Dataset name for presets that need one.")
     parser.add_argument("--skip-output", action="store_true", help="Do not write docker-compose.yaml.")
     parser.add_argument("--skip-test-output", action="store_true", help="Do not write docker-compose.test.yaml.")
     parser.set_defaults(skip_output=False, skip_test_output=False)
@@ -85,6 +92,67 @@ def parse_args():
     if args.skip_output and args.skip_test_output:
         parser.error("at least one compose output must be enabled")
     return args
+
+
+def preset_config(name: str, dataset: str) -> dict:
+    if name != "q5-test":
+        raise ValueError(f"unknown preset: {name}")
+
+    config = {
+        "compose": {
+            "output_file": "docker-compose.yaml",
+            "test_output_file": "docker-compose.test.yaml",
+            "rabbitmq_ports": True,
+        },
+        "settings": {
+            "logging_level": "INFO",
+            "server_port": 5678,
+            "chunk_max_bytes": 1048576,
+            "result_line_max_bytes": 1048576,
+            "connect_timeout_seconds": 30,
+            "io_timeout_seconds": 3600,
+        },
+        "workers": {
+            "file_ingestors": 1,
+            "filters": {
+                "usd": 1,
+                "q1": 1,
+                "date": 1,
+                "q5_format": 1,
+                "q5_usd": 1,
+            },
+            "sums": {
+                "q2": 1,
+                "q3": 1,
+            },
+            "aggregators": {
+                "q2": 1,
+                "q3": 1,
+                "q5": 1,
+            },
+            "joiners": {
+                "q2": 1,
+                "q3": 1,
+                "q5": 1,
+            },
+            "scatter_gather": {
+                "mappers": 1,
+                "linkers": 1,
+                "detectors": 1,
+                "min_intermediaries": 5,
+            },
+        },
+        "clients": 1,
+        "client_accounts": [
+            {
+                "client_id": 0,
+                "accounts_file": f"data/datasets/client-1/{dataset}/{dataset}_accounts.csv",
+                "transactions_file": f"data/datasets/client-1/{dataset}/{dataset}_Trans.csv",
+            }
+        ],
+    }
+    validate_config(config, Path(f"preset:{name}"))
+    return config
 
 
 def load_config(path: Path) -> dict:
