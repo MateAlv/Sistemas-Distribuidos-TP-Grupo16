@@ -1,7 +1,7 @@
 import struct
 from dataclasses import dataclass
 
-from common.message_protocol.transaction_serializer import TransactionSerializer
+from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 
 
 @dataclass(frozen=True)

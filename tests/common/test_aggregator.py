@@ -2,8 +2,8 @@ import os
 
 from common.constants import C_Q2, C_Q3, C_Q5
 from common.domain.partial_result import Q2BankMaxPartial, Q3PaymentFormatPartial
-from common.message_protocol.aggregation_serializer import AggregationSerializer
-from common.message_protocol.partial_result_serializer import (
+from common.message_protocol.internal.aggregation_serializer import AggregationSerializer
+from common.message_protocol.internal.partial_result_serializer import (
     Q2BankMaxPartialSerializer,
     Q3AverageResultSerializer,
     Q3PaymentFormatPartialSerializer,
@@ -51,8 +51,8 @@ _middleware.MessageMiddlewareQueueRabbitMQ = _DummyMiddlewareQueue
 _middleware.MessageMiddlewareExchangeRabbitMQ = _DummyMiddlewareExchange
 
 from workers.aggregator.aggregators import AggregatorWorker
-from common.message_protocol.control_message_serializer import ControlMessageSerializer
-from common.message_protocol.common import MessageType
+from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
+from common.message_protocol.internal.common import MessageType
 
 
 class DummyQueue:

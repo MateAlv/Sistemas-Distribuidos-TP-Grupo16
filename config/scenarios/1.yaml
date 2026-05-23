@@ -1,101 +1,39 @@
-services:
-  aggregation_0:
-    build:
-      context: ./src/
-      dockerfile: workers/aggregator/Dockerfile
-    container_name: aggregation_0
-    depends_on:
-    - join
-    environment:
-    - AGGREGATION_AMOUNT=1
-    - AGGREGATION_PREFIX=aggregation
-    - ID=0
-    - MOM_HOST=rabbitmq
-    - OUTPUT_QUEUE=join_queue
-    - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=1
-    - SUM_PREFIX=sum
-  client_0:
-    build:
-      context: ./src/
-      dockerfile: client/Dockerfile
-    container_name: client_0
-    depends_on:
-    - gateway
-    environment:
-    - CLIENT_ID=0
-    - DATA_DIR=/data
-    - CHUNK_MAX_BYTES=1048576
-    - RESULT_LINE_MAX_BYTES=1048576
-    - CONNECT_TIMEOUT_SECONDS=30
-    - IO_TIMEOUT_SECONDS=3600
-    - LOGGING_LEVEL=INFO
-    - PYTHONUNBUFFERED=1
-    - SERVER_HOST=gateway
-    - SERVER_PORT=5678
-    volumes:
-    - ./data/datasets/LI-Small:/data:ro
-  gateway:
-    build:
-      context: ./src/
-      dockerfile: gateway/Dockerfile
-    container_name: gateway
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-    environment:
-    - FILE_INGESTOR_EXCHANGE=file_ingestor_exchange
-    - FILE_INGESTOR_PARTITIONS=1
-    - MOM_HOST=rabbitmq
-    - PYTHONUNBUFFERED=1
-    - SERVER_HOST=gateway
-    - SERVER_PORT=5678
-  join:
-    build:
-      context: ./src/
-      dockerfile: workers/joiner/Dockerfile
-    container_name: join
-    depends_on:
-    - gateway
-    environment:
-    - AGGREGATION_AMOUNT=1
-    - AGGREGATION_PREFIX=aggregation
-    - CONFIGURATION=Q2
-    - INPUT_QUEUE=join_queue
-    - MOM_HOST=rabbitmq
-    - OUTPUT_QUEUE=results_queue
-    - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=1
-    - SUM_PREFIX=sum
-  rabbitmq:
-    build:
-      context: ./rabbitmq
-      dockerfile: Dockerfile
-    container_name: rabbitmq
-    environment:
-    - RABBITMQ_LOG_LEVELS=error
-    healthcheck:
-      interval: 5s
-      retries: 10
-      start_period: 50s
-      test: rabbitmq-diagnostics check_port_connectivity
-      timeout: 3s
-    ports:
-    - 5672:5672
-    - 15672:15672
-  sum_0:
-    build:
-      context: ./src/
-      dockerfile: workers/sum/Dockerfile
-    container_name: sum_0
-    depends_on:
-    - aggregation_0
-    environment:
-    - AGGREGATION_AMOUNT=1
-    - AGGREGATION_PREFIX=aggregation
-    - ID=0
-    - INPUT_QUEUE=input_queue
-    - MOM_HOST=rabbitmq
-    - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=1
-    - SUM_PREFIX=sum
+compose:
+  output_file: docker-compose.yaml
+  test_output_file: docker-compose.test.yaml
+  rabbitmq_ports: true
+
+settings:
+  logging_level: INFO
+  server_port: 5678
+  chunk_max_bytes: 1048576
+  result_line_max_bytes: 1048576
+  connect_timeout_seconds: 30
+  io_timeout_seconds: 3600
+
+workers:
+  file_ingestors: 1
+  filters:
+    usd: 1
+    q1: 1
+    date: 1
+  sums:
+    q2: 1
+    q3: 1
+  aggregators:
+    q2: 1
+    q3: 1
+  joiners:
+    q2: 1
+    q3: 1
+  scatter_gather:
+    mappers: 1
+    linkers: 1
+    detectors: 1
+    min_intermediaries: 5
+
+clients: 1
+client_accounts:
+  - client_id: 0
+    accounts_file: data/datasets/client-1/LI-Small/LI-Small_accounts.csv
+    transactions_file: data/datasets/client-1/LI-Small/LI-Small_Trans.csv

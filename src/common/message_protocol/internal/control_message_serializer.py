@@ -1,6 +1,7 @@
 import struct
 
-from common.message_protocol.common.control_message import ControlMessage
+from common.message_protocol.internal.common.control_message import ControlMessage
+
 
 class ControlMessageSerializer:
     FORMAT = "!3I"
@@ -23,4 +24,3 @@ class ControlMessageSerializer:
             expected_total=vals[1],
             processed_count=vals[2]
         )
-    

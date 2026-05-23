@@ -2,12 +2,25 @@
 
 import sys
 import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from src.common.middleware.middleware_rabbitmq import MessageMiddlewareRpcClientRabbitMQ
+
+__test__ = False
+
 
 def test_rpc_call():
     print("Iniciando cliente RPC para probar rates_service...")
 
-    with MessageMiddlewareRpcClientRabbitMQ("localhost", "rates_requests", port=5673) as client:
+    with MessageMiddlewareRpcClientRabbitMQ(
+        "localhost",
+        "rates_requests",
+        port=5673,
+    ) as client:
         client.connect()
         print("Cliente conectado. Enviando call(b'') con timeout=30s...")
 
@@ -24,6 +37,7 @@ def test_rpc_call():
                 print("Timeout confirmado - el servicio no respondió en 30s.")
             else:
                 print("Error inesperado.")
+
 
 if __name__ == "__main__":
     test_rpc_call()

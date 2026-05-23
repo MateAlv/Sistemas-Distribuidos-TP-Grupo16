@@ -2,7 +2,7 @@ import struct
 
 from common.constants import C_Q2, C_Q3
 from common.domain.partial_result import Q2BankMaxPartial, Q3AverageResult, Q3PaymentFormatPartial
-from common.message_protocol.transaction_serializer import TransactionSerializer
+from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 
 
 class Q2BankMaxPartialSerializer:

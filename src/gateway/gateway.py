@@ -15,10 +15,10 @@ from common.message_protocol.external.types import (
 )
 from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ, MessageMiddlewareQueueRabbitMQ
 from common.message_protocol.internal import InternalProtocol, TransactionSerializer
-from common.message_protocol.common import MessageType
-from common.message_protocol.partial_result_serializer import Q2BankMaxPartialSerializer
-from common.message_protocol.scatter_gather_serializer import ScatterGatherResultSerializer
-from common.message_protocol.aggregation_serializer import AggregationSerializer
+from common.message_protocol.internal.common import MessageType
+from common.message_protocol.internal.partial_result_serializer import Q2BankMaxPartialSerializer
+from common.message_protocol.internal.scatter_gather_serializer import ScatterGatherResultSerializer
+from common.message_protocol.internal.aggregation_serializer import AggregationSerializer
 
 
 @dataclass(frozen=True)

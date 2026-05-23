@@ -146,14 +146,14 @@ class FilterWorker:
         con la cantidad total de mensajes que se esperan para ese cliente
         '''
         message = self.control_serializer.serialize(
-            message_protocol.common.ControlMessage(
+            message_protocol.internal.ControlMessage(
                 sender_id=ID,
                 expected_total=expected_total,
                 processed_count=0
             )
         )
         message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.common.MessageType.EOF_RECEIVED,
+            msg_type=message_protocol.internal.MessageType.EOF_RECEIVED,
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=message
         )
@@ -166,14 +166,14 @@ class FilterWorker:
         Responde a una solicitud de control con un mensaje indicando
         '''
         message = self.control_serializer.serialize(
-            message_protocol.common.ControlMessage(
+            message_protocol.internal.ControlMessage(
                 sender_id=ID,
                 expected_total=expected_total,
                 processed_count=processed_count
             )
         )
         message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.common.MessageType.PROCESSED_ANSWER,
+            msg_type=message_protocol.internal.MessageType.PROCESSED_ANSWER,
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=message
         )
@@ -184,14 +184,14 @@ class FilterWorker:
         Envia un mensaje de control a los workers correspondientes solicitando informacion de cuantos mensajes han procesado
         '''
         message = self.control_serializer.serialize(
-            message_protocol.common.ControlMessage(
+            message_protocol.internal.ControlMessage(
                 sender_id=ID,
                 expected_total=expected_total,
                 processed_count=0
             )
         )
         message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.common.MessageType.PROCESSED_REQUEST,
+            msg_type=message_protocol.internal.MessageType.PROCESSED_REQUEST,
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=message
         )
@@ -203,14 +203,14 @@ class FilterWorker:
         solicitando que liberen los recursos asociados a un cliente
         '''
         message  = self.control_serializer.serialize(
-            message_protocol.common.ControlMessage(
+            message_protocol.internal.ControlMessage(
                 sender_id=ID,
                 expected_total=0,
                 processed_count=0
             )
         )
         message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.common.MessageType.FLUSH_ORDER,
+            msg_type=message_protocol.internal.MessageType.FLUSH_ORDER,
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=message
         )
@@ -222,14 +222,14 @@ class FilterWorker:
         indicando que se han liberado los recursos asociados a un cliente
         '''
         message  = self.control_serializer.serialize(
-            message_protocol.common.ControlMessage(
+            message_protocol.internal.ControlMessage(
                 sender_id=ID,
                 expected_total=0,
                 processed_count=msgs_sent
             )
         )
         message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.common.MessageType.FLUSH_ACK,
+            msg_type=message_protocol.internal.MessageType.FLUSH_ACK,
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=message
         )
@@ -261,7 +261,7 @@ class FilterWorker:
         logging.debug(f"Transaction {transaction} passed filter in filter_{CONFIGURATION} with id {ID}, forwarding to output")
         payload = self.transaction_serializer.serialize(transaction)
         message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.common.MessageType.DATA,
+            msg_type=message_protocol.internal.MessageType.DATA,
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=payload
         )
@@ -288,14 +288,14 @@ class FilterWorker:
         Envia un mensaje de EOF a la cola de salida correspondiente segun la configuracion del worker
         '''
         message = self.control_serializer.serialize(
-            message_protocol.common.ControlMessage(
+            message_protocol.internal.ControlMessage(
                 sender_id=ID,
                 expected_total=expected_total,
                 processed_count=0
             )
         )
         message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.common.MessageType.EOF,
+            msg_type=message_protocol.internal.MessageType.EOF,
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=message
         )
@@ -347,7 +347,7 @@ class FilterWorker:
                 logging.info(f"Received message for closed client {client_id} in filter_{CONFIGURATION} with id {ID}, ignoring")
                 return
 
-        if msg_type == message_protocol.common.MessageType.DATA:
+        if msg_type == message_protocol.internal.MessageType.DATA:
             with self.lock:
                 if client_id not in self.first_data_logged_by_client:
                     self.first_data_logged_by_client.add(client_id)
@@ -415,7 +415,7 @@ class FilterWorker:
                     self.processed_by_client[client_id] = 0
                 self.processed_by_client[client_id] += 1
             
-        elif msg_type == message_protocol.common.MessageType.EOF:
+        elif msg_type == message_protocol.internal.MessageType.EOF:
             # Cuando recibimos un EOF:
             # - Si se es el lider, se le avisa a los demas workers que se recibio un EOF 
             #     para este cliente y cuantos mensajes se esperan en total, para que ellos puedan 
@@ -450,14 +450,14 @@ class FilterWorker:
         msg_type, client_id, payload = self.internal_packet_serializer.unpack_packet(message)
         control_message = self.control_serializer.deserialize(payload)
 
-        if msg_type == message_protocol.common.MessageType.EOF_RECEIVED:
+        if msg_type == message_protocol.internal.MessageType.EOF_RECEIVED:
             if not self.is_leader:
                 logging.warning(f"Received EOF_RECEIVED control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
                 return
             # Si se recibe un mensaje indicando que se recibio un EOF para un cliente, se responde con una solicitud de conteo de procesados para ese cliente
             self._request_control_message(client_id, control_message.expected_total)
 
-        elif msg_type == message_protocol.common.MessageType.PROCESSED_REQUEST:
+        elif msg_type == message_protocol.internal.MessageType.PROCESSED_REQUEST:
             if self.is_leader:
                 logging.warning(f"Received PROCESSED_REQUEST control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am the leader, ignoring")
                 return
@@ -467,7 +467,7 @@ class FilterWorker:
                 processed_count = self.processed_by_client.get(client_id, 0)
             self._answer_control_message(client_id, control_message.expected_total, processed_count)
         
-        elif msg_type == message_protocol.common.MessageType.PROCESSED_ANSWER:
+        elif msg_type == message_protocol.internal.MessageType.PROCESSED_ANSWER:
             if not self.is_leader:
                 logging.warning(f"Received PROCESSED_ANSWER control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
                 return
@@ -493,7 +493,7 @@ class FilterWorker:
                     self.control_responses_by_client[client_id] = set()
                     self.all_processed_by_client[client_id] = 0
         
-        elif msg_type == message_protocol.common.MessageType.FLUSH_ORDER:
+        elif msg_type == message_protocol.internal.MessageType.FLUSH_ORDER:
             if self.is_leader:
                 logging.warning(f"Received FLUSH_ORDER control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am the leader, ignoring")
                 return
@@ -505,7 +505,7 @@ class FilterWorker:
             self._ack_flush_control_message(client_id, msgs_sent)
             
         
-        elif msg_type == message_protocol.common.MessageType.FLUSH_ACK:
+        elif msg_type == message_protocol.internal.MessageType.FLUSH_ACK:
             if not self.is_leader:
                 logging.warning(f"Received FLUSH_ACK control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
                 return
