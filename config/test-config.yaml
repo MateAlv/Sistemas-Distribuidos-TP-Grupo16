@@ -35,5 +35,5 @@ workers:
 clients: 1
 client_accounts:
   - client_id: 0
-    accounts_file: data/datasets/client-1/LI-Small/LI-Small_accounts.csv
-    transactions_file: data/datasets/client-1/LI-Small/LI-Small_Trans.csv
+    accounts_file: data/datasets/client-1/LI-Mini/LI-Mini_accounts.csv
+    transactions_file: data/datasets/client-1/LI-Mini/LI-Mini_Trans.csv
