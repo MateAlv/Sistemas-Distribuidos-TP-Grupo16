@@ -4,7 +4,7 @@ import types
 
 import pytest
 
-from common.message_protocol.common import ControlMessage, MessageType
+from common.message_protocol.internal.common import ControlMessage, MessageType
 
 
 class FakeQueue:

@@ -2,7 +2,7 @@ import pytest
 
 from common.constants import C_Q2, C_Q3
 from common.domain.partial_result import Q2BankMaxPartial, Q3PaymentFormatPartial
-from common.message_protocol.partial_result_serializer import (
+from common.message_protocol.internal.partial_result_serializer import (
     Q2BankMaxPartialSerializer,
     Q3PaymentFormatPartialSerializer,
     partial_serializer_for,

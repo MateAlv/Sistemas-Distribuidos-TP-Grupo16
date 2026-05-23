@@ -1,0 +1,591 @@
+#!/usr/bin/env python3
+import argparse
+import os
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG = ROOT / "config" / "main-config.yaml"
+DEFAULT_COMPOSE = ROOT / "docker-compose.yaml"
+DEFAULT_TEST_COMPOSE = ROOT / "docker-compose.test.yaml"
+
+MOM_HOST = "rabbitmq"
+SERVER_HOST = "gateway"
+SERVER_PORT = 5678
+FILE_INGESTOR_EXCHANGE = "file_ingestor_exchange"
+FILE_INGESTOR_QUEUE_PREFIX = "file_ingestor"
+FILTER_PREFIX = "filter"
+
+FILTER_USD_QUEUE = "filter_usd_queue"
+FILTER_Q1_QUEUE = "filter_q1_queue"
+FILTER_DATE_QUEUE = "filter_date_queue"
+FILTER_Q3_QUEUE = "filter_q3_queue"
+FILTER_Q5_USD_QUEUE = "filter_q5_usd_queue"
+SUM_Q2_QUEUE = "sum_q2_queue"
+SUM_Q3_QUEUE = "sum_q3_queue"
+GATEWAY_Q1_QUEUE = "gateway_results_queue"
+GATEWAY_Q2_QUEUE = "join_q2_results_queue"
+GATEWAY_Q4_QUEUE = "gateway_q4_results_queue"
+
+SUM_Q2_PREFIX = "sum_q2"
+SUM_Q3_PREFIX = "sum_q3"
+AGGREGATION_Q2_PREFIX = "aggregation_q2"
+AGGREGATION_Q3_PREFIX = "aggregation_q3"
+JOIN_Q2_QUEUE = "join_q2_queue"
+JOIN_Q3_QUEUE = "join_q3_queue"
+JOIN_Q3_RESULTS_QUEUE = "join_q3_results_queue"
+
+SG_MAPPER_QUEUE = "scatter_gather_mapper_queue"
+SG_LINKER_EXCHANGE = "sg_linker_exchange"
+SG_DETECTOR_EXCHANGE = "sg_detector_exchange"
+
+
+def main() -> int:
+    args = parse_args()
+    config_path = resolve_path(args.config)
+    config = load_config(config_path)
+
+    output_file = resolve_path(
+        args.output or config.get("compose", {}).get("output_file") or DEFAULT_COMPOSE
+    )
+    test_output_file = resolve_path(
+        args.test_output
+        or config.get("compose", {}).get("test_output_file")
+        or DEFAULT_TEST_COMPOSE
+    )
+
+    generated = []
+    if not args.skip_output:
+        write_compose(config, output_file, expose_ports=bool_value(config, "rabbitmq_ports", True))
+        generated.append(relative(output_file))
+    if not args.skip_test_output:
+        write_compose(config, test_output_file, expose_ports=False)
+        generated.append(relative(test_output_file))
+    print(f"generated {', '.join(generated)} from {relative(config_path)}")
+    return 0
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Generate docker-compose files from a scenario config.")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to the config YAML.")
+    parser.add_argument("--output", help="Path for docker-compose.yaml.")
+    parser.add_argument("--test-output", help="Path for docker-compose.test.yaml.")
+    parser.add_argument("--skip-output", action="store_true", help="Do not write docker-compose.yaml.")
+    parser.add_argument("--skip-test-output", action="store_true", help="Do not write docker-compose.test.yaml.")
+    parser.set_defaults(skip_output=False, skip_test_output=False)
+    args = parser.parse_args()
+    if args.skip_output and args.skip_test_output:
+        parser.error("at least one compose output must be enabled")
+    return args
+
+
+def load_config(path: Path) -> dict:
+    if not path.exists():
+        raise FileNotFoundError(f"config file not found: {path}")
+    with path.open("r", encoding="utf-8") as file:
+        config = yaml.safe_load(file) or {}
+    validate_config(config, path)
+    return config
+
+
+def validate_config(config: dict, path: Path) -> None:
+    workers = config.get("workers", {})
+    clients = int_value(config, "clients", default=None)
+    client_accounts = config.get("client_accounts", [])
+    if not isinstance(client_accounts, list) or not client_accounts:
+        raise ValueError(f"{path}: client_accounts must be a non-empty list")
+    if clients is None:
+        config["clients"] = len(client_accounts)
+    elif clients != len(client_accounts):
+        raise ValueError(
+            f"{path}: clients={clients} but client_accounts has {len(client_accounts)} entries"
+        )
+
+    positive_counts = {
+        "workers.file_ingestors": get_nested(workers, "file_ingestors", 1),
+        "workers.filters.usd": get_nested(workers, "filters.usd", 1),
+        "workers.filters.q1": get_nested(workers, "filters.q1", 1),
+        "workers.filters.date": get_nested(workers, "filters.date", 1),
+        "workers.sums.q2": get_nested(workers, "sums.q2", 1),
+        "workers.sums.q3": get_nested(workers, "sums.q3", 1),
+        "workers.aggregators.q2": get_nested(workers, "aggregators.q2", 1),
+        "workers.aggregators.q3": get_nested(workers, "aggregators.q3", 1),
+        "workers.scatter_gather.mappers": get_nested(workers, "scatter_gather.mappers", 1),
+        "workers.scatter_gather.linkers": get_nested(workers, "scatter_gather.linkers", 1),
+        "workers.scatter_gather.detectors": get_nested(workers, "scatter_gather.detectors", 1),
+    }
+    for key, value in positive_counts.items():
+        if int(value) <= 0:
+            raise ValueError(f"{path}: {key} must be greater than 0")
+
+    joiners = workers.get("joiners", {})
+    for key in ("q2", "q3"):
+        value = int(joiners.get(key, 1))
+        if value != 1:
+            raise ValueError(f"{path}: workers.joiners.{key} must be 1 in the current topology")
+
+    for account in client_accounts:
+        accounts_file = require_relative_path(account, "accounts_file", path)
+        transactions_file = require_relative_path(account, "transactions_file", path)
+        if not (ROOT / accounts_file).exists():
+            raise FileNotFoundError(f"{path}: accounts_file not found: {accounts_file}")
+        if not (ROOT / transactions_file).exists():
+            raise FileNotFoundError(f"{path}: transactions_file not found: {transactions_file}")
+
+
+def write_compose(config: dict, path: Path, expose_ports: bool) -> None:
+    compose = build_compose(config, expose_ports=expose_ports)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        yaml.safe_dump(compose, file, sort_keys=False)
+
+
+def build_compose(config: dict, expose_ports: bool) -> dict:
+    workers = config.get("workers", {})
+    settings = config.get("settings", {})
+
+    counts = {
+        "file_ingestors": int(get_nested(workers, "file_ingestors", 1)),
+        "filter_usd": int(get_nested(workers, "filters.usd", 1)),
+        "filter_q1": int(get_nested(workers, "filters.q1", 1)),
+        "filter_date": int(get_nested(workers, "filters.date", 1)),
+        "sum_q2": int(get_nested(workers, "sums.q2", 1)),
+        "sum_q3": int(get_nested(workers, "sums.q3", 1)),
+        "aggregation_q2": int(get_nested(workers, "aggregators.q2", 1)),
+        "aggregation_q3": int(get_nested(workers, "aggregators.q3", 1)),
+        "sg_mapper": int(get_nested(workers, "scatter_gather.mappers", 1)),
+        "sg_linker": int(get_nested(workers, "scatter_gather.linkers", 1)),
+        "sg_detector": int(get_nested(workers, "scatter_gather.detectors", 1)),
+    }
+    min_intermediaries = int(get_nested(workers, "scatter_gather.min_intermediaries", 5))
+
+    services = {}
+    services["rabbitmq"] = rabbitmq_service(expose_ports)
+    services["gateway"] = gateway_service(counts["file_ingestors"], settings)
+
+    for index in range(counts["file_ingestors"]):
+        services[f"file_ingestor_{index}"] = file_ingestor_service(index, settings)
+
+    for configuration, count, input_queue in (
+        ("USD", counts["filter_usd"], FILTER_USD_QUEUE),
+        ("Q1", counts["filter_q1"], FILTER_Q1_QUEUE),
+        ("DATE", counts["filter_date"], FILTER_DATE_QUEUE),
+    ):
+        for index in range(count):
+            services[f"filter_{configuration.lower()}_{index}"] = filter_service(
+                configuration=configuration,
+                index=index,
+                amount=count,
+                input_queue=input_queue,
+                settings=settings,
+            )
+
+    for index in range(counts["sum_q2"]):
+        services[f"sum_q2_{index}"] = sum_service(
+            configuration="Q2",
+            index=index,
+            amount=counts["sum_q2"],
+            aggregation_amount=counts["aggregation_q2"],
+            aggregation_prefix=AGGREGATION_Q2_PREFIX,
+            input_queue=SUM_Q2_QUEUE,
+            sum_prefix=SUM_Q2_PREFIX,
+        )
+
+    for index in range(counts["sum_q3"]):
+        services[f"sum_q3_{index}"] = sum_service(
+            configuration="Q3",
+            index=index,
+            amount=counts["sum_q3"],
+            aggregation_amount=counts["aggregation_q3"],
+            aggregation_prefix=AGGREGATION_Q3_PREFIX,
+            input_queue=SUM_Q3_QUEUE,
+            sum_prefix=SUM_Q3_PREFIX,
+        )
+
+    for index in range(counts["aggregation_q2"]):
+        services[f"aggregation_q2_{index}"] = aggregator_service(
+            configuration="Q2",
+            index=index,
+            amount=counts["aggregation_q2"],
+            aggregation_prefix=AGGREGATION_Q2_PREFIX,
+            output_queue=JOIN_Q2_QUEUE,
+            sum_amount=counts["sum_q2"],
+            sum_prefix=SUM_Q2_PREFIX,
+        )
+
+    services["join_q2"] = joiner_service(
+        configuration="Q2",
+        input_queue=JOIN_Q2_QUEUE,
+        output_queue=GATEWAY_Q2_QUEUE,
+        aggregation_amount=counts["aggregation_q2"],
+        aggregation_prefix=AGGREGATION_Q2_PREFIX,
+        sum_amount=counts["sum_q2"],
+        sum_prefix=SUM_Q2_PREFIX,
+    )
+
+    for index in range(counts["aggregation_q3"]):
+        services[f"aggregation_q3_{index}"] = aggregator_service(
+            configuration="Q3",
+            index=index,
+            amount=counts["aggregation_q3"],
+            aggregation_prefix=AGGREGATION_Q3_PREFIX,
+            output_queue=JOIN_Q3_QUEUE,
+            sum_amount=counts["sum_q3"],
+            sum_prefix=SUM_Q3_PREFIX,
+        )
+
+    services["join_q3"] = joiner_service(
+        configuration="Q3",
+        input_queue=JOIN_Q3_QUEUE,
+        output_queue=JOIN_Q3_RESULTS_QUEUE,
+        aggregation_amount=counts["aggregation_q3"],
+        aggregation_prefix=AGGREGATION_Q3_PREFIX,
+        sum_amount=counts["sum_q3"],
+        sum_prefix=SUM_Q3_PREFIX,
+    )
+
+    for index in range(counts["sg_detector"]):
+        services[f"scatter_gather_detector_{index}"] = scatter_detector_service(
+            index=index,
+            detector_amount=counts["sg_detector"],
+            linker_amount=counts["sg_linker"],
+            min_intermediaries=min_intermediaries,
+        )
+    for index in range(counts["sg_linker"]):
+        services[f"scatter_gather_linker_{index}"] = scatter_linker_service(
+            index=index,
+            detector_amount=counts["sg_detector"],
+        )
+    for index in range(counts["sg_mapper"]):
+        services[f"scatter_gather_mapper_{index}"] = scatter_mapper_service(
+            index=index,
+            mapper_amount=counts["sg_mapper"],
+            linker_amount=counts["sg_linker"],
+        )
+
+    client_dependencies = [
+        name for name in services if name not in {"rabbitmq", "gateway"}
+    ]
+    client_dependencies.insert(0, "gateway")
+    for client_index, account in enumerate(config["client_accounts"]):
+        client_id = int(account.get("client_id", client_index))
+        services[f"client_{client_id}"] = client_service(
+            client_id=client_id,
+            account=account,
+            settings=settings,
+            depends_on=client_dependencies,
+        )
+
+    return {"services": services}
+
+
+def rabbitmq_service(expose_ports: bool) -> dict:
+    service = {
+        "build": {"context": "./rabbitmq", "dockerfile": "Dockerfile"},
+        "environment": ["RABBITMQ_LOG_LEVELS=error"],
+        "healthcheck": {
+            "interval": "5s",
+            "retries": 10,
+            "start_period": "20s",
+            "test": "rabbitmq-diagnostics check_port_connectivity",
+            "timeout": "3s",
+        },
+    }
+    if expose_ports:
+        service["ports"] = ["5672:5672", "15672:15672"]
+    return service
+
+
+def gateway_service(file_ingestor_count: int, settings: dict) -> dict:
+    return base_service(
+        "gateway/Dockerfile",
+        depends_on=depends_on_rabbitmq(),
+        environment=[
+            f"FILE_INGESTOR_EXCHANGE={FILE_INGESTOR_EXCHANGE}",
+            f"FILE_INGESTOR_PARTITIONS={file_ingestor_count}",
+            f"GATEWAY_Q2_QUEUE={GATEWAY_Q2_QUEUE}",
+            f"GATEWAY_Q4_QUEUE={GATEWAY_Q4_QUEUE}",
+            f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
+            f"MOM_HOST={MOM_HOST}",
+            "PYTHONUNBUFFERED=1",
+            f"SERVER_HOST={SERVER_HOST}",
+            f"SERVER_PORT={settings.get('server_port', SERVER_PORT)}",
+        ],
+    )
+
+
+def file_ingestor_service(index: int, settings: dict) -> dict:
+    return base_service(
+        "workers/file_ingestor/Dockerfile",
+        depends_on=depends_on_rabbitmq(),
+        environment=[
+            f"FILE_INGESTOR_EXCHANGE={FILE_INGESTOR_EXCHANGE}",
+            f"FILE_INGESTOR_QUEUE_PREFIX={FILE_INGESTOR_QUEUE_PREFIX}",
+            f"ID={index}",
+            f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
+            f"MOM_HOST={MOM_HOST}",
+            "PYTHONUNBUFFERED=1",
+            f"TRANSACTION_OUTPUT_QUEUE={FILTER_USD_QUEUE}",
+        ],
+    )
+
+
+def filter_service(configuration: str, index: int, amount: int, input_queue: str, settings: dict) -> dict:
+    return base_service(
+        "workers/filter/Dockerfile",
+        depends_on=depends_on_rabbitmq(),
+        environment=[
+            f"CONFIGURATION={configuration}",
+            f"FILTER_AMOUNT={amount}",
+            f"FILTER_DATE_QUEUE={FILTER_DATE_QUEUE}",
+            f"FILTER_PREFIX={FILTER_PREFIX}",
+            f"FILTER_Q1_QUEUE={FILTER_Q1_QUEUE}",
+            f"FILTER_Q3_QUEUE={FILTER_Q3_QUEUE}",
+            f"FILTER_Q5_USD_QUEUE={FILTER_Q5_USD_QUEUE}",
+            f"GATEWAY_QUEUE={GATEWAY_Q1_QUEUE}",
+            f"ID={index}",
+            f"INPUT_QUEUE={input_queue}",
+            f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
+            f"MOM_HOST={MOM_HOST}",
+            "PYTHONUNBUFFERED=1",
+            f"SCATTER_GATHER_MAPPER_QUEUE={SG_MAPPER_QUEUE}",
+            f"SUM_PREFIX={SUM_Q3_PREFIX}",
+            f"SUM_Q2_QUEUE={SUM_Q2_QUEUE}",
+            f"SUM_Q3_QUEUE={SUM_Q3_QUEUE}",
+        ],
+    )
+
+
+def sum_service(
+    configuration: str,
+    index: int,
+    amount: int,
+    aggregation_amount: int,
+    aggregation_prefix: str,
+    input_queue: str,
+    sum_prefix: str,
+) -> dict:
+    return base_service(
+        "workers/sum/Dockerfile",
+        depends_on=depends_on_rabbitmq(),
+        environment=[
+            f"AGGREGATION_AMOUNT={aggregation_amount}",
+            f"AGGREGATION_PREFIX={aggregation_prefix}",
+            f"CONFIGURATION={configuration}",
+            f"ID={index}",
+            f"INPUT_QUEUE={input_queue}",
+            f"MOM_HOST={MOM_HOST}",
+            "PYTHONUNBUFFERED=1",
+            f"SUM_AMOUNT={amount}",
+            f"SUM_PREFIX={sum_prefix}",
+        ],
+    )
+
+
+def aggregator_service(
+    configuration: str,
+    index: int,
+    amount: int,
+    aggregation_prefix: str,
+    output_queue: str,
+    sum_amount: int,
+    sum_prefix: str,
+) -> dict:
+    return base_service(
+        "workers/aggregator/Dockerfile",
+        depends_on=depends_on_rabbitmq(),
+        environment=[
+            f"AGGREGATION_AMOUNT={amount}",
+            f"AGGREGATION_PREFIX={aggregation_prefix}",
+            f"CONFIGURATION={configuration}",
+            f"ID={index}",
+            f"MOM_HOST={MOM_HOST}",
+            f"OUTPUT_QUEUE={output_queue}",
+            "PYTHONUNBUFFERED=1",
+            f"SUM_AMOUNT={sum_amount}",
+            f"SUM_PREFIX={sum_prefix}",
+        ],
+    )
+
+
+def joiner_service(
+    configuration: str,
+    input_queue: str,
+    output_queue: str,
+    aggregation_amount: int,
+    aggregation_prefix: str,
+    sum_amount: int,
+    sum_prefix: str,
+) -> dict:
+    return base_service(
+        "workers/joiner/Dockerfile",
+        depends_on=depends_on_rabbitmq(),
+        environment=[
+            f"AGGREGATION_AMOUNT={aggregation_amount}",
+            f"AGGREGATION_PREFIX={aggregation_prefix}",
+            f"CONFIGURATION={configuration}",
+            "ID=0",
+            f"INPUT_QUEUE={input_queue}",
+            f"MOM_HOST={MOM_HOST}",
+            f"OUTPUT_QUEUE={output_queue}",
+            "PYTHONUNBUFFERED=1",
+            f"SUM_AMOUNT={sum_amount}",
+            f"SUM_PREFIX={sum_prefix}",
+        ],
+    )
+
+
+def scatter_detector_service(
+    index: int,
+    detector_amount: int,
+    linker_amount: int,
+    min_intermediaries: int,
+) -> dict:
+    return base_service(
+        "workers/scatter_gather/detector/Dockerfile",
+        depends_on=depends_on_rabbitmq(),
+        environment=[
+            f"GATEWAY_Q4_QUEUE={GATEWAY_Q4_QUEUE}",
+            f"ID={index}",
+            f"MIN_INTERMEDIARIES={min_intermediaries}",
+            f"MOM_HOST={MOM_HOST}",
+            "PYTHONUNBUFFERED=1",
+            f"SG_DETECTOR_AMOUNT={detector_amount}",
+            f"SG_DETECTOR_EXCHANGE={SG_DETECTOR_EXCHANGE}",
+            f"SG_LINKER_AMOUNT={linker_amount}",
+        ],
+    )
+
+
+def scatter_linker_service(index: int, detector_amount: int) -> dict:
+    return base_service(
+        "workers/scatter_gather/linker/Dockerfile",
+        depends_on=depends_on_rabbitmq(),
+        environment=[
+            f"ID={index}",
+            f"MOM_HOST={MOM_HOST}",
+            "PYTHONUNBUFFERED=1",
+            f"SG_DETECTOR_AMOUNT={detector_amount}",
+            f"SG_DETECTOR_EXCHANGE={SG_DETECTOR_EXCHANGE}",
+            f"SG_LINKER_EXCHANGE={SG_LINKER_EXCHANGE}",
+        ],
+    )
+
+
+def scatter_mapper_service(index: int, mapper_amount: int, linker_amount: int) -> dict:
+    return base_service(
+        "workers/scatter_gather/mapper/Dockerfile",
+        depends_on=depends_on_rabbitmq(),
+        environment=[
+            f"ID={index}",
+            f"INPUT_QUEUE={SG_MAPPER_QUEUE}",
+            f"MOM_HOST={MOM_HOST}",
+            "PYTHONUNBUFFERED=1",
+            f"SG_LINKER_AMOUNT={linker_amount}",
+            f"SG_LINKER_EXCHANGE={SG_LINKER_EXCHANGE}",
+            f"SG_MAPPER_AMOUNT={mapper_amount}",
+        ],
+    )
+
+
+def client_service(client_id: int, account: dict, settings: dict, depends_on: list[str]) -> dict:
+    accounts_file = require_relative_path(account, "accounts_file", DEFAULT_CONFIG)
+    transactions_file = require_relative_path(account, "transactions_file", DEFAULT_CONFIG)
+    mount_dir = common_mount_dir(accounts_file, transactions_file)
+    accounts_inside = os.path.relpath(str(accounts_file), str(mount_dir))
+    transactions_inside = os.path.relpath(str(transactions_file), str(mount_dir))
+    return base_service(
+        "client/Dockerfile",
+        depends_on=depends_on,
+        environment=[
+            f"ACCOUNTS_FILE={accounts_inside}",
+            f"TRANSACTIONS_FILE={transactions_inside}",
+            f"CHUNK_MAX_BYTES={settings.get('chunk_max_bytes', 65536)}",
+            f"CLIENT_ID={client_id}",
+            f"CONNECT_TIMEOUT_SECONDS={settings.get('connect_timeout_seconds', 30)}",
+            "DATA_DIR=/data/input",
+            "OUTPUT_DIR=/data/output",
+            f"IO_TIMEOUT_SECONDS={settings.get('io_timeout_seconds', 3600)}",
+            f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
+            "PYTHONUNBUFFERED=1",
+            f"RESULT_LINE_MAX_BYTES={settings.get('result_line_max_bytes', 1048576)}",
+            f"SERVER_HOST={SERVER_HOST}",
+            f"SERVER_PORT={settings.get('server_port', SERVER_PORT)}",
+        ],
+        volumes=[
+            f"./{mount_dir.as_posix()}:/data/input:ro",
+            "./data/output:/data/output:rw",
+        ],
+    )
+
+
+def base_service(dockerfile: str, depends_on, environment: list[str], volumes: list[str] | None = None) -> dict:
+    service = {
+        "build": {"context": "./src/", "dockerfile": dockerfile},
+        "depends_on": depends_on,
+        "environment": environment,
+    }
+    if volumes:
+        service["volumes"] = volumes
+    return service
+
+
+def depends_on_rabbitmq() -> dict:
+    return {"rabbitmq": {"condition": "service_healthy"}}
+
+
+def int_value(config: dict, key: str, default=None):
+    value = config.get(key, default)
+    if value is None:
+        return None
+    return int(value)
+
+
+def bool_value(config: dict, key: str, default: bool) -> bool:
+    return bool(config.get("compose", {}).get(key, default))
+
+
+def get_nested(config: dict, path: str, default):
+    node = config
+    for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return default
+        node = node[part]
+    return node
+
+
+def require_relative_path(account: dict, key: str, source: Path) -> Path:
+    value = account.get(key)
+    if not value:
+        raise ValueError(f"{source}: client account entry missing {key}")
+    path = Path(value)
+    if path.is_absolute():
+        raise ValueError(f"{source}: {key} must be relative to the repository root")
+    return path
+
+
+def common_mount_dir(path_a: Path, path_b: Path) -> Path:
+    parent = Path(os.path.commonpath([path_a.parent, path_b.parent]))
+    if parent == Path("."):
+        raise ValueError("client input files must share a non-root parent directory")
+    return parent
+
+
+def resolve_path(path) -> Path:
+    path = Path(path)
+    if path.is_absolute():
+        return path
+    return ROOT / path
+
+
+def relative(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
