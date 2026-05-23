@@ -137,13 +137,17 @@ stats:
 test:
 	$(MAKE) test-config
 	bash -lc 'set -euo pipefail; \
-		log_file=/tmp/$(TEST_PROJECT).log; \
+		log_file="$$(mktemp -t $(TEST_PROJECT).XXXXXX.log)"; \
+		log_fifo="$$(mktemp -u -t $(TEST_PROJECT).XXXXXX.fifo)"; \
 		logs_pid=""; \
-		tail_pid=""; \
-		cleanup() { docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) down --volumes --remove-orphans >/dev/null; }; \
+		format_pid=""; \
+		cleanup() { \
+			docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) down --volumes --remove-orphans >/dev/null; \
+			rm -f "$$log_fifo"; \
+		}; \
 		stop_logs() { \
-			if [ -n "$$tail_pid" ]; then kill "$$tail_pid" >/dev/null 2>&1 || true; wait "$$tail_pid" >/dev/null 2>&1 || true; fi; \
-			if [ -n "$$logs_pid" ]; then kill "$$logs_pid" >/dev/null 2>&1 || true; wait "$$logs_pid" >/dev/null 2>&1 || true; fi; \
+			if [ -n "$$format_pid" ]; then pkill -TERM -P "$$format_pid" >/dev/null 2>&1 || true; kill "$$format_pid" >/dev/null 2>&1 || true; wait "$$format_pid" >/dev/null 2>&1 || true; fi; \
+			if [ -n "$$logs_pid" ]; then pkill -TERM -P "$$logs_pid" >/dev/null 2>&1 || true; kill "$$logs_pid" >/dev/null 2>&1 || true; wait "$$logs_pid" >/dev/null 2>&1 || true; fi; \
 		}; \
 		wait_for_pattern() { \
 			pattern="$$1"; \
@@ -157,17 +161,19 @@ test:
 		}; \
 		trap "stop_logs; cleanup" EXIT; \
 		: > "$$log_file"; \
+		echo "test_log_file=$$log_file" >&2; \
 		mkdir -p data/output; \
 		rm -f data/output/results_q*.csv; \
 		cleanup; \
+		mkfifo "$$log_fifo"; \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) config --quiet; \
 		clients="$$(docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) config --services | grep "^client_" | tr "\n" " ")"; \
 		if [ -z "$$clients" ]; then echo "no client services generated" >&2; exit 2; fi; \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) up --build --remove-orphans --detach; \
-		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) logs --follow --timestamps --no-color > "$$log_file" 2>&1 & \
+		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) logs --follow --timestamps --no-color > "$$log_fifo" 2>&1 & \
 		logs_pid=$$!; \
-		tail -n +1 -f "$$log_file" | $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR) >&2 & \
-		tail_pid=$$!; \
+		$(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR) --tee-file "$$log_file" < "$$log_fifo" >&2 & \
+		format_pid=$$!; \
 		deadline=$$((SECONDS + $(TEST_SMOKE_DEADLINE_SECONDS))); \
 		timeout $(TEST_CLIENT_WAIT_TIMEOUT) docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) wait $$clients >/dev/null; \
 		wait_for_pattern "$(TEST_Q1_SUCCESS_PATTERN)"; \

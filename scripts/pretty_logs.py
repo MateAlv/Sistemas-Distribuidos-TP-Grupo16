@@ -63,11 +63,18 @@ LEVEL_LABELS = {
 def main() -> int:
     args = parse_args()
     color = should_color(args.color)
+    tee_file = open(args.tee_file, "a", encoding="utf-8", buffering=1) if args.tee_file else None
 
-    for raw_line in sys.stdin:
-        for line in clean_lines(raw_line):
-            sys.stdout.write(format_line(line, color, args.service_width) + "\n")
-            sys.stdout.flush()
+    try:
+        for raw_line in sys.stdin:
+            if tee_file:
+                tee_file.write(raw_line)
+            for line in clean_lines(raw_line):
+                sys.stdout.write(format_line(line, color, args.service_width) + "\n")
+                sys.stdout.flush()
+    finally:
+        if tee_file:
+            tee_file.close()
 
     return 0
 
@@ -85,6 +92,10 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=int(os.environ.get("LOG_SERVICE_WIDTH", "26")),
         help="Width reserved for the compose service name.",
+    )
+    parser.add_argument(
+        "--tee-file",
+        help="Also write the unformatted input stream to this file.",
     )
     return parser.parse_args()
 
