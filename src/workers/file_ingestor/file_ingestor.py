@@ -18,6 +18,7 @@ from common.message_protocol.internal import InternalProtocol
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 from common.middleware import MessageMiddlewareQueueRabbitMQ
 from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
+from workers.file_splitter.line_splitter import LineSplitter
 
 
 @dataclass(frozen=True)
@@ -39,10 +40,9 @@ class FileKey:
 
 @dataclass
 class FileState:
-    pending: bytes = b""
+    splitter: LineSplitter
     file_type: int | None = None
     header: tuple[str, ...] | None = None
-    expected_offset: int = 0
     chunks_received: int = 0
     lines_received: int = 0
     transactions_sent: int = 0
@@ -125,7 +125,7 @@ class FileIngestor:
 
     def _handle_chunk(self, chunk: FileChunk) -> None:
         key = FileKey(client_id=chunk.client_id(), rel_path=chunk.path())
-        state = self._files.setdefault(key, FileState())
+        state = self._state_for(key)
 
         if state.file_type is None:
             state.file_type = chunk.file_type()
@@ -136,22 +136,16 @@ class FileIngestor:
                 f"expected={state.file_type}, received={chunk.file_type()})"
             )
 
-        if chunk.offset() != state.expected_offset:
+        try:
+            complete_lines = state.splitter.push(chunk.offset(), chunk.payload())
+        except ValueError as exc:
             raise ValueError(
-                "unexpected chunk offset "
-                f"(client_id={key.client_id}, path={key.rel_path}, "
-                f"expected={state.expected_offset}, received={chunk.offset()})"
-            )
-
-        complete_lines, state.pending = _split_complete_lines(
-            state.pending + chunk.payload(),
-            self._config.max_line_bytes,
-        )
+                f"{exc} (client_id={key.client_id}, path={key.rel_path})"
+            ) from exc
 
         for line in complete_lines:
             self._handle_line(key, state, line)
 
-        state.expected_offset += chunk.payload_size()
         state.bytes_received += chunk.payload_size()
         state.chunks_received += 1
         self._chunks_received += 1
@@ -167,10 +161,17 @@ class FileIngestor:
             chunk.offset(),
             chunk.payload_size(),
             len(complete_lines),
-            len(state.pending),
+            state.splitter.pending_size(),
             state.chunks_received,
             self._chunks_received,
         )
+
+    def _state_for(self, key: FileKey) -> FileState:
+        state = self._files.get(key)
+        if state is None:
+            state = FileState(splitter=LineSplitter(self._config.max_line_bytes))
+            self._files[key] = state
+        return state
 
     def _handle_file_eof(self, eof: FileEof) -> None:
         key = FileKey(client_id=eof.client_id(), rel_path=eof.path())
@@ -244,9 +245,8 @@ class FileIngestor:
                 f"expected={state.file_type}, received={expected_file_type})"
             )
 
-        if state.pending:
-            self._handle_line(key, state, state.pending)
-            state.pending = b""
+        for line in state.splitter.finish():
+            self._handle_line(key, state, line)
 
         saw_transactions_file = state.file_type == FILE_TYPE_TRANSACTIONS
         transactions_sent = state.transactions_sent if saw_transactions_file else 0
@@ -378,13 +378,6 @@ def _deserialize_eof(payload: bytes) -> int | FileEof:
     if len(payload) == 4:
         return int.from_bytes(payload, byteorder="big")
     return FileEof.deserialize(payload)
-
-
-def _split_complete_lines(data: bytes, max_line_bytes: int) -> tuple[list[bytes], bytes]:
-    lines = data.split(b"\n")
-    pending = lines[-1]
-    _validate_line_size(pending, max_line_bytes)
-    return lines[:-1], pending
 
 
 def _validate_line_size(line: bytes, max_line_bytes: int) -> None:
