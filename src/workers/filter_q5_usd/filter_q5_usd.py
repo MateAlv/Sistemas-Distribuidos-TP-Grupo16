@@ -7,9 +7,8 @@ from common.middleware import (
     MessageMiddlewareRpcClientRabbitMQ,
 )
 from common.message_protocol.internal import InternalProtocol, TransactionSerializer
-from common.message_protocol.common import MessageType
-from common.message_protocol.common.control_message import ControlMessage
-from common.message_protocol.control_message_serializer import ControlMessageSerializer
+from common.message_protocol.internal.common import ControlMessage, MessageType
+from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.rates.rates_manager import RatesManager
 
 CURRENCY_NAME_TO_ISO = {

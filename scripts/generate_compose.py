@@ -16,26 +16,32 @@ SERVER_HOST = "gateway"
 SERVER_PORT = 5678
 FILE_INGESTOR_EXCHANGE = "file_ingestor_exchange"
 FILE_INGESTOR_QUEUE_PREFIX = "file_ingestor"
+TRANSACTION_EXCHANGE = "transaction_fanout_exchange"
 FILTER_PREFIX = "filter"
 
 FILTER_USD_QUEUE = "filter_usd_queue"
 FILTER_Q1_QUEUE = "filter_q1_queue"
 FILTER_DATE_QUEUE = "filter_date_queue"
 FILTER_Q3_QUEUE = "filter_q3_queue"
+FILTER_Q5_FORMAT_QUEUE = "filter_q5_format_queue"
 FILTER_Q5_USD_QUEUE = "filter_q5_usd_queue"
 SUM_Q2_QUEUE = "sum_q2_queue"
 SUM_Q3_QUEUE = "sum_q3_queue"
 GATEWAY_Q1_QUEUE = "gateway_results_queue"
 GATEWAY_Q2_QUEUE = "join_q2_results_queue"
 GATEWAY_Q4_QUEUE = "gateway_q4_results_queue"
+GATEWAY_Q5_QUEUE = "join_q5_results_queue"
+RATES_REQUEST_QUEUE = "rates_requests"
 
 SUM_Q2_PREFIX = "sum_q2"
 SUM_Q3_PREFIX = "sum_q3"
 AGGREGATION_Q2_PREFIX = "aggregation_q2"
 AGGREGATION_Q3_PREFIX = "aggregation_q3"
+AGGREGATION_Q5_PREFIX = "aggregation_q5"
 JOIN_Q2_QUEUE = "join_q2_queue"
 JOIN_Q3_QUEUE = "join_q3_queue"
 JOIN_Q3_RESULTS_QUEUE = "join_q3_results_queue"
+JOIN_Q5_QUEUE = "join_q5_queue"
 
 SG_MAPPER_QUEUE = "scatter_gather_mapper_queue"
 SG_LINKER_EXCHANGE = "sg_linker_exchange"
@@ -108,10 +114,13 @@ def validate_config(config: dict, path: Path) -> None:
         "workers.filters.usd": get_nested(workers, "filters.usd", 1),
         "workers.filters.q1": get_nested(workers, "filters.q1", 1),
         "workers.filters.date": get_nested(workers, "filters.date", 1),
+        "workers.filters.q5_format": get_nested(workers, "filters.q5_format", 1),
+        "workers.filters.q5_usd": get_nested(workers, "filters.q5_usd", 1),
         "workers.sums.q2": get_nested(workers, "sums.q2", 1),
         "workers.sums.q3": get_nested(workers, "sums.q3", 1),
         "workers.aggregators.q2": get_nested(workers, "aggregators.q2", 1),
         "workers.aggregators.q3": get_nested(workers, "aggregators.q3", 1),
+        "workers.aggregators.q5": get_nested(workers, "aggregators.q5", 1),
         "workers.scatter_gather.mappers": get_nested(workers, "scatter_gather.mappers", 1),
         "workers.scatter_gather.linkers": get_nested(workers, "scatter_gather.linkers", 1),
         "workers.scatter_gather.detectors": get_nested(workers, "scatter_gather.detectors", 1),
@@ -151,10 +160,13 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
         "filter_usd": int(get_nested(workers, "filters.usd", 1)),
         "filter_q1": int(get_nested(workers, "filters.q1", 1)),
         "filter_date": int(get_nested(workers, "filters.date", 1)),
+        "filter_q5_format": int(get_nested(workers, "filters.q5_format", 1)),
+        "filter_q5_usd": int(get_nested(workers, "filters.q5_usd", 1)),
         "sum_q2": int(get_nested(workers, "sums.q2", 1)),
         "sum_q3": int(get_nested(workers, "sums.q3", 1)),
         "aggregation_q2": int(get_nested(workers, "aggregators.q2", 1)),
         "aggregation_q3": int(get_nested(workers, "aggregators.q3", 1)),
+        "aggregation_q5": int(get_nested(workers, "aggregators.q5", 1)),
         "sg_mapper": int(get_nested(workers, "scatter_gather.mappers", 1)),
         "sg_linker": int(get_nested(workers, "scatter_gather.linkers", 1)),
         "sg_detector": int(get_nested(workers, "scatter_gather.detectors", 1)),
@@ -180,7 +192,27 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 amount=count,
                 input_queue=input_queue,
                 settings=settings,
+                transaction_exchange=TRANSACTION_EXCHANGE if configuration == "USD" else None,
             )
+
+    for index in range(counts["filter_q5_format"]):
+        services[f"filter_q5_format_{index}"] = filter_service(
+            configuration="Q5",
+            index=index,
+            amount=counts["filter_q5_format"],
+            input_queue=FILTER_Q5_FORMAT_QUEUE,
+            settings=settings,
+            transaction_exchange=TRANSACTION_EXCHANGE,
+        )
+
+    services["rates_service"] = rates_service()
+
+    for index in range(counts["filter_q5_usd"]):
+        services[f"filter_q5_usd_{index}"] = filter_q5_usd_service(
+            index=index,
+            aggregation_amount=counts["aggregation_q5"],
+            input_queue=FILTER_Q5_USD_QUEUE,
+        )
 
     for index in range(counts["sum_q2"]):
         services[f"sum_q2_{index}"] = sum_service(
@@ -246,6 +278,27 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
         sum_prefix=SUM_Q3_PREFIX,
     )
 
+    for index in range(counts["aggregation_q5"]):
+        services[f"aggregation_q5_{index}"] = aggregator_service(
+            configuration="Q5",
+            index=index,
+            amount=counts["aggregation_q5"],
+            aggregation_prefix=AGGREGATION_Q5_PREFIX,
+            output_queue=JOIN_Q5_QUEUE,
+            sum_amount=counts["filter_q5_usd"],
+            sum_prefix="filter_q5_usd",
+        )
+
+    services["join_q5"] = joiner_service(
+        configuration="Q5",
+        input_queue=JOIN_Q5_QUEUE,
+        output_queue=GATEWAY_Q5_QUEUE,
+        aggregation_amount=counts["aggregation_q5"],
+        aggregation_prefix=AGGREGATION_Q5_PREFIX,
+        sum_amount=counts["filter_q5_usd"],
+        sum_prefix="filter_q5_usd",
+    )
+
     for index in range(counts["sg_detector"]):
         services[f"scatter_gather_detector_{index}"] = scatter_detector_service(
             index=index,
@@ -307,6 +360,7 @@ def gateway_service(file_ingestor_count: int, settings: dict) -> dict:
             f"FILE_INGESTOR_PARTITIONS={file_ingestor_count}",
             f"GATEWAY_Q2_QUEUE={GATEWAY_Q2_QUEUE}",
             f"GATEWAY_Q4_QUEUE={GATEWAY_Q4_QUEUE}",
+            f"GATEWAY_Q5_QUEUE={GATEWAY_Q5_QUEUE}",
             f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
             f"MOM_HOST={MOM_HOST}",
             "PYTHONUNBUFFERED=1",
@@ -327,33 +381,74 @@ def file_ingestor_service(index: int, settings: dict) -> dict:
             f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
             f"MOM_HOST={MOM_HOST}",
             "PYTHONUNBUFFERED=1",
-            f"TRANSACTION_OUTPUT_QUEUE={FILTER_USD_QUEUE}",
+            f"TRANSACTION_OUTPUT_EXCHANGE={TRANSACTION_EXCHANGE}",
         ],
     )
 
 
-def filter_service(configuration: str, index: int, amount: int, input_queue: str, settings: dict) -> dict:
+def filter_service(
+    configuration: str,
+    index: int,
+    amount: int,
+    input_queue: str,
+    settings: dict,
+    transaction_exchange: str | None = None,
+) -> dict:
+    environment = [
+        f"CONFIGURATION={configuration}",
+        f"FILTER_AMOUNT={amount}",
+        f"FILTER_DATE_QUEUE={FILTER_DATE_QUEUE}",
+        f"FILTER_PREFIX={FILTER_PREFIX}",
+        f"FILTER_Q1_QUEUE={FILTER_Q1_QUEUE}",
+        f"FILTER_Q3_QUEUE={FILTER_Q3_QUEUE}",
+        f"FILTER_Q5_USD_QUEUE={FILTER_Q5_USD_QUEUE}",
+        f"GATEWAY_QUEUE={GATEWAY_Q1_QUEUE}",
+        f"ID={index}",
+        f"INPUT_QUEUE={input_queue}",
+        f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
+        f"MOM_HOST={MOM_HOST}",
+        "PYTHONUNBUFFERED=1",
+        f"SCATTER_GATHER_MAPPER_QUEUE={SG_MAPPER_QUEUE}",
+        f"SUM_PREFIX={SUM_Q3_PREFIX}",
+        f"SUM_Q2_QUEUE={SUM_Q2_QUEUE}",
+        f"SUM_Q3_QUEUE={SUM_Q3_QUEUE}",
+    ]
+    if transaction_exchange:
+        environment.append(f"TRANSACTION_EXCHANGE={transaction_exchange}")
+
     return base_service(
         "workers/filter/Dockerfile",
         depends_on=depends_on_rabbitmq(),
+        environment=environment,
+    )
+
+
+def rates_service() -> dict:
+    return {
+        "build": {"context": ".", "dockerfile": "src/rates_service/Dockerfile"},
+        "depends_on": depends_on_rabbitmq(),
+        "environment": [
+            f"RABBIT_HOST={MOM_HOST}",
+            "PYTHONUNBUFFERED=1",
+        ],
+        "volumes": ["./data/rates:/data/rates:rw"],
+    }
+
+
+def filter_q5_usd_service(index: int, aggregation_amount: int, input_queue: str) -> dict:
+    return base_service(
+        "workers/filter_q5_usd/Dockerfile",
+        depends_on=depends_on_rabbitmq(),
         environment=[
-            f"CONFIGURATION={configuration}",
-            f"FILTER_AMOUNT={amount}",
-            f"FILTER_DATE_QUEUE={FILTER_DATE_QUEUE}",
-            f"FILTER_PREFIX={FILTER_PREFIX}",
-            f"FILTER_Q1_QUEUE={FILTER_Q1_QUEUE}",
-            f"FILTER_Q3_QUEUE={FILTER_Q3_QUEUE}",
-            f"FILTER_Q5_USD_QUEUE={FILTER_Q5_USD_QUEUE}",
-            f"GATEWAY_QUEUE={GATEWAY_Q1_QUEUE}",
+            f"AGGREGATION_AMOUNT={aggregation_amount}",
+            f"AGGREGATION_PREFIX={AGGREGATION_Q5_PREFIX}",
             f"ID={index}",
             f"INPUT_QUEUE={input_queue}",
-            f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
             f"MOM_HOST={MOM_HOST}",
             "PYTHONUNBUFFERED=1",
-            f"SCATTER_GATHER_MAPPER_QUEUE={SG_MAPPER_QUEUE}",
-            f"SUM_PREFIX={SUM_Q3_PREFIX}",
-            f"SUM_Q2_QUEUE={SUM_Q2_QUEUE}",
-            f"SUM_Q3_QUEUE={SUM_Q3_QUEUE}",
+            f"RATES_REQUEST_QUEUE={RATES_REQUEST_QUEUE}",
+            "Q5_START_DATE=2022-09-01",
+            "Q5_END_DATE=2022-09-05",
         ],
     )
 

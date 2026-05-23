@@ -6,9 +6,9 @@ TEST_COMPOSE_FILE := docker-compose.test.yaml
 TEST_PROJECT := mla-forward-pass-test
 MAIN_CONFIG_FILE ?= config/main-config.yaml
 TEST_CONFIG_FILE ?= config/test-config.yaml
-CONDA_ENV ?= distribuidos
-PYTHON ?= conda run -n $(CONDA_ENV) python
-LOG_PYTHON ?= conda run --no-capture-output -n $(CONDA_ENV) python -u
+Q5_TEST_CONFIG_FILE ?= config/test-q5-config.yaml
+PYTHON ?= $(if $(wildcard venv/bin/python),venv/bin/python,python3)
+LOG_PYTHON ?= $(PYTHON) -u
 COMPOSE_SCRIPT := scripts/generate_compose.py
 LOG_FORMATTER := scripts/pretty_logs.py
 LOG_COLOR ?= always
@@ -233,42 +233,39 @@ test-q2:
 		docker compose -f docker-compose.test.yaml logs aggregation_q2_0'
 .PHONY: test-q2
 
+Q5_DATASET ?= LI-Mini
+test-q5: TEST_CONFIG_FILE = $(if $(SCENARIO),$(SCENARIOS_DIR)/$(SCENARIO).yaml,$(Q5_TEST_CONFIG_FILE))
 test-q5:
+	$(PYTHON) $(COMPOSE_SCRIPT) --config $(TEST_CONFIG_FILE) --test-output $(TEST_COMPOSE_FILE) --skip-output
 	bash -lc 'set -euo pipefail; \
-		compose="docker compose -f docker-compose.test.yaml"; \
+		compose="docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE)"; \
 		cleanup() { $$compose down --volumes --remove-orphans >/dev/null 2>&1; }; \
 		trap cleanup EXIT; \
 		cleanup; \
 		mkdir -p data/output; \
 		rm -f data/output/results_q5_*.csv; \
 		start_time=$$SECONDS; \
-		echo "Starting Q5 flow test (LI-Mini, integrated pipeline)..."; \
+		echo "Starting Q5 flow test (scenario=$(or $(SCENARIO),1), dataset=$(Q5_DATASET))..."; \
 		$$compose up --build --remove-orphans --detach; \
-		echo "Waiting for client to finish (timeout 300s)..."; \
-		deadline=$$((SECONDS + 300)); \
-		while ! $$compose logs client_0 2>&1 | grep -q "client_results_finished"; do \
-			if [ "$$SECONDS" -ge "$$deadline" ]; then echo "TIMEOUT waiting for client"; exit 124; fi; \
-			sleep 2; \
-		done; \
+		clients="$$($$compose config --services | grep "^client_" | tr "\n" " ")"; \
+		if [ -z "$$clients" ]; then echo "no client services found" >&2; exit 2; fi; \
+		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
 		elapsed=$$((SECONDS - start_time)); \
 		echo "Client finished in $${elapsed}s"; \
-		sleep 2; \
-		echo "Validating Q5 output..."; \
-		Q5_DATASET_DIR=data/datasets/client-1/LI-Mini Q5_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q5_output.py && echo "✓ Q5 test PASSED ($${elapsed}s)" || echo "✗ Q5 test FAILED ($${elapsed}s)"; \
+		Q5_DATASET_DIR=data/datasets/client-1/$(Q5_DATASET) \
+		Q5_DATASET_TRANS=$(Q5_DATASET)_Trans.csv \
+			$(PYTHON) scripts/validate_q5_output.py \
+			&& echo "✓ Q5 test PASSED ($${elapsed}s)" \
+			|| echo "✗ Q5 test FAILED ($${elapsed}s)"; \
 		echo ""; \
-		echo "=== client_0 logs ==="; \
-		$$compose logs client_0; \
-		echo "=== gateway logs ==="; \
-		$$compose logs gateway; \
-		echo "=== filter_q5_format_0 logs ==="; \
-		$$compose logs filter_q5_format_0; \
-		echo "=== filter_q5_usd_0 logs ==="; \
-		$$compose logs filter_q5_usd_0; \
-		echo "=== aggregation_q5_0 logs ==="; \
-		$$compose logs aggregation_q5_0; \
-		echo "=== join_q5 logs ==="; \
-		$$compose logs join_q5'
+		echo "=== client_0 logs ==="; $$compose logs client_0; \
+		echo "=== gateway logs ==="; $$compose logs gateway; \
+		echo "=== filter_q5_format_0 logs ==="; $$compose logs filter_q5_format_0; \
+		echo "=== filter_q5_usd_0 logs ==="; $$compose logs filter_q5_usd_0; \
+		echo "=== aggregation_q5_0 logs ==="; $$compose logs aggregation_q5_0; \
+		echo "=== join_q5 logs ==="; $$compose logs join_q5'
 .PHONY: test-q5
+
 
 switch:
 	@echo Escenarios de prueba:
