@@ -1,4 +1,3 @@
-import csv
 import logging
 from dataclasses import dataclass
 
@@ -18,6 +17,10 @@ from common.message_protocol.internal import InternalProtocol
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 from common.middleware import MessageMiddlewareQueueRabbitMQ
 from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
+from workers.file_ingestor.transaction_row_parser import (
+    TransactionRowParser,
+    parse_csv_line,
+)
 from workers.file_splitter.line_splitter import LineSplitter
 
 
@@ -43,6 +46,7 @@ class FileState:
     splitter: LineSplitter
     file_type: int | None = None
     header: tuple[str, ...] | None = None
+    transaction_parser: TransactionRowParser | None = None
     chunks_received: int = 0
     lines_received: int = 0
     transactions_sent: int = 0
@@ -303,10 +307,11 @@ class FileIngestor:
         state: FileState,
         line: bytes,
     ) -> None:
-        fields = _parse_csv_line(line)
+        fields = parse_csv_line(line)
 
         if state.header is None:
             state.header = tuple(fields)
+            state.transaction_parser = TransactionRowParser(state.header)
             logging.debug(
                 "file_ingestor_transaction_header | id=%s | client_id=%s | path=%s | "
                 "columns=%s",
@@ -317,7 +322,13 @@ class FileIngestor:
             )
             return
 
-        transaction = _parse_transaction(state.header, fields)
+        if state.transaction_parser is None:
+            raise ValueError(
+                "missing transaction parser "
+                f"(client_id={key.client_id}, path={key.rel_path})"
+            )
+
+        transaction = state.transaction_parser.parse_fields(fields)
         self._send_transaction(key.client_id, transaction)
         state.transactions_sent += 1
 
@@ -363,57 +374,3 @@ def _deserialize_eof(payload: bytes) -> int | FileEof:
 def _validate_line_size(line: bytes, max_line_bytes: int) -> None:
     if len(line) > max_line_bytes:
         raise ValueError(f"line exceeded max_line_bytes={max_line_bytes}")
-
-
-def _parse_csv_line(line: bytes) -> list[str]:
-    rows = list(csv.reader([line.decode("utf-8")]))
-    if len(rows) != 1:
-        raise ValueError("expected exactly one CSV row")
-    return rows[0]
-
-
-def _parse_transaction(header: tuple[str, ...], fields: list[str]) -> Transaction:
-    if len(fields) != len(header):
-        raise ValueError(
-            f"transaction row has {len(fields)} fields, expected {len(header)}"
-        )
-
-    from_bank_idx = _column_index(header, "From Bank")
-    to_bank_idx = _column_index(header, "To Bank")
-    return Transaction(
-        date=_required(fields, _column_index(header, "Timestamp")),
-        from_bank=_required(fields, from_bank_idx),
-        from_account=_required(
-            fields,
-            _column_index_after(header, "Account", from_bank_idx),
-        ),
-        to_bank=_required(fields, to_bank_idx),
-        to_account=_required(
-            fields,
-            _column_index_after(header, "Account", to_bank_idx),
-        ),
-        amount=float(_required(fields, _column_index(header, "Amount Paid"))),
-        currency=_required(fields, _column_index(header, "Payment Currency")),
-        format=_required(fields, _column_index(header, "Payment Format")),
-    )
-
-
-def _column_index(header: tuple[str, ...], name: str) -> int:
-    try:
-        return header.index(name)
-    except ValueError as exc:
-        raise ValueError(f"missing required transaction column: {name}") from exc
-
-
-def _column_index_after(header: tuple[str, ...], name: str, start_index: int) -> int:
-    for index in range(start_index + 1, len(header)):
-        if header[index] == name:
-            return index
-    raise ValueError(f"missing required transaction column after {start_index}: {name}")
-
-
-def _required(fields: list[str], index: int) -> str:
-    value = fields[index].strip()
-    if not value:
-        raise ValueError(f"empty required transaction field at index {index}")
-    return value

@@ -28,6 +28,13 @@ def test_line_splitter_returns_raw_lines():
     assert splitter.finish() == []
 
 
+def test_line_splitter_trailing_newline_does_not_emit_blank_line_on_finish():
+    splitter = LineSplitter(max_line_bytes=32)
+
+    assert splitter.push(0, b"a\nb\n") == [b"a", b"b"]
+    assert splitter.finish() == []
+
+
 def test_line_splitter_rejects_oversized_pending_line():
     splitter = LineSplitter(max_line_bytes=3)
 
