@@ -5,8 +5,8 @@ RUN pip3 install pika
 WORKDIR /app
 
 COPY common ./common
+COPY workers/common ./workers/common
 COPY workers/file_ingestor ./workers/file_ingestor
-COPY workers/file_splitter ./workers/file_splitter
 
 ENV PYTHONPATH=/app
 

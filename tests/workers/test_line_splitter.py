@@ -1,6 +1,6 @@
 import pytest
 
-from workers.file_splitter.line_splitter import LineSplitter
+from workers.common.line_splitter import LineSplitter
 
 
 def test_line_splitter_stitches_lines_across_chunks():

@@ -21,7 +21,7 @@ from workers.file_ingestor.transaction_row_parser import (
     TransactionRowParser,
     parse_csv_line,
 )
-from workers.file_splitter.line_splitter import LineSplitter
+from workers.common.line_splitter import LineSplitter
 
 
 @dataclass(frozen=True)
