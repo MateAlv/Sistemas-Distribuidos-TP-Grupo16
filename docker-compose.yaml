@@ -136,41 +136,7 @@ services:
     - INPUT_QUEUE=sum_q2_queue
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
-    - SUM_PREFIX=sum_q2
-  sum_q2_1:
-    build:
-      context: ./src/
-      dockerfile: workers/sum/Dockerfile
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-    environment:
-    - AGGREGATION_AMOUNT=1
-    - AGGREGATION_PREFIX=aggregation_q2
-    - CONFIGURATION=Q2
-    - ID=1
-    - INPUT_QUEUE=sum_q2_queue
-    - MOM_HOST=rabbitmq
-    - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
-    - SUM_PREFIX=sum_q2
-  sum_q2_2:
-    build:
-      context: ./src/
-      dockerfile: workers/sum/Dockerfile
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-    environment:
-    - AGGREGATION_AMOUNT=1
-    - AGGREGATION_PREFIX=aggregation_q2
-    - CONFIGURATION=Q2
-    - ID=2
-    - INPUT_QUEUE=sum_q2_queue
-    - MOM_HOST=rabbitmq
-    - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
+    - SUM_AMOUNT=1
     - SUM_PREFIX=sum_q2
   sum_q3_0:
     build:
@@ -187,41 +153,7 @@ services:
     - INPUT_QUEUE=sum_q3_queue
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
-    - SUM_PREFIX=sum_q3
-  sum_q3_1:
-    build:
-      context: ./src/
-      dockerfile: workers/sum/Dockerfile
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-    environment:
-    - AGGREGATION_AMOUNT=1
-    - AGGREGATION_PREFIX=aggregation_q3
-    - CONFIGURATION=Q3
-    - ID=1
-    - INPUT_QUEUE=sum_q3_queue
-    - MOM_HOST=rabbitmq
-    - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
-    - SUM_PREFIX=sum_q3
-  sum_q3_2:
-    build:
-      context: ./src/
-      dockerfile: workers/sum/Dockerfile
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-    environment:
-    - AGGREGATION_AMOUNT=1
-    - AGGREGATION_PREFIX=aggregation_q3
-    - CONFIGURATION=Q3
-    - ID=2
-    - INPUT_QUEUE=sum_q3_queue
-    - MOM_HOST=rabbitmq
-    - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
+    - SUM_AMOUNT=1
     - SUM_PREFIX=sum_q3
   aggregation_q2_0:
     build:
@@ -238,7 +170,7 @@ services:
     - MOM_HOST=rabbitmq
     - OUTPUT_QUEUE=join_q2_queue
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
+    - SUM_AMOUNT=1
     - SUM_PREFIX=sum_q2
   join_q2:
     build:
@@ -256,7 +188,7 @@ services:
     - MOM_HOST=rabbitmq
     - OUTPUT_QUEUE=join_q2_results_queue
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
+    - SUM_AMOUNT=1
     - SUM_PREFIX=sum_q2
   aggregation_q3_0:
     build:
@@ -273,7 +205,7 @@ services:
     - MOM_HOST=rabbitmq
     - OUTPUT_QUEUE=join_q3_queue
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
+    - SUM_AMOUNT=1
     - SUM_PREFIX=sum_q3
   join_q3:
     build:
@@ -291,7 +223,7 @@ services:
     - MOM_HOST=rabbitmq
     - OUTPUT_QUEUE=join_q3_results_queue
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
+    - SUM_AMOUNT=1
     - SUM_PREFIX=sum_q3
   scatter_gather_detector_0:
     build:
@@ -349,11 +281,7 @@ services:
     - filter_q1_0
     - filter_date_0
     - sum_q2_0
-    - sum_q2_1
-    - sum_q2_2
     - sum_q3_0
-    - sum_q3_1
-    - sum_q3_2
     - aggregation_q2_0
     - join_q2
     - aggregation_q3_0
@@ -364,7 +292,7 @@ services:
     environment:
     - ACCOUNTS_FILE=LI-Small_accounts.csv
     - TRANSACTIONS_FILE=LI-Small_Trans.csv
-    - CHUNK_MAX_BYTES=65536
+    - CHUNK_MAX_BYTES=1048576
     - CLIENT_ID=0
     - CONNECT_TIMEOUT_SECONDS=30
     - DATA_DIR=/data/input

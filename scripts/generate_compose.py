@@ -56,9 +56,14 @@ def main() -> int:
         or DEFAULT_TEST_COMPOSE
     )
 
-    write_compose(config, output_file, expose_ports=bool_value(config, "rabbitmq_ports", True))
-    write_compose(config, test_output_file, expose_ports=False)
-    print(f"generated {relative(output_file)} and {relative(test_output_file)} from {relative(config_path)}")
+    generated = []
+    if not args.skip_output:
+        write_compose(config, output_file, expose_ports=bool_value(config, "rabbitmq_ports", True))
+        generated.append(relative(output_file))
+    if not args.skip_test_output:
+        write_compose(config, test_output_file, expose_ports=False)
+        generated.append(relative(test_output_file))
+    print(f"generated {', '.join(generated)} from {relative(config_path)}")
     return 0
 
 
@@ -67,7 +72,13 @@ def parse_args():
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to the config YAML.")
     parser.add_argument("--output", help="Path for docker-compose.yaml.")
     parser.add_argument("--test-output", help="Path for docker-compose.test.yaml.")
-    return parser.parse_args()
+    parser.add_argument("--skip-output", action="store_true", help="Do not write docker-compose.yaml.")
+    parser.add_argument("--skip-test-output", action="store_true", help="Do not write docker-compose.test.yaml.")
+    parser.set_defaults(skip_output=False, skip_test_output=False)
+    args = parser.parse_args()
+    if args.skip_output and args.skip_test_output:
+        parser.error("at least one compose output must be enabled")
+    return args
 
 
 def load_config(path: Path) -> dict:

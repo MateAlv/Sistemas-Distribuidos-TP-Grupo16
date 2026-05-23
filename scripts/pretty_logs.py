@@ -65,7 +65,9 @@ def main() -> int:
     color = should_color(args.color)
 
     for raw_line in sys.stdin:
-        print(format_line(raw_line.rstrip("\n"), color, args.service_width), flush=True)
+        for line in clean_lines(raw_line):
+            sys.stdout.write(format_line(line, color, args.service_width) + "\n")
+            sys.stdout.flush()
 
     return 0
 
@@ -114,6 +116,17 @@ def format_line(line: str, color: bool, service_width: int) -> str:
     body = format_body(message, color)
 
     return f"{time_part} {service_part} {level_part} {body}".rstrip()
+
+
+def clean_lines(line: str) -> list[str]:
+    return [sanitize_line(part) for part in line.splitlines()]
+
+
+def sanitize_line(line: str) -> str:
+    return "".join(
+        char if char == "\t" or ord(char) >= 32 else " "
+        for char in line
+    )
 
 
 def extract_docker_timestamp(message: str) -> tuple[str | None, str]:

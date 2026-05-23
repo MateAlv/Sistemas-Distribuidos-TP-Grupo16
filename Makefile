@@ -1,9 +1,11 @@
 SHELL := /bin/bash
 PWD := $(shell pwd)
+MAIN_PROJECT ?= $(shell basename "$(PWD)" | tr '[:upper:]' '[:lower:]')
 COMPOSE_FILE := docker-compose.yaml
 TEST_COMPOSE_FILE := docker-compose.test.yaml
 TEST_PROJECT := mla-forward-pass-test
-CONFIG_FILE ?= config/main-config.yaml
+MAIN_CONFIG_FILE ?= config/main-config.yaml
+TEST_CONFIG_FILE ?= config/test-config.yaml
 CONDA_ENV ?= distribuidos
 PYTHON ?= conda run -n $(CONDA_ENV) python
 LOG_PYTHON ?= conda run --no-capture-output -n $(CONDA_ENV) python -u
@@ -22,8 +24,12 @@ SCENARIOS_DIR := config/scenarios
 RABBIT_SCREEN_URL ?= http://localhost:15672/\#/queues
 
 config:
-	$(PYTHON) $(COMPOSE_SCRIPT) --config $(CONFIG_FILE)
+	$(PYTHON) $(COMPOSE_SCRIPT) --config $(MAIN_CONFIG_FILE) --output $(COMPOSE_FILE) --skip-test-output
 .PHONY: config
+
+test-config:
+	$(PYTHON) $(COMPOSE_SCRIPT) --config $(TEST_CONFIG_FILE) --test-output $(TEST_COMPOSE_FILE) --skip-output
+.PHONY: test-config
 
 scenario:
 	@scenario="$(if $(SCENARIO),$(SCENARIO),$(SCENARIO_ARG))"; \
@@ -43,7 +49,7 @@ scenario:
 		echo "Scenario not found: $$scenario" >&2; \
 		exit 2; \
 	fi; \
-	$(PYTHON) $(COMPOSE_SCRIPT) --config "$$config_file"
+	$(PYTHON) $(COMPOSE_SCRIPT) --config "$$config_file" --test-output $(TEST_COMPOSE_FILE) --skip-output
 .PHONY: scenario
 
 ifneq ($(filter scenario,$(MAKECMDGOALS)),)
@@ -74,12 +80,18 @@ rebuild:
 .PHONY: rebuild
 
 down:
-	docker compose -f $(COMPOSE_FILE) stop -t 5
-	docker compose -f $(COMPOSE_FILE) down
+	-docker compose -f $(COMPOSE_FILE) stop -t 5
+	-docker compose -f $(COMPOSE_FILE) down --remove-orphans
 	@if [ -f "$(TEST_COMPOSE_FILE)" ]; then \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) stop -t 5 || true; \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) down --volumes --remove-orphans || true; \
 	fi
+	@for project in "$(MAIN_PROJECT)" "$(TEST_PROJECT)"; do \
+		containers=$$(docker ps -aq --filter "label=com.docker.compose.project=$$project"); \
+		if [ -n "$$containers" ]; then docker rm -f $$containers >/dev/null; fi; \
+		networks=$$(docker network ls -q --filter "label=com.docker.compose.project=$$project"); \
+		if [ -n "$$networks" ]; then docker network rm $$networks >/dev/null 2>&1 || true; fi; \
+	done
 .PHONY: down
 
 hard-down:
@@ -123,7 +135,7 @@ stats:
 .PHONY: stats
 
 test:
-	$(MAKE) config
+	$(MAKE) test-config
 	bash -lc 'set -euo pipefail; \
 		log_file=/tmp/$(TEST_PROJECT).log; \
 		logs_pid=""; \
