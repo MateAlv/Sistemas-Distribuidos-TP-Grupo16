@@ -1,3 +1,4 @@
+import csv
 from dataclasses import dataclass
 
 
@@ -48,3 +49,10 @@ class LineSplitter:
 def _validate_line_size(line: bytes, max_line_bytes: int) -> None:
     if len(line) > max_line_bytes:
         raise ValueError(f"line exceeded max_line_bytes={max_line_bytes}")
+
+
+def parse_csv_line(line: bytes) -> list[str]:
+    rows = list(csv.reader([line.decode("utf-8")]))
+    if len(rows) != 1:
+        raise ValueError("expected exactly one CSV row")
+    return rows[0]

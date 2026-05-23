@@ -1,7 +1,7 @@
-import csv
 from dataclasses import dataclass
 
 from common.domain.transaction import Transaction
+from workers.common.line_splitter import parse_csv_line
 
 
 @dataclass(frozen=True)
@@ -44,13 +44,6 @@ class TransactionRowParser:
             currency=_required(fields, columns.currency),
             format=_required(fields, columns.format),
         )
-
-
-def parse_csv_line(line: bytes) -> list[str]:
-    rows = list(csv.reader([line.decode("utf-8")]))
-    if len(rows) != 1:
-        raise ValueError("expected exactly one CSV row")
-    return rows[0]
 
 
 def _resolve_transaction_columns(header: tuple[str, ...]) -> TransactionColumnIndexes:
