@@ -22,8 +22,8 @@ RATES_CACHE = Path("data/rates/cache.json")
 CURRENCY_NAME_TO_ISO = {
     "US Dollar": "USD",
     "Euro": "EUR",
-    "British Pound": "GBP",
-    "Japanese Yen": "JPY",
+    "UK Pound": "GBP",
+    "Yen": "JPY",
     "Swiss Franc": "CHF",
     "Canadian Dollar": "CAD",
     "Australian Dollar": "AUD",
@@ -44,7 +44,7 @@ CURRENCY_NAME_TO_ISO = {
     "Thai Baht": "THB",
     "Polish Zloty": "PLN",
     "Czech Koruna": "CZK",
-    "Israeli New Shekel": "ILS",
+    "Shekel": "ILS",
     "Philippine Peso": "PHP",
     "Indonesian Rupiah": "IDR",
     "Malaysian Ringgit": "MYR",
@@ -132,8 +132,8 @@ def validate_q5_results():
         if not in_date_range(date):
             continue
 
-        currency = tx["Receiving Currency"].strip()
-        amount = float(tx["Amount Received"])
+        currency = tx["Payment Currency"].strip()
+        amount = float(tx["Amount Paid"])
 
         amount_usd = convert_to_usd(amount, currency, date, rates)
         if amount_usd is None:
@@ -163,8 +163,8 @@ def validate_q5_results():
             return False
 
     if total_count == 0:
-        print("\nWARNING: Output count is 0")
-        return True
+        print("\nERROR: Output count is 0")
+        return False
 
     print(f"\nTotal Q5 count from output: {total_count}")
 

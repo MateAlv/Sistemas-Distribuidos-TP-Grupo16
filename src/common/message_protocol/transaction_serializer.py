@@ -6,7 +6,7 @@ class TransactionSerializer:
     DATE_SIZE = 19
     BANK_SIZE = 16
     ACCOUNT_SIZE = 32
-    CURRENCY_SIZE = 16
+    CURRENCY_SIZE = 32
     FORMAT_SIZE = 32
     FORMAT = (
         f"!{DATE_SIZE}s{BANK_SIZE}s{ACCOUNT_SIZE}s"

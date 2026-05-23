@@ -115,25 +115,26 @@ test-q2:
 
 test-q5:
 	bash -lc 'set -euo pipefail; \
-		compose="docker compose -f docker-compose.test-q5.yaml"; \
+		compose="docker compose -f docker-compose.test.yaml"; \
 		cleanup() { $$compose down --volumes --remove-orphans >/dev/null 2>&1; }; \
 		trap cleanup EXIT; \
 		cleanup; \
 		mkdir -p data/output; \
+		rm -f data/output/results_q5_*.csv; \
 		start_time=$$SECONDS; \
-		echo "Starting Q5 flow test (LI-Small dataset)..."; \
+		echo "Starting Q5 flow test (LI-Mini, integrated pipeline)..."; \
 		$$compose up --build --remove-orphans --detach; \
-		echo "Waiting for client to finish (timeout 1800s)..."; \
-		deadline=$$((SECONDS + 1800)); \
+		echo "Waiting for client to finish (timeout 300s)..."; \
+		deadline=$$((SECONDS + 300)); \
 		while ! $$compose logs client_0 2>&1 | grep -q "client_results_finished"; do \
 			if [ "$$SECONDS" -ge "$$deadline" ]; then echo "TIMEOUT waiting for client"; exit 124; fi; \
-			sleep 5; \
+			sleep 2; \
 		done; \
 		elapsed=$$((SECONDS - start_time)); \
 		echo "Client finished in $${elapsed}s"; \
-		sleep 3; \
+		sleep 2; \
 		echo "Validating Q5 output..."; \
-		python3 scripts/validate_q5_output.py && echo "✓ Q5 test PASSED ($${elapsed}s)" || echo "✗ Q5 test FAILED ($${elapsed}s)"; \
+		Q5_DATASET_DIR=data/datasets/client-1/LI-Mini Q5_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q5_output.py && echo "✓ Q5 test PASSED ($${elapsed}s)" || echo "✗ Q5 test FAILED ($${elapsed}s)"; \
 		echo ""; \
 		echo "=== client_0 logs ==="; \
 		$$compose logs client_0; \
