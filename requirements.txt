@@ -1,3 +1,4 @@
+pika
 pyyaml
 pytest
 requests

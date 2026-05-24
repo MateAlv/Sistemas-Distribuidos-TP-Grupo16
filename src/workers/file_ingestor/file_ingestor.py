@@ -113,7 +113,7 @@ class FileIngestor:
                 except Exception:
                     pass
 
-    # ----- data path (work queue) -----------------------------------------
+
 
     def _process_message(self, message: bytes, ack, nack) -> None:
         try:
@@ -142,8 +142,6 @@ class FileIngestor:
         batch = self._line_batch_serializer.deserialize(payload)
         transactions = LineBatchParser.parse(batch)
 
-        # Forward transactions first so they reach the broker before any report
-        # that lets the leader close the client.
         for transaction in transactions:
             self._send_transaction(self._transaction_sender(), client_id, transaction)
 
@@ -168,8 +166,6 @@ class FileIngestor:
             forwarded,
         )
 
-        # Late batch: it arrived after we already snapshotted for the EOF, so
-        # report it to the leader as an increment.
         if pending is not None and forwarded:
             _, leader_id = pending
             self._report_to_leader(
@@ -183,7 +179,6 @@ class FileIngestor:
         control = self._control_serializer.deserialize(payload)
         expected_total = control.expected_total
 
-        # The ingestor that grabs the splitter EOF is the leader for this client.
         with self._lock:
             self._leader_expected_by_client[client_id] = expected_total
 
@@ -195,7 +190,6 @@ class FileIngestor:
         )
         self._broadcast_eof(client_id, expected_total)
 
-    # ----- control path (EOF broadcast) ------------------------------------
 
     def _run_control_consumer(self) -> None:
         self._control_consumer = MessageMiddlewareExchangeRabbitMQ(
@@ -246,8 +240,7 @@ class FileIngestor:
                 ack()
                 return
 
-            # Snapshot everything forwarded so far; in-flight batches will be
-            # reported incrementally from _handle_line_batch.
+
             self._report_to_leader(
                 client_id,
                 leader_id,
@@ -279,9 +272,6 @@ class FileIngestor:
         processed_count: int,
         forwarded_count: int,
     ) -> None:
-        # Fresh connection per report: this runs from both the data and control
-        # threads, and pika connections are not thread-safe. Reports only happen
-        # for in-flight batches after EOF, so the volume is bounded.
         response_queue = MessageMiddlewareQueueRabbitMQ(
             self._config.mom_host,
             f"{self._config.response_queue_prefix}_{leader_id}",
@@ -291,15 +281,12 @@ class FileIngestor:
                 self._packet(
                     MessageType.PROCESSED_ANSWER,
                     client_id,
-                    # expected_total field carries the forwarded count (matches
-                    # the sum protocol), processed_count carries the parsed count.
                     self._control_payload(self._config.id, forwarded_count, processed_count),
                 )
             )
         finally:
             response_queue.close()
 
-    # ----- response path (leader reconciliation) ---------------------------
 
     def _run_response_consumer(self) -> None:
         self._response_consumer = MessageMiddlewareQueueRabbitMQ(
@@ -354,8 +341,6 @@ class FileIngestor:
                 )
                 expected_total = self._leader_expected_by_client.get(client_id)
 
-                # >= (not ==) so a redelivered batch cannot push the count past
-                # the target and livelock the close.
                 if (
                     expected_total is not None
                     and self._leader_processed_by_client[client_id] >= expected_total
@@ -390,7 +375,6 @@ class FileIngestor:
         self._leader_forwarded_by_client.pop(client_id, None)
         self._leader_expected_by_client.pop(client_id, None)
 
-    # ----- senders ---------------------------------------------------------
 
     def _send_transaction(
         self,
@@ -420,15 +404,16 @@ class FileIngestor:
             )
         )
 
-    def _transaction_sender(self) -> MessageMiddlewareQueueRabbitMQ:
+    def _transaction_sender(self) -> MessageMiddlewareExchangeRabbitMQ:
         if self._transaction_output is None:
-            self._transaction_output = MessageMiddlewareQueueRabbitMQ(
-                self._config.mom_host,
-                self._config.transaction_output_queue,
+            self._transaction_output = MessageMiddlewareExchangeRabbitMQ(
+                host=self._config.mom_host,
+                exchange_name=self._config.transaction_output_exchange,
+                routing_keys=[],
+                exchange_type="fanout",
             )
         return self._transaction_output
 
-    # ----- helpers ---------------------------------------------------------
 
     def _packet(self, msg_type: MessageType, client_id: int, payload: bytes) -> bytes:
         return self._internal_protocol.create_packet(

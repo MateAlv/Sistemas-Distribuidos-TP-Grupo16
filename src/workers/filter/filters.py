@@ -20,6 +20,7 @@ MOM_HOST = os.environ["MOM_HOST"]
 CONFIGURATION = os.environ["CONFIGURATION"]
 # Cola de Entrada
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
+TRANSACTION_EXCHANGE = os.getenv("TRANSACTION_EXCHANGE")
 # Colas de Salida Posibles
 GATEWAY_QUEUE = os.environ["GATEWAY_QUEUE"]
 FILTER_DATE_QUEUE = os.environ["FILTER_DATE_QUEUE"]
@@ -41,9 +42,15 @@ class FilterWorker:
     def __init__(self):
     
         # Iniciacion de la cola de entrada
-        self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST, INPUT_QUEUE
-        )
+        if TRANSACTION_EXCHANGE:
+            self.input_queue = middleware.MessageMiddlewareExchangeRabbitMQ(
+                MOM_HOST, TRANSACTION_EXCHANGE, routing_keys=[],
+                exchange_type="fanout", queue_name=INPUT_QUEUE, exclusive=False,
+            )
+        else:
+            self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
+                MOM_HOST, INPUT_QUEUE
+            )
 
         # Output Queue o Exchange dependiendo de la configuracion
         self.output_queues = {}

@@ -7,10 +7,11 @@ BASE_URL = "https://api.frankfurter.app"
 MAX_RETRIES = 3
 
 class RatesManager:
-    def __init__(self, cache_path: str, base_url=BASE_URL):
+    def __init__(self, cache_path: str, base_url=BASE_URL, reference_overrides=None):
         self.cache_path = cache_path
         self._rates = {}
         self._base_url = base_url
+        self._reference_overrides = reference_overrides or {}
 
     def fetch_period(self, start_date: str, end_date: str, max_retries=MAX_RETRIES) -> bool:
         url = f"{self._base_url}/{start_date}..{end_date}?base=USD"
@@ -21,6 +22,7 @@ class RatesManager:
                 response = requests.get(url, timeout=10)
                 response.raise_for_status()
                 self._rates = response.json().get("rates", {})
+                self.apply_reference_overrides()
                 logging.info("fetch_rates | result=success | entries=%d", len(self._rates))
                 return True
             except Exception as e:
@@ -38,6 +40,7 @@ class RatesManager:
         try:
             with open(self.cache_path, 'r') as f:
                 self._rates = json.load(f)
+            self.apply_reference_overrides()
             logging.info(f"load_cache | result=success | entries={len(self._rates)}")
             return True
         except Exception as e:
@@ -68,6 +71,10 @@ class RatesManager:
             raise ValueError(f"No exchange rate for currency {currency} on {date}")
             
         return 1.0 / float(rate_to_currency)
+
+    def apply_reference_overrides(self) -> None:
+        for date, day_rates in self._reference_overrides.items():
+            self._rates.setdefault(date, {}).update(day_rates)
 
     @property
     def rates(self) -> dict:

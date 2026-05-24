@@ -1,3 +1,4 @@
+import os
 import pika
 import uuid
 import time
@@ -11,6 +12,12 @@ from .middleware import (
     MessageMiddlewareRpcClient,
     MessageMiddlewareRpcServer,
 )
+
+# Set RABBITMQ_DURABLE=true to persist queues and messages across broker restarts.
+# Disabled by default: unnecessary overhead for hito 2 (scalability, no fault tolerance).
+# Enable for hito 3 (fault tolerance).
+_DURABLE = os.environ.get("RABBITMQ_DURABLE", "false").lower() == "true"
+_DELIVERY_MODE = 2 if _DURABLE else 1
 
 _CONNECTION_ERRORS = (
     pika.exceptions.AMQPConnectionError,
@@ -38,7 +45,10 @@ class _RabbitMQBase:
 
     def _on_messaging_callback_adapter(self, ch, method, properties, body):
         ack = lambda: ch.is_open and ch.basic_ack(delivery_tag=method.delivery_tag)
-        nack = lambda: ch.is_open and ch.basic_nack(delivery_tag=method.delivery_tag)
+        def nack(requeue=False):
+            return ch.is_open and ch.basic_nack(
+                delivery_tag=method.delivery_tag, requeue=requeue
+            )
         self._user_callback(body, ack, nack)
 
     def start_consuming(self, on_message_callback):
@@ -83,7 +93,7 @@ class MessageMiddlewareQueueRabbitMQ(_RabbitMQBase, MessageMiddlewareQueue):
     def __init__(self, host, queue_name):
         super().__init__(host)
         self._queue_name = queue_name
-        self._channel.queue_declare(queue=queue_name, durable=True)
+        self._channel.queue_declare(queue=queue_name, durable=_DURABLE)
 
     def send(self, message):
         try:
@@ -91,7 +101,7 @@ class MessageMiddlewareQueueRabbitMQ(_RabbitMQBase, MessageMiddlewareQueue):
                 exchange="",
                 routing_key=self._queue_name,
                 body=message,
-                properties=pika.BasicProperties(delivery_mode=2),
+                properties=pika.BasicProperties(delivery_mode=_DELIVERY_MODE),
             )
         except _CONNECTION_ERRORS as e:
             raise MessageMiddlewareDisconnectedError(e)
@@ -122,7 +132,7 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
         self._channel.exchange_declare(
             exchange=exchange_name,
             exchange_type=exchange_type,
-            durable=True,
+            durable=_DURABLE,
         )
         self._routing_keys = routing_keys
 
@@ -134,18 +144,18 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
                     exchange=self._exchange_name,
                     routing_key='',
                     body=message,
-                    properties=pika.BasicProperties(delivery_mode=2),
+                    properties=pika.BasicProperties(delivery_mode=_DELIVERY_MODE),
                 )
             else:
                 if not self._routing_keys:
                     raise MessageMiddlewareMessageError("No routing keys provided")
-                
+
                 for key in self._routing_keys:
                     self._channel.basic_publish(
                         exchange=self._exchange_name,
                         routing_key=key,
                         body=message,
-                        properties=pika.BasicProperties(delivery_mode=2),
+                        properties=pika.BasicProperties(delivery_mode=_DELIVERY_MODE),
                     )
         except _CONNECTION_ERRORS as e:
             raise MessageMiddlewareDisconnectedError(e)
@@ -170,7 +180,7 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
         if self._queue_name:
             self._channel.queue_declare(
                 queue=self._queue_name,
-                durable=not self._exclusive,
+                durable=_DURABLE and not self._exclusive,
                 exclusive=self._exclusive,
             )
         else:
@@ -207,7 +217,7 @@ class MessageMiddlewareRpcClientRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcClie
         return False
 
     def connect(self):
-        self._channel.queue_declare(queue=self._request_queue, durable=True)
+        self._channel.queue_declare(queue=self._request_queue, durable=_DURABLE)
 
     def call(self, message, timeout=30):
         correlation_id = str(uuid.uuid4())
@@ -230,7 +240,7 @@ class MessageMiddlewareRpcClientRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcClie
             properties=pika.BasicProperties(
                 reply_to=reply_queue,
                 correlation_id=correlation_id,
-                delivery_mode=2,
+                delivery_mode=_DELIVERY_MODE,
             )
         )
         
@@ -258,7 +268,7 @@ class MessageMiddlewareRpcServerRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcServ
         return False
 
     def connect(self):
-        self._channel.queue_declare(queue=self._request_queue, durable=True)
+        self._channel.queue_declare(queue=self._request_queue, durable=_DURABLE)
 
     def start(self, on_request_callback):
         def _on_request(ch, method, properties, body):
