@@ -16,6 +16,9 @@ SERVER_HOST = "gateway"
 SERVER_PORT = 5678
 FILE_INGESTOR_EXCHANGE = "file_ingestor_exchange"
 FILE_SPLITTER_QUEUE_PREFIX = "file_splitter"
+TRANSACTION_EXCHANGE = "transaction_fanout_exchange"
+FILE_INGESTOR_CONTROL_EXCHANGE = "file_ingestor_control"
+FILE_INGESTOR_RESPONSE_QUEUE_PREFIX = "file_ingestor_response"
 FILTER_PREFIX = "filter"
 
 LINE_BATCH_QUEUE = "line_batch_queue"
@@ -43,6 +46,9 @@ JOIN_Q3_QUEUE = "join_q3_queue"
 JOIN_Q3_RESULTS_QUEUE = "join_q3_results_queue"
 JOIN_Q5_QUEUE = "join_q5_queue"
 
+Q2_ENRICH_QUEUE = "q2_enrich_queue"
+ACCOUNTS_LINE_BATCH_QUEUE = "accounts_line_batch_queue"
+
 SG_MAPPER_QUEUE = "scatter_gather_mapper_queue"
 SG_LINKER_EXCHANGE = "sg_linker_exchange"
 SG_DETECTOR_EXCHANGE = "sg_detector_exchange"
@@ -51,7 +57,15 @@ SG_DETECTOR_EXCHANGE = "sg_detector_exchange"
 def main() -> int:
     args = parse_args()
     if args.preset:
-        config = preset_config(args.preset, args.dataset)
+        config = preset_config(
+            args.preset,
+            args.dataset,
+            args.filter_usd_workers,
+            args.sum_q2_workers,
+            args.filter_q5_format_workers,
+            args.prefetch,
+            args.filter_q5_usd_workers,
+        )
         config_label = f"preset:{args.preset}"
     else:
         config_path = resolve_path(args.config)
@@ -72,7 +86,7 @@ def main() -> int:
         write_compose(config, output_file, expose_ports=bool_value(config, "rabbitmq_ports", True))
         generated.append(relative(output_file))
     if not args.skip_test_output:
-        write_compose(config, test_output_file, expose_ports=False)
+        write_compose(config, test_output_file, expose_ports=bool_value(config, "rabbitmq_ports", False))
         generated.append(relative(test_output_file))
     print(f"generated {', '.join(generated)} from {config_label}")
     return 0
@@ -83,8 +97,13 @@ def parse_args():
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to the config YAML.")
     parser.add_argument("--output", help="Path for docker-compose.yaml.")
     parser.add_argument("--test-output", help="Path for docker-compose.test.yaml.")
-    parser.add_argument("--preset", choices=("q5-test",), help="Use a built-in compose config preset.")
+    parser.add_argument("--preset", choices=("q2-test", "q5-test"), help="Use a built-in compose config preset.")
     parser.add_argument("--dataset", default="LI-Mini", help="Dataset name for presets that need one.")
+    parser.add_argument("--filter-usd-workers", type=int, default=None, help="Override filter_usd worker count (preset only).")
+    parser.add_argument("--sum-q2-workers", type=int, default=None, help="Override sum_q2 worker count (preset only).")
+    parser.add_argument("--filter-q5-format-workers", type=int, default=None, help="Override filter_q5_format worker count (preset only).")
+    parser.add_argument("--filter-q5-usd-workers", type=int, default=None, help="Override filter_q5_usd worker count (preset only).")
+    parser.add_argument("--prefetch", type=int, default=None, help="PREFETCH_COUNT for Q2 filter/sum services (preset only).")
     parser.add_argument("--skip-output", action="store_true", help="Do not write docker-compose.yaml.")
     parser.add_argument("--skip-test-output", action="store_true", help="Do not write docker-compose.test.yaml.")
     parser.set_defaults(skip_output=False, skip_test_output=False)
@@ -94,8 +113,16 @@ def parse_args():
     return args
 
 
-def preset_config(name: str, dataset: str) -> dict:
-    if name != "q5-test":
+def preset_config(
+    name: str,
+    dataset: str,
+    filter_usd_workers: int | None = None,
+    sum_q2_workers: int | None = None,
+    filter_q5_format_workers: int | None = None,
+    prefetch: int | None = None,
+    filter_q5_usd_workers: int | None = None,
+) -> dict:
+    if name not in ("q2-test", "q5-test"):
         raise ValueError(f"unknown preset: {name}")
 
     config = {
@@ -111,18 +138,20 @@ def preset_config(name: str, dataset: str) -> dict:
             "result_line_max_bytes": 1048576,
             "connect_timeout_seconds": 30,
             "io_timeout_seconds": 3600,
+            **({"filter_prefetch_count": prefetch} if prefetch is not None else {}),
         },
+        "queries": ["q2"] if name == "q2-test" else ["q5"],
         "workers": {
             "file_ingestors": 1,
             "filters": {
-                "usd": 1,
+                "usd": filter_usd_workers if filter_usd_workers is not None else 1,
                 "q1": 1,
                 "date": 1,
-                "q5_format": 1,
-                "q5_usd": 1,
+                "q5_format": filter_q5_format_workers if filter_q5_format_workers is not None else 1,
+                "q5_usd": filter_q5_usd_workers if filter_q5_usd_workers is not None else 1,
             },
             "sums": {
-                "q2": 1,
+                "q2": sum_q2_workers if sum_q2_workers is not None else 1,
                 "q3": 1,
             },
             "aggregators": {
@@ -227,6 +256,13 @@ def write_compose(config: dict, path: Path, expose_ports: bool) -> None:
 def build_compose(config: dict, expose_ports: bool) -> dict:
     workers = config.get("workers", {})
     settings = config.get("settings", {})
+    enabled_queries = set(config.get("queries", ["q1", "q2", "q3", "q4", "q5"]))
+    q1_enabled = "q1" in enabled_queries
+    q2_enabled = "q2" in enabled_queries
+    q3_enabled = "q3" in enabled_queries
+    q4_enabled = "q4" in enabled_queries
+    q5_enabled = "q5" in enabled_queries
+    usd_enabled = q1_enabled or q2_enabled or q3_enabled or q4_enabled
 
     counts = {
         "file_splitters": int(
@@ -255,19 +291,29 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
 
     services = {}
     services["rabbitmq"] = rabbitmq_service(expose_ports)
-    services["gateway"] = gateway_service(counts["file_splitters"], settings)
+    services["gateway"] = gateway_service(
+        counts["file_splitters"],
+        settings,
+        enabled_queries,
+    )
 
     for index in range(counts["file_splitters"]):
-        services[f"file_splitter_{index}"] = file_splitter_service(index, settings)
+        services[f"file_splitter_{index}"] = file_splitter_service(
+            index, settings, q2_enabled=q2_enabled
+        )
 
     for index in range(counts["file_ingestors"]):
         services[f"file_ingestor_{index}"] = file_ingestor_service(index, settings)
 
-    for configuration, count, input_queue in (
-        ("USD", counts["filter_usd"], FILTER_USD_QUEUE),
-        ("Q1", counts["filter_q1"], FILTER_Q1_QUEUE),
-        ("DATE", counts["filter_date"], FILTER_DATE_QUEUE),
-    ):
+    filter_specs = []
+    if usd_enabled:
+        filter_specs.append(("USD", counts["filter_usd"], FILTER_USD_QUEUE))
+    if q1_enabled:
+        filter_specs.append(("Q1", counts["filter_q1"], FILTER_Q1_QUEUE))
+    if q3_enabled or q4_enabled:
+        filter_specs.append(("DATE", counts["filter_date"], FILTER_DATE_QUEUE))
+
+    for configuration, count, input_queue in filter_specs:
         for index in range(count):
             services[f"filter_{configuration.lower()}_{index}"] = filter_service(
                 configuration=configuration,
@@ -276,130 +322,149 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 input_queue=input_queue,
                 settings=settings,
                 transaction_exchange=TRANSACTION_EXCHANGE if configuration == "USD" else None,
+                enabled_queries=enabled_queries,
             )
 
-    for index in range(counts["filter_q5_format"]):
-        services[f"filter_q5_format_{index}"] = filter_service(
-            configuration="Q5",
-            index=index,
-            amount=counts["filter_q5_format"],
-            input_queue=FILTER_Q5_FORMAT_QUEUE,
-            settings=settings,
-            transaction_exchange=TRANSACTION_EXCHANGE,
-        )
+    if q5_enabled:
+        for index in range(counts["filter_q5_format"]):
+            services[f"filter_q5_format_{index}"] = filter_service(
+                configuration="Q5",
+                index=index,
+                amount=counts["filter_q5_format"],
+                input_queue=FILTER_Q5_FORMAT_QUEUE,
+                settings=settings,
+                transaction_exchange=TRANSACTION_EXCHANGE,
+                enabled_queries=enabled_queries,
+            )
 
-    services["rates_service"] = rates_service()
+        services["rates_service"] = rates_service()
 
-    for index in range(counts["filter_q5_usd"]):
-        services[f"filter_q5_usd_{index}"] = filter_q5_usd_service(
-            index=index,
-            aggregation_amount=counts["aggregation_q5"],
-            input_queue=FILTER_Q5_USD_QUEUE,
-        )
+        for index in range(counts["filter_q5_usd"]):
+            services[f"filter_q5_usd_{index}"] = filter_q5_usd_service(
+                index=index,
+                amount=counts["filter_q5_usd"],
+                aggregation_amount=counts["aggregation_q5"],
+                input_queue=FILTER_Q5_USD_QUEUE,
+            )
 
-    for index in range(counts["sum_q2"]):
-        services[f"sum_q2_{index}"] = sum_service(
+    if q2_enabled:
+        for index in range(counts["sum_q2"]):
+            services[f"sum_q2_{index}"] = sum_service(
+                configuration="Q2",
+                index=index,
+                amount=counts["sum_q2"],
+                aggregation_amount=counts["aggregation_q2"],
+                aggregation_prefix=AGGREGATION_Q2_PREFIX,
+                input_queue=SUM_Q2_QUEUE,
+                settings=settings,
+                sum_prefix=SUM_Q2_PREFIX,
+            )
+
+    if q3_enabled:
+        for index in range(counts["sum_q3"]):
+            services[f"sum_q3_{index}"] = sum_service(
+                configuration="Q3",
+                index=index,
+                amount=counts["sum_q3"],
+                aggregation_amount=counts["aggregation_q3"],
+                aggregation_prefix=AGGREGATION_Q3_PREFIX,
+                input_queue=SUM_Q3_QUEUE,
+                settings=settings,
+                sum_prefix=SUM_Q3_PREFIX,
+            )
+
+    if q2_enabled:
+        for index in range(counts["aggregation_q2"]):
+            services[f"aggregation_q2_{index}"] = aggregator_service(
+                configuration="Q2",
+                index=index,
+                amount=counts["aggregation_q2"],
+                aggregation_prefix=AGGREGATION_Q2_PREFIX,
+                output_queue=JOIN_Q2_QUEUE,
+                sum_amount=counts["sum_q2"],
+                sum_prefix=SUM_Q2_PREFIX,
+            )
+
+        services["join_q2"] = joiner_service(
             configuration="Q2",
-            index=index,
-            amount=counts["sum_q2"],
+            input_queue=JOIN_Q2_QUEUE,
+            output_queue=Q2_ENRICH_QUEUE,
             aggregation_amount=counts["aggregation_q2"],
             aggregation_prefix=AGGREGATION_Q2_PREFIX,
-            input_queue=SUM_Q2_QUEUE,
-            sum_prefix=SUM_Q2_PREFIX,
-        )
-
-    for index in range(counts["sum_q3"]):
-        services[f"sum_q3_{index}"] = sum_service(
-            configuration="Q3",
-            index=index,
-            amount=counts["sum_q3"],
-            aggregation_amount=counts["aggregation_q3"],
-            aggregation_prefix=AGGREGATION_Q3_PREFIX,
-            input_queue=SUM_Q3_QUEUE,
-            sum_prefix=SUM_Q3_PREFIX,
-        )
-
-    for index in range(counts["aggregation_q2"]):
-        services[f"aggregation_q2_{index}"] = aggregator_service(
-            configuration="Q2",
-            index=index,
-            amount=counts["aggregation_q2"],
-            aggregation_prefix=AGGREGATION_Q2_PREFIX,
-            output_queue=JOIN_Q2_QUEUE,
             sum_amount=counts["sum_q2"],
             sum_prefix=SUM_Q2_PREFIX,
         )
 
-    services["join_q2"] = joiner_service(
-        configuration="Q2",
-        input_queue=JOIN_Q2_QUEUE,
-        output_queue=GATEWAY_Q2_QUEUE,
-        aggregation_amount=counts["aggregation_q2"],
-        aggregation_prefix=AGGREGATION_Q2_PREFIX,
-        sum_amount=counts["sum_q2"],
-        sum_prefix=SUM_Q2_PREFIX,
-    )
+        services["q2_bank_name_joiner"] = q2_bank_name_joiner_service(
+            q2_input_queue=Q2_ENRICH_QUEUE,
+            accounts_input_queue=ACCOUNTS_LINE_BATCH_QUEUE,
+            output_queue=GATEWAY_Q2_QUEUE,
+            settings=settings,
+        )
 
-    for index in range(counts["aggregation_q3"]):
-        services[f"aggregation_q3_{index}"] = aggregator_service(
+    if q3_enabled:
+        for index in range(counts["aggregation_q3"]):
+            services[f"aggregation_q3_{index}"] = aggregator_service(
+                configuration="Q3",
+                index=index,
+                amount=counts["aggregation_q3"],
+                aggregation_prefix=AGGREGATION_Q3_PREFIX,
+                output_queue=JOIN_Q3_QUEUE,
+                sum_amount=counts["sum_q3"],
+                sum_prefix=SUM_Q3_PREFIX,
+            )
+
+        services["join_q3"] = joiner_service(
             configuration="Q3",
-            index=index,
-            amount=counts["aggregation_q3"],
+            input_queue=JOIN_Q3_QUEUE,
+            output_queue=JOIN_Q3_RESULTS_QUEUE,
+            aggregation_amount=counts["aggregation_q3"],
             aggregation_prefix=AGGREGATION_Q3_PREFIX,
-            output_queue=JOIN_Q3_QUEUE,
             sum_amount=counts["sum_q3"],
             sum_prefix=SUM_Q3_PREFIX,
         )
 
-    services["join_q3"] = joiner_service(
-        configuration="Q3",
-        input_queue=JOIN_Q3_QUEUE,
-        output_queue=JOIN_Q3_RESULTS_QUEUE,
-        aggregation_amount=counts["aggregation_q3"],
-        aggregation_prefix=AGGREGATION_Q3_PREFIX,
-        sum_amount=counts["sum_q3"],
-        sum_prefix=SUM_Q3_PREFIX,
-    )
+    if q5_enabled:
+        for index in range(counts["aggregation_q5"]):
+            services[f"aggregation_q5_{index}"] = aggregator_service(
+                configuration="Q5",
+                index=index,
+                amount=counts["aggregation_q5"],
+                aggregation_prefix=AGGREGATION_Q5_PREFIX,
+                output_queue=JOIN_Q5_QUEUE,
+                sum_amount=counts["filter_q5_usd"],
+                sum_prefix="filter_q5_usd",
+            )
 
-    for index in range(counts["aggregation_q5"]):
-        services[f"aggregation_q5_{index}"] = aggregator_service(
+        services["join_q5"] = joiner_service(
             configuration="Q5",
-            index=index,
-            amount=counts["aggregation_q5"],
+            input_queue=JOIN_Q5_QUEUE,
+            output_queue=GATEWAY_Q5_QUEUE,
+            aggregation_amount=counts["aggregation_q5"],
             aggregation_prefix=AGGREGATION_Q5_PREFIX,
-            output_queue=JOIN_Q5_QUEUE,
             sum_amount=counts["filter_q5_usd"],
             sum_prefix="filter_q5_usd",
         )
 
-    services["join_q5"] = joiner_service(
-        configuration="Q5",
-        input_queue=JOIN_Q5_QUEUE,
-        output_queue=GATEWAY_Q5_QUEUE,
-        aggregation_amount=counts["aggregation_q5"],
-        aggregation_prefix=AGGREGATION_Q5_PREFIX,
-        sum_amount=counts["filter_q5_usd"],
-        sum_prefix="filter_q5_usd",
-    )
-
-    for index in range(counts["sg_detector"]):
-        services[f"scatter_gather_detector_{index}"] = scatter_detector_service(
-            index=index,
-            detector_amount=counts["sg_detector"],
-            linker_amount=counts["sg_linker"],
-            min_intermediaries=min_intermediaries,
-        )
-    for index in range(counts["sg_linker"]):
-        services[f"scatter_gather_linker_{index}"] = scatter_linker_service(
-            index=index,
-            detector_amount=counts["sg_detector"],
-        )
-    for index in range(counts["sg_mapper"]):
-        services[f"scatter_gather_mapper_{index}"] = scatter_mapper_service(
-            index=index,
-            mapper_amount=counts["sg_mapper"],
-            linker_amount=counts["sg_linker"],
-        )
+    if q4_enabled:
+        for index in range(counts["sg_detector"]):
+            services[f"scatter_gather_detector_{index}"] = scatter_detector_service(
+                index=index,
+                detector_amount=counts["sg_detector"],
+                linker_amount=counts["sg_linker"],
+                min_intermediaries=min_intermediaries,
+            )
+        for index in range(counts["sg_linker"]):
+            services[f"scatter_gather_linker_{index}"] = scatter_linker_service(
+                index=index,
+                detector_amount=counts["sg_detector"],
+            )
+        for index in range(counts["sg_mapper"]):
+            services[f"scatter_gather_mapper_{index}"] = scatter_mapper_service(
+                index=index,
+                mapper_amount=counts["sg_mapper"],
+                linker_amount=counts["sg_linker"],
+            )
 
     client_dependencies = [
         name for name in services if name not in {"rabbitmq", "gateway"}
@@ -434,22 +499,29 @@ def rabbitmq_service(expose_ports: bool) -> dict:
     return service
 
 
-def gateway_service(file_ingestor_count: int, settings: dict) -> dict:
+def gateway_service(file_ingestor_count: int, settings: dict, enabled_queries: set[str]) -> dict:
+    environment = [
+        f"FILE_INGESTOR_EXCHANGE={FILE_INGESTOR_EXCHANGE}",
+        f"FILE_INGESTOR_PARTITIONS={file_ingestor_count}",
+        f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
+        f"MOM_HOST={MOM_HOST}",
+        "PYTHONUNBUFFERED=1",
+        f"SERVER_HOST={SERVER_HOST}",
+        f"SERVER_PORT={settings.get('server_port', SERVER_PORT)}",
+    ]
+    if "q1" not in enabled_queries:
+        environment.append("GATEWAY_Q1_ENABLED=0")
+    if "q2" in enabled_queries:
+        environment.append(f"GATEWAY_Q2_QUEUE={GATEWAY_Q2_QUEUE}")
+    if "q4" in enabled_queries:
+        environment.append(f"GATEWAY_Q4_QUEUE={GATEWAY_Q4_QUEUE}")
+    if "q5" in enabled_queries:
+        environment.append(f"GATEWAY_Q5_QUEUE={GATEWAY_Q5_QUEUE}")
+
     return base_service(
         "gateway/Dockerfile",
         depends_on=depends_on_rabbitmq(),
-        environment=[
-            f"FILE_INGESTOR_EXCHANGE={FILE_INGESTOR_EXCHANGE}",
-            f"FILE_INGESTOR_PARTITIONS={file_ingestor_count}",
-            f"GATEWAY_Q2_QUEUE={GATEWAY_Q2_QUEUE}",
-            f"GATEWAY_Q4_QUEUE={GATEWAY_Q4_QUEUE}",
-            f"GATEWAY_Q5_QUEUE={GATEWAY_Q5_QUEUE}",
-            f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
-            f"MOM_HOST={MOM_HOST}",
-            "PYTHONUNBUFFERED=1",
-            f"SERVER_HOST={SERVER_HOST}",
-            f"SERVER_PORT={settings.get('server_port', SERVER_PORT)}",
-        ],
+        environment=environment,
     )
 
 
@@ -459,6 +531,8 @@ def file_ingestor_service(index: int, settings: dict) -> dict:
         depends_on=depends_on_rabbitmq(),
         environment=[
             f"ID={index}",
+            f"FILE_INGESTOR_CONTROL_EXCHANGE={FILE_INGESTOR_CONTROL_EXCHANGE}",
+            f"FILE_INGESTOR_RESPONSE_QUEUE_PREFIX={FILE_INGESTOR_RESPONSE_QUEUE_PREFIX}",
             f"LINE_BATCH_INPUT_QUEUE={LINE_BATCH_QUEUE}",
             f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
             f"MOM_HOST={MOM_HOST}",
@@ -468,25 +542,91 @@ def file_ingestor_service(index: int, settings: dict) -> dict:
     )
 
 
-def file_splitter_service(index: int, settings: dict) -> dict:
+def file_splitter_service(index: int, settings: dict, q2_enabled: bool) -> dict:
+    environment = [
+        f"FILE_SPLITTER_INPUT_EXCHANGE={FILE_INGESTOR_EXCHANGE}",
+        f"FILE_SPLITTER_QUEUE_PREFIX={FILE_SPLITTER_QUEUE_PREFIX}",
+        f"ID={index}",
+        f"LINE_BATCH_OUTPUT_QUEUE={LINE_BATCH_QUEUE}",
+        f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
+        f"MAX_BATCH_BYTES={settings.get('chunk_max_bytes', 65536)}",
+        f"MAX_LINE_BYTES={settings.get('max_line_bytes', 16777216)}",
+        f"MOM_HOST={MOM_HOST}",
+        "PYTHONUNBUFFERED=1",
+    ]
+    if q2_enabled:
+        environment.append(
+            f"ACCOUNTS_LINE_BATCH_OUTPUT_QUEUE={ACCOUNTS_LINE_BATCH_QUEUE}"
+        )
+
     return base_service(
         "workers/file_splitter/Dockerfile",
         depends_on=depends_on_rabbitmq(),
+        environment=environment,
+    )
+
+
+def q2_bank_name_joiner_service(
+    q2_input_queue: str,
+    accounts_input_queue: str,
+    output_queue: str,
+    settings: dict,
+) -> dict:
+    return base_service(
+        "workers/q2_bank_name_joiner/Dockerfile",
+        depends_on=depends_on_rabbitmq(),
         environment=[
-            f"FILE_SPLITTER_INPUT_EXCHANGE={FILE_INGESTOR_EXCHANGE}",
-            f"FILE_SPLITTER_QUEUE_PREFIX={FILE_SPLITTER_QUEUE_PREFIX}",
-            f"ID={index}",
-            f"LINE_BATCH_OUTPUT_QUEUE={LINE_BATCH_QUEUE}",
+            f"ACCOUNTS_INPUT_QUEUE={accounts_input_queue}",
+            "ID=0",
             f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
-            f"MAX_BATCH_BYTES={settings.get('chunk_max_bytes', 65536)}",
-            f"MAX_LINE_BYTES={settings.get('max_line_bytes', 16777216)}",
             f"MOM_HOST={MOM_HOST}",
+            f"OUTPUT_QUEUE={output_queue}",
             "PYTHONUNBUFFERED=1",
+            f"Q2_INPUT_QUEUE={q2_input_queue}",
         ],
     )
 
 
-def filter_service(configuration: str, index: int, amount: int, input_queue: str, settings: dict) -> dict:
+def filter_service(
+    configuration: str,
+    index: int,
+    amount: int,
+    input_queue: str,
+    settings: dict,
+    transaction_exchange: str | None = None,
+    enabled_queries: set[str] | None = None,
+) -> dict:
+    enabled_queries = enabled_queries or {"q1", "q2", "q3", "q4", "q5"}
+    environment = [
+        f"CONFIGURATION={configuration}",
+        f"FILTER_AMOUNT={amount}",
+        f"FILTER_DATE_QUEUE={FILTER_DATE_QUEUE}",
+        f"FILTER_PREFIX={FILTER_PREFIX}",
+        f"FILTER_Q1_QUEUE={FILTER_Q1_QUEUE}",
+        f"FILTER_Q3_QUEUE={FILTER_Q3_QUEUE}",
+        f"FILTER_Q5_USD_QUEUE={FILTER_Q5_USD_QUEUE}",
+        f"GATEWAY_QUEUE={GATEWAY_Q1_QUEUE}",
+        f"ID={index}",
+        f"INPUT_QUEUE={input_queue}",
+        f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
+        f"MOM_HOST={MOM_HOST}",
+        "PYTHONUNBUFFERED=1",
+        f"SCATTER_GATHER_MAPPER_QUEUE={SG_MAPPER_QUEUE}",
+        f"SUM_PREFIX={SUM_Q3_PREFIX}",
+        f"SUM_Q2_QUEUE={SUM_Q2_QUEUE}",
+        f"SUM_Q3_QUEUE={SUM_Q3_QUEUE}",
+        f"USD_ENABLE_Q1={int('q1' in enabled_queries)}",
+        f"USD_ENABLE_Q2={int('q2' in enabled_queries)}",
+        f"USD_ENABLE_DATE={int(('q3' in enabled_queries) or ('q4' in enabled_queries))}",
+        f"DATE_ENABLE_Q3={int('q3' in enabled_queries)}",
+        f"DATE_ENABLE_Q4={int('q4' in enabled_queries)}",
+    ]
+    if transaction_exchange:
+        environment.append(f"TRANSACTION_EXCHANGE={transaction_exchange}")
+    prefetch = settings.get("filter_prefetch_count")
+    if prefetch is not None:
+        environment.append(f"PREFETCH_COUNT={prefetch}")
+
     return base_service(
         "workers/filter/Dockerfile",
         depends_on=depends_on_rabbitmq(),
@@ -507,13 +647,16 @@ def rates_service() -> dict:
     }
 
 
-def filter_q5_usd_service(index: int, aggregation_amount: int, input_queue: str) -> dict:
+def filter_q5_usd_service(
+    index: int, amount: int, aggregation_amount: int, input_queue: str
+) -> dict:
     return base_service(
         "workers/filter_q5_usd/Dockerfile",
         depends_on=depends_on_rabbitmq(),
         environment=[
             f"AGGREGATION_AMOUNT={aggregation_amount}",
             f"AGGREGATION_PREFIX={AGGREGATION_Q5_PREFIX}",
+            f"FILTER_Q5_USD_AMOUNT={amount}",
             f"ID={index}",
             f"INPUT_QUEUE={input_queue}",
             f"MOM_HOST={MOM_HOST}",
@@ -532,22 +675,28 @@ def sum_service(
     aggregation_amount: int,
     aggregation_prefix: str,
     input_queue: str,
+    settings: dict,
     sum_prefix: str,
 ) -> dict:
+    environment = [
+        f"AGGREGATION_AMOUNT={aggregation_amount}",
+        f"AGGREGATION_PREFIX={aggregation_prefix}",
+        f"CONFIGURATION={configuration}",
+        f"ID={index}",
+        f"INPUT_QUEUE={input_queue}",
+        f"MOM_HOST={MOM_HOST}",
+        "PYTHONUNBUFFERED=1",
+        f"SUM_AMOUNT={amount}",
+        f"SUM_PREFIX={sum_prefix}",
+    ]
+    prefetch = settings.get("filter_prefetch_count")
+    if prefetch is not None:
+        environment.append(f"PREFETCH_COUNT={prefetch}")
+
     return base_service(
         "workers/sum/Dockerfile",
         depends_on=depends_on_rabbitmq(),
-        environment=[
-            f"AGGREGATION_AMOUNT={aggregation_amount}",
-            f"AGGREGATION_PREFIX={aggregation_prefix}",
-            f"CONFIGURATION={configuration}",
-            f"ID={index}",
-            f"INPUT_QUEUE={input_queue}",
-            f"MOM_HOST={MOM_HOST}",
-            "PYTHONUNBUFFERED=1",
-            f"SUM_AMOUNT={amount}",
-            f"SUM_PREFIX={sum_prefix}",
-        ],
+        environment=environment,
     )
 
 

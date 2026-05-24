@@ -23,7 +23,7 @@ class FileIngestorConfig:
     id: int
     mom_host: str
     queue_name: str
-    transaction_output_queue: str
+    transaction_output_exchange: str
     control_exchange: str
     response_queue_prefix: str
     logging_level: str
@@ -38,10 +38,8 @@ class FileIngestor:
         self._line_batch_serializer = LineBatchSerializer()
         self._control_serializer = ControlMessageSerializer()
 
-        # Consumers/senders. Each thread owns its own connection because pika
-        # BlockingConnection is not thread-safe.
         self._input_queue: MessageMiddlewareQueueRabbitMQ | None = None
-        self._transaction_output: MessageMiddlewareQueueRabbitMQ | None = None
+        self._transaction_output: MessageMiddlewareExchangeRabbitMQ | None = None
         self._control_sender: MessageMiddlewareExchangeRabbitMQ | None = None
         self._control_consumer: MessageMiddlewareExchangeRabbitMQ | None = None
         self._response_consumer: MessageMiddlewareQueueRabbitMQ | None = None
@@ -49,13 +47,9 @@ class FileIngestor:
         self._response_thread: threading.Thread | None = None
         self._closed = False
 
-        # Per-client EOF state, guarded by _lock.
         self._lock = threading.Lock()
-        # transactions this ingestor forwarded for a client.
         self._processed_by_client: dict[int, int] = {}
-        # client_id -> (expected_total, leader_id) once the EOF was broadcast.
         self._pending_eof_by_client: dict[int, tuple[int, int]] = {}
-        # Leader-side accumulators (only meaningful on the elected leader).
         self._leader_processed_by_client: dict[int, int] = {}
         self._leader_forwarded_by_client: dict[int, int] = {}
         self._leader_expected_by_client: dict[int, int] = {}
@@ -112,8 +106,6 @@ class FileIngestor:
                     consumer.stop_consuming()
                 except Exception:
                     pass
-
-
 
     def _process_message(self, message: bytes, ack, nack) -> None:
         try:
@@ -190,7 +182,6 @@ class FileIngestor:
         )
         self._broadcast_eof(client_id, expected_total)
 
-
     def _run_control_consumer(self) -> None:
         self._control_consumer = MessageMiddlewareExchangeRabbitMQ(
             self._config.mom_host,
@@ -240,7 +231,6 @@ class FileIngestor:
                 ack()
                 return
 
-
             self._report_to_leader(
                 client_id,
                 leader_id,
@@ -281,22 +271,22 @@ class FileIngestor:
                 self._packet(
                     MessageType.PROCESSED_ANSWER,
                     client_id,
-                    self._control_payload(self._config.id, forwarded_count, processed_count),
+                    self._control_payload(
+                        self._config.id,
+                        forwarded_count,
+                        processed_count,
+                    ),
                 )
             )
         finally:
             response_queue.close()
-
 
     def _run_response_consumer(self) -> None:
         self._response_consumer = MessageMiddlewareQueueRabbitMQ(
             self._config.mom_host,
             self._response_queue_name,
         )
-        eof_sender = MessageMiddlewareQueueRabbitMQ(
-            self._config.mom_host,
-            self._config.transaction_output_queue,
-        )
+        eof_sender = self._new_transaction_sender()
         try:
             self._response_consumer.start_consuming(
                 lambda message, ack, nack: self._handle_leader_report(
@@ -375,10 +365,9 @@ class FileIngestor:
         self._leader_forwarded_by_client.pop(client_id, None)
         self._leader_expected_by_client.pop(client_id, None)
 
-
     def _send_transaction(
         self,
-        sender: MessageMiddlewareQueueRabbitMQ,
+        sender: MessageMiddlewareExchangeRabbitMQ,
         client_id: int,
         transaction: Transaction,
     ) -> None:
@@ -392,7 +381,7 @@ class FileIngestor:
 
     def _forward_eof_downstream(
         self,
-        sender: MessageMiddlewareQueueRabbitMQ,
+        sender: MessageMiddlewareExchangeRabbitMQ,
         client_id: int,
         expected_total: int,
     ) -> None:
@@ -406,14 +395,16 @@ class FileIngestor:
 
     def _transaction_sender(self) -> MessageMiddlewareExchangeRabbitMQ:
         if self._transaction_output is None:
-            self._transaction_output = MessageMiddlewareExchangeRabbitMQ(
-                host=self._config.mom_host,
-                exchange_name=self._config.transaction_output_exchange,
-                routing_keys=[],
-                exchange_type="fanout",
-            )
+            self._transaction_output = self._new_transaction_sender()
         return self._transaction_output
 
+    def _new_transaction_sender(self) -> MessageMiddlewareExchangeRabbitMQ:
+        return MessageMiddlewareExchangeRabbitMQ(
+            host=self._config.mom_host,
+            exchange_name=self._config.transaction_output_exchange,
+            routing_keys=[],
+            exchange_type="fanout",
+        )
 
     def _packet(self, msg_type: MessageType, client_id: int, payload: bytes) -> bytes:
         return self._internal_protocol.create_packet(
@@ -435,6 +426,7 @@ class FileIngestor:
                 processed_count=processed_count,
             )
         )
+
 
     def _close(self) -> None:
         if self._closed:

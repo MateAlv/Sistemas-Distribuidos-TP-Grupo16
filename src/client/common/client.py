@@ -202,7 +202,7 @@ class Client:
         counts: dict[str, int] = {"q1": 0, "q2": 0, "q4": 0, "q5": 0}
         with open(q1_file, "w") as f1, open(q2_file, "w") as f2, open(q4_file, "w") as f4, open(q5_file, "w") as f5:
             f1.write("date,from_bank,from_account,to_bank,to_account,amount,currency,format\n")
-            f2.write("bank_id,from_account,max_amount\n")
+            f2.write("bank_id,from_account,bank_name,max_amount\n")
             f4.write("from_account,to_account\n")
             f5.write("count\n")
 

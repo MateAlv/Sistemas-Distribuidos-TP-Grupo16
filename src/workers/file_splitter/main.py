@@ -53,6 +53,7 @@ def load_config() -> FileSplitterConfig:
         max_batch_bytes=max_batch_bytes,
         logging_level=os.getenv("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
         input_routing_key=os.getenv("FILE_SPLITTER_INPUT_ROUTING_KEY"),
+        accounts_output_queue=os.getenv("ACCOUNTS_LINE_BATCH_OUTPUT_QUEUE"),
     )
 
 

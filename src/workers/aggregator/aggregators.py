@@ -28,8 +28,8 @@ OUTPUT_QUEUE = os.environ["OUTPUT_QUEUE"]
 #   - "Q2": máximo monto por banco emisor.
 #   - "Q3": promedio (sum / count) por payment_format.
 #   - "Q5": conteo de transacciones (sin Sum: cada DATA suma 1).
-# El productor upstream (Sum líder en Q2/Q3, Filter líder en Q5) envía un
-# único EOF por cliente, así que con un solo EOF alcanza para emitir.
+# El productor upstream envía un único EOF por cliente con la cantidad total
+# de DATA que el aggregator debe haber recibido antes de emitir resultados.
 
 
 class AggregatorWorker:
@@ -51,6 +51,8 @@ class AggregatorWorker:
         self.closed = False
         self.processors_by_client = {}
         self.closed_by_client = set()
+        self.data_count_by_client = {}
+        self.expected_total_by_client = {}
 
     def _processor_for_client(self, client_id: int):
         return self.processors_by_client.setdefault(
@@ -68,6 +70,8 @@ class AggregatorWorker:
     def _emit_results(self, client_id: int) -> None:
         with self.lock:
             processor = self.processors_by_client.pop(client_id, None)
+            data_count = self.data_count_by_client.pop(client_id, 0)
+            expected_total = self.expected_total_by_client.pop(client_id, None)
             self.closed_by_client.add(client_id)
 
         payloads = processor.results() if processor is not None else []
@@ -84,6 +88,34 @@ class AggregatorWorker:
         self.output_queue.send(
             self._packet(MessageType.EOF, client_id, control_payload)
         )
+        logging.info(
+            "aggregation_emit | configuration=%s | id=%s | client_id=%s | "
+            "input_data=%s | expected_total=%s | results=%s",
+            CONFIGURATION,
+            ID,
+            client_id,
+            data_count,
+            expected_total,
+            len(payloads),
+        )
+
+    def _ready_to_emit(self, client_id: int) -> bool:
+        expected_total = self.expected_total_by_client.get(client_id)
+        if expected_total is None:
+            return False
+
+        data_count = self.data_count_by_client.get(client_id, 0)
+        if data_count > expected_total:
+            logging.warning(
+                "aggregation_data_count_exceeded | configuration=%s | id=%s | "
+                "client_id=%s | data_count=%s | expected_total=%s",
+                CONFIGURATION,
+                ID,
+                client_id,
+                data_count,
+                expected_total,
+            )
+        return data_count >= expected_total
 
     def _process_data_message(self, message: bytes) -> None:
         msg_type, client_id, payload = self.internal_protocol.unpack_packet(message)
@@ -100,13 +132,42 @@ class AggregatorWorker:
                 )
                 return
 
+        should_emit = False
+
         if msg_type == MessageType.DATA:
             with self.lock:
                 self._processor_for_client(client_id).accept(payload)
+                self.data_count_by_client[client_id] = (
+                    self.data_count_by_client.get(client_id, 0) + 1
+                )
+                should_emit = self._ready_to_emit(client_id)
+
+            if should_emit:
+                self._emit_results(client_id)
             return
 
         if msg_type == MessageType.EOF:
-            self._emit_results(client_id)
+            control_message = self.control_serializer.deserialize(payload)
+            with self.lock:
+                self.expected_total_by_client[client_id] = (
+                    control_message.expected_total
+                )
+                data_count = self.data_count_by_client.get(client_id, 0)
+                logging.info(
+                    "aggregation_eof | configuration=%s | id=%s | "
+                    "client_id=%s | sender_id=%s | data_count=%s | "
+                    "expected_total=%s",
+                    CONFIGURATION,
+                    ID,
+                    client_id,
+                    control_message.sender_id,
+                    data_count,
+                    control_message.expected_total,
+                )
+                should_emit = self._ready_to_emit(client_id)
+
+            if should_emit:
+                self._emit_results(client_id)
             return
 
         raise ValueError(f"unsupported message type: {msg_type}")

@@ -18,6 +18,7 @@ from .middleware import (
 # Enable for hito 3 (fault tolerance).
 _DURABLE = os.environ.get("RABBITMQ_DURABLE", "false").lower() == "true"
 _DELIVERY_MODE = 2 if _DURABLE else 1
+_PREFETCH_COUNT = int(os.environ.get("PREFETCH_COUNT", "1"))
 
 _CONNECTION_ERRORS = (
     pika.exceptions.AMQPConnectionError,
@@ -54,7 +55,7 @@ class _RabbitMQBase:
     def start_consuming(self, on_message_callback):
         try:
             self._user_callback = on_message_callback
-            self._channel.basic_qos(prefetch_count=1)
+            self._channel.basic_qos(prefetch_count=_PREFETCH_COUNT)
             self._channel.basic_consume(
                 queue=self._queue_name, 
                 on_message_callback=self._on_messaging_callback_adapter)
@@ -282,7 +283,7 @@ class MessageMiddlewareRpcServerRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcServ
             on_request_callback(body, reply)
             ch.basic_ack(delivery_tag=method.delivery_tag)
         
-        self._channel.basic_qos(prefetch_count=1)
+        self._channel.basic_qos(prefetch_count=_PREFETCH_COUNT)
         self._channel.basic_consume(queue=self._request_queue, on_message_callback=_on_request)
         self._consuming = True
         self._channel.start_consuming()

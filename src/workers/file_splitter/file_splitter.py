@@ -34,6 +34,7 @@ class FileSplitterConfig:
     max_batch_bytes: int
     logging_level: str
     input_routing_key: str | None = None
+    accounts_output_queue: str | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ class FileState:
     batch_id: int = 0
     lines_seen: int = 0
     data_lines_emitted: int = 0
+    batches_emitted: int = 0
     chunks_received: int = 0
     bytes_received: int = 0
 
@@ -62,10 +64,12 @@ class FileSplitter:
         self._config = config
         self._consumer: MessageMiddlewareExchangeRabbitMQ | None = None
         self._line_batch_output: MessageMiddlewareQueueRabbitMQ | None = None
+        self._accounts_output: MessageMiddlewareQueueRabbitMQ | None = None
         self._line_batch_serializer = LineBatchSerializer()
         self._control_serializer = ControlMessageSerializer()
         self._internal_protocol = InternalProtocol()
         self._files: dict[FileKey, FileState] = {}
+        self._accounts_batches_by_client: dict[int, int] = {}
         self._chunks_received = 0
         self._eofs_received = 0
 
@@ -99,6 +103,8 @@ class FileSplitter:
             self._consumer.stop_consuming()
         if self._line_batch_output is not None:
             self._line_batch_output.close()
+        if self._accounts_output is not None:
+            self._accounts_output.close()
 
     def _on_message(self, message: bytes, ack, nack) -> None:
         try:
@@ -251,6 +257,9 @@ class FileSplitter:
 
         if state.file_type == FILE_TYPE_TRANSACTIONS:
             self._flush_batch(key, state)
+        elif state.file_type == FILE_TYPE_ACCOUNTS:
+            self._flush_batch(key, state)
+            self._send_accounts_eof(key.client_id)
 
         saw_transactions_file = state.file_type == FILE_TYPE_TRANSACTIONS
         emitted = state.data_lines_emitted if saw_transactions_file else 0
@@ -274,24 +283,25 @@ class FileSplitter:
     def _handle_line(self, key: FileKey, state: FileState, line: bytes) -> None:
         state.lines_seen += 1
 
-        if state.file_type == FILE_TYPE_ACCOUNTS:
-            return
-
-        if state.file_type != FILE_TYPE_TRANSACTIONS:
+        if state.file_type not in (FILE_TYPE_TRANSACTIONS, FILE_TYPE_ACCOUNTS):
             raise ValueError(
                 "unknown file_type for file "
                 f"(client_id={key.client_id}, path={key.rel_path}, "
                 f"file_type={state.file_type})"
             )
 
+        if state.file_type == FILE_TYPE_ACCOUNTS and self._config.accounts_output_queue is None:
+            return
+
         if state.header is None:
             state.header = _parse_header(line)
             logging.debug(
-                "file_splitter_transaction_header | id=%s | client_id=%s | path=%s | "
-                "columns=%s",
+                "file_splitter_header | id=%s | client_id=%s | path=%s | "
+                "file_type=%s | columns=%s",
                 self._config.id,
                 key.client_id,
                 key.rel_path,
+                file_type_name(state.file_type),
                 len(state.header),
             )
             return
@@ -317,12 +327,19 @@ class FileSplitter:
 
         if state.header is None:
             raise ValueError(
-                "missing transaction header "
+                "missing header for file "
                 f"(client_id={key.client_id}, path={key.rel_path})"
             )
 
+        if state.file_type not in (FILE_TYPE_TRANSACTIONS, FILE_TYPE_ACCOUNTS):
+            raise ValueError(
+                "cannot flush batch for unknown file_type "
+                f"(client_id={key.client_id}, path={key.rel_path}, "
+                f"file_type={state.file_type})"
+            )
+
         batch = LineBatch(
-            file_type=FILE_TYPE_TRANSACTIONS,
+            file_type=state.file_type,
             rel_path=key.rel_path,
             batch_id=state.batch_id,
             first_line_number=state.batch_first_line_number,
@@ -335,14 +352,23 @@ class FileSplitter:
             client_id_bytes=key.client_id.to_bytes(16, byteorder="big"),
             payload=payload,
         )
-        self._line_batch_sender().send(message)
+        if state.file_type == FILE_TYPE_ACCOUNTS:
+            self._accounts_sender().send(message)
+            self._accounts_batches_by_client[key.client_id] = (
+                self._accounts_batches_by_client.get(key.client_id, 0) + 1
+            )
+        else:
+            self._line_batch_sender().send(message)
         state.data_lines_emitted += len(batch.lines)
+        state.batches_emitted += 1
 
         logging.info(
-            "file_splitter_batch | id=%s | client_id=%s | path=%s | batch_id=%s | "
-            "first_line_number=%s | lines=%s | bytes=%s | expected_total=%s",
+            "file_splitter_batch | id=%s | client_id=%s | file_type=%s | path=%s | "
+            "batch_id=%s | first_line_number=%s | lines=%s | bytes=%s | "
+            "expected_total=%s",
             self._config.id,
             key.client_id,
+            file_type_name(state.file_type),
             key.rel_path,
             batch.batch_id,
             batch.first_line_number,
@@ -370,6 +396,30 @@ class FileSplitter:
             payload=payload,
         )
         self._line_batch_sender().send(message)
+
+    def _send_accounts_eof(self, client_id: int) -> None:
+        if self._config.accounts_output_queue is None:
+            return
+        batches = self._accounts_batches_by_client.pop(client_id, 0)
+        payload = self._control_serializer.serialize(
+            ControlMessage(
+                sender_id=self._config.id,
+                expected_total=batches,
+                processed_count=0,
+            )
+        )
+        message = self._internal_protocol.create_packet(
+            msg_type=MessageType.EOF,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            payload=payload,
+        )
+        self._accounts_sender().send(message)
+        logging.info(
+            "file_splitter_accounts_eof | id=%s | client_id=%s | expected_total=%s",
+            self._config.id,
+            client_id,
+            batches,
+        )
 
     def _batch_packet_size(
         self,
@@ -405,6 +455,16 @@ class FileSplitter:
                 self._config.output_queue,
             )
         return self._line_batch_output
+
+    def _accounts_sender(self) -> MessageMiddlewareQueueRabbitMQ:
+        if self._accounts_output is None:
+            if self._config.accounts_output_queue is None:
+                raise RuntimeError("accounts_output_queue is not configured")
+            self._accounts_output = MessageMiddlewareQueueRabbitMQ(
+                self._config.mom_host,
+                self._config.accounts_output_queue,
+            )
+        return self._accounts_output
 
     def _input_routing_key(self) -> str:
         return self._config.input_routing_key or file_ingestor_routing_key(

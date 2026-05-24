@@ -5,10 +5,13 @@ Verifica que solo las transacciones que pasan ambos filtros (USD + Q1) llegaron.
 """
 import sys
 import csv
+import os
 from pathlib import Path
 
 Q1_MAX_AMOUNT = 50
 USD_CURRENCY = "US Dollar"
+DATASET_DIR = os.environ.get("Q1_DATASET_DIR", "data/datasets/client-1/LI-Mini")
+DATASET_TRANS = os.environ.get("Q1_DATASET_TRANS", "LI-Mini_Trans.csv")
 
 def validate_q1_results():
     """
@@ -20,7 +23,7 @@ def validate_q1_results():
     cumplan AMBOS filtros y aparezcan en el output.
     """
     # 1. Leer dataset original
-    dataset_file = Path("data/datasets/client-1/LI-Mini/LI-Mini_Trans.csv")
+    dataset_file = Path(DATASET_DIR) / DATASET_TRANS
     output_dir = Path("data/output")
     
     if not dataset_file.exists():
@@ -55,8 +58,8 @@ def validate_q1_results():
     
     expected_count = 0
     for i, tx in enumerate(original_transactions):
-        currency = tx['Receiving Currency'].strip()
-        amount = float(tx['Amount Received'])
+        currency = tx['Payment Currency'].strip()
+        amount = float(tx['Amount Paid'])
         
         # Q1 requires: currency == "US Dollar" AND amount < 50
         if currency == USD_CURRENCY and amount < Q1_MAX_AMOUNT:

@@ -1,8 +1,40 @@
 import struct
 
 from common.constants import C_Q2, C_Q3
+from common.domain.account import Q2BankMaxResult
 from common.domain.partial_result import Q2BankMaxPartial, Q3AverageResult, Q3PaymentFormatPartial
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
+
+
+BANK_NAME_SIZE = 64
+
+
+class Q2BankMaxResultSerializer:
+    BANK_SIZE = TransactionSerializer.BANK_SIZE
+    ACCOUNT_SIZE = TransactionSerializer.ACCOUNT_SIZE
+    BANK_NAME_SIZE = BANK_NAME_SIZE
+    FORMAT = f"!{BANK_SIZE}s{ACCOUNT_SIZE}s{BANK_NAME_SIZE}sd"
+    SIZE = struct.calcsize(FORMAT)
+
+    @classmethod
+    def serialize(cls, result: Q2BankMaxResult) -> bytes:
+        return struct.pack(
+            cls.FORMAT,
+            _encode_fixed(result.bank_id, cls.BANK_SIZE, "bank_id"),
+            _encode_fixed(result.from_account, cls.ACCOUNT_SIZE, "from_account"),
+            _encode_fixed(result.bank_name, cls.BANK_NAME_SIZE, "bank_name"),
+            float(result.amount),
+        )
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> Q2BankMaxResult:
+        bank_id, from_account, bank_name, amount = struct.unpack(cls.FORMAT, data)
+        return Q2BankMaxResult(
+            bank_id=_decode_fixed(bank_id),
+            from_account=_decode_fixed(from_account),
+            bank_name=_decode_fixed(bank_name),
+            amount=amount,
+        )
 
 
 class Q2BankMaxPartialSerializer:

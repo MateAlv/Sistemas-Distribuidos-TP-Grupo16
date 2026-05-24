@@ -206,42 +206,74 @@ test-q1:
 		docker compose -f docker-compose.test.yaml logs filter_q1_0'
 .PHONY: test-q1
 
+Q2_DATASET ?= LI-Mini
+Q2_SUM_WORKERS ?=
 test-q2:
-	bash -lc 'set -euo pipefail; \
-		cleanup() { docker compose -f docker-compose.test.yaml down --volumes --remove-orphans >/dev/null 2>&1; }; \
-		trap cleanup EXIT; \
-		cleanup; \
-		mkdir -p data/output; \
-		echo "Starting Q2 flow test..."; \
-		docker compose -f docker-compose.test.yaml up --build --remove-orphans --detach; \
-		echo "Waiting for services to be ready..."; \
-		sleep 10; \
-		echo "Checking client logs for completion..."; \
-		timeout 120s sh -c '\''docker compose -f docker-compose.test.yaml logs --follow 2>&1 | grep -m1 "client_shutdown\|client_results_finished"'\''; \
-		sleep 5; \
-		echo "Validating Q2 output..."; \
-		python3 scripts/validate_q2_output.py && echo "✓ Q2 test PASSED" || echo "✗ Q2 test FAILED"; \
-		echo ""; \
-		echo "=== client_0 logs ==="; \
-		docker compose -f docker-compose.test.yaml logs client_0; \
-		echo "=== gateway logs ==="; \
-		docker compose -f docker-compose.test.yaml logs gateway; \
-		echo "=== join_q2 logs ==="; \
-		docker compose -f docker-compose.test.yaml logs join_q2; \
-		echo "=== aggregation_q2_0 logs ==="; \
-		docker compose -f docker-compose.test.yaml logs aggregation_q2_0'
-.PHONY: test-q2
-
-Q5_DATASET ?= LI-Mini
-test-q5:
-	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q5-test --dataset $(Q5_DATASET) --test-output $(TEST_COMPOSE_FILE) --skip-output
+	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q2-test --dataset $(Q2_DATASET) \
+		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
+		$(if $(Q2_SUM_WORKERS),--sum-q2-workers $(Q2_SUM_WORKERS)) \
+		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
+		--test-output $(TEST_COMPOSE_FILE) --skip-output
 	@bash -lc 'set -euo pipefail; \
 		compose="docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE)"; \
 		cleanup() { $$compose down --volumes --remove-orphans >/dev/null 2>&1; }; \
-		trap cleanup EXIT; \
+		if [ -z "$(KEEP_CONTAINERS)" ]; then \
+			trap cleanup EXIT; \
+		else \
+			echo "KEEP_CONTAINERS set — containers will remain after test"; \
+			echo "  logs:  $$compose logs -f <service>"; \
+			echo "  down:  $$compose down --volumes --remove-orphans"; \
+		fi; \
 		cleanup; \
 		mkdir -p data/output; \
-		rm -f data/output/results_q5_*.csv; \
+		rm -f data/output/results_q2_*.csv; \
+		start_time=$$SECONDS; \
+		echo "Starting Q2 flow test (preset=q2-test, dataset=$(Q2_DATASET), USD_WORKERS=$(or $(USD_WORKERS),1), Q2_SUM_WORKERS=$(or $(Q2_SUM_WORKERS),1), PREFETCH_COUNT=$(or $(PREFETCH_COUNT),1))..."; \
+		$$compose up --build --remove-orphans --detach; \
+		clients="$$($$compose config --services | grep "^client_" | tr "\n" " ")"; \
+		if [ -z "$$clients" ]; then echo "no client services found" >&2; exit 2; fi; \
+		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
+		elapsed=$$((SECONDS - start_time)); \
+		echo "Client finished in $${elapsed}s"; \
+		Q2_DATASET_DIR=data/datasets/client-1/$(Q2_DATASET) \
+		Q2_DATASET_TRANS=$(Q2_DATASET)_Trans.csv \
+			$(PYTHON) scripts/validate_q2_output.py \
+			&& echo "✓ Q2 test PASSED ($${elapsed}s)" \
+			|| { echo "✗ Q2 test FAILED ($${elapsed}s)"; exit 1; }; \
+		echo ""; \
+		echo "=== client_0 logs ==="; $$compose logs client_0; \
+		echo "=== gateway logs ==="; $$compose logs gateway; \
+		echo "=== sum_q2 logs ==="; $$compose logs $$($$compose config --services | grep "^sum_q2_"); \
+		echo "=== aggregation_q2_0 logs ==="; $$compose logs aggregation_q2_0; \
+		echo "=== join_q2 logs ==="; $$compose logs join_q2; \
+		echo "=== q2_bank_name_joiner logs ==="; $$compose logs q2_bank_name_joiner'
+.PHONY: test-q2
+
+Q5_DATASET ?= LI-Mini
+Q5_FORMAT_WORKERS ?=
+Q5_USD_WORKERS ?=
+USD_WORKERS ?=
+PREFETCH_COUNT ?=
+test-q5:
+	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q5-test --dataset $(Q5_DATASET) \
+		$(if $(Q5_FORMAT_WORKERS),--filter-q5-format-workers $(Q5_FORMAT_WORKERS)) \
+		$(if $(Q5_USD_WORKERS),--filter-q5-usd-workers $(Q5_USD_WORKERS)) \
+		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
+		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
+		--test-output $(TEST_COMPOSE_FILE) --skip-output
+	@bash -lc 'set -euo pipefail; \
+		compose="docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE)"; \
+		cleanup() { $$compose down --volumes --remove-orphans >/dev/null 2>&1; }; \
+		if [ -z "$(KEEP_CONTAINERS)" ]; then \
+			trap cleanup EXIT; \
+		else \
+			echo "KEEP_CONTAINERS set — containers will remain after test"; \
+			echo "  logs:  $$compose logs -f <service>"; \
+			echo "  down:  $$compose down --volumes --remove-orphans"; \
+		fi; \
+		cleanup; \
+		mkdir -p data/output; \
+		rm -f data/output/results_q*.csv; \
 		start_time=$$SECONDS; \
 		echo "Starting Q5 flow test (preset=q5-test, dataset=$(Q5_DATASET))..."; \
 		$$compose up --build --remove-orphans --detach; \
@@ -254,7 +286,7 @@ test-q5:
 		Q5_DATASET_TRANS=$(Q5_DATASET)_Trans.csv \
 			$(PYTHON) scripts/validate_q5_output.py \
 			&& echo "✓ Q5 test PASSED ($${elapsed}s)" \
-			|| echo "✗ Q5 test FAILED ($${elapsed}s)"; \
+			|| { echo "✗ Q5 test FAILED ($${elapsed}s)"; exit 1; }; \
 		echo ""; \
 		echo "=== client_0 logs ==="; $$compose logs client_0; \
 		echo "=== gateway logs ==="; $$compose logs gateway; \

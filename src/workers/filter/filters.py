@@ -37,6 +37,11 @@ SUM_Q3_QUEUE = os.getenv("SUM_Q3_QUEUE", SUM_PREFIX)
 FILTER_AMOUNT = int(os.environ["FILTER_AMOUNT"])
 FILTER_PREFIX = os.environ["FILTER_PREFIX"] + "_" + CONFIGURATION
 CONTROL_EXCHANGE = os.environ["FILTER_PREFIX"] + "_" + "CONTROL_EXCHANGE_" + CONFIGURATION
+USD_ENABLE_Q1 = os.getenv("USD_ENABLE_Q1", "1") != "0"
+USD_ENABLE_Q2 = os.getenv("USD_ENABLE_Q2", "1") != "0"
+USD_ENABLE_DATE = os.getenv("USD_ENABLE_DATE", "1") != "0"
+DATE_ENABLE_Q3 = os.getenv("DATE_ENABLE_Q3", "1") != "0"
+DATE_ENABLE_Q4 = os.getenv("DATE_ENABLE_Q4", "1") != "0"
 
 class FilterWorker:
     def __init__(self):
@@ -70,29 +75,27 @@ class FilterWorker:
             #    - Una para el filtro de Q1
             #    - Una para el sum de Q2
             #    - Una para el filtro de rango de fechas
-            self.output_queues[FILTER_Q1_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                MOM_HOST, FILTER_Q1_QUEUE
-            )
-            self.output_queues[SUM_Q2_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                MOM_HOST, SUM_Q2_QUEUE
-            )
-            self.output_queues[FILTER_DATE_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                MOM_HOST, FILTER_DATE_QUEUE
-            )
+            if USD_ENABLE_Q1:
+                self.output_queues[FILTER_Q1_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                    MOM_HOST, FILTER_Q1_QUEUE
+                )
+            if USD_ENABLE_Q2:
+                self.output_queues[SUM_Q2_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                    MOM_HOST, SUM_Q2_QUEUE
+                )
+            if USD_ENABLE_DATE:
+                self.output_queues[FILTER_DATE_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                    MOM_HOST, FILTER_DATE_QUEUE
+                )
         if CONFIGURATION == C_DATE:
-            # Para el filtro de fecha, se necesitan tres colas de salida:
-            #    - Una para el filtro de Q3
-            #    - Una para el scatter gather mapper de Q4
-            #    - Una para el sum de Q3
-            self.output_queues[FILTER_Q3_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                MOM_HOST, FILTER_Q3_QUEUE
-            )
-            self.output_queues[SCATTER_GATHER_MAPPER_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                MOM_HOST, SCATTER_GATHER_MAPPER_QUEUE
-            )
-            self.output_queues[SUM_Q3_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                MOM_HOST, SUM_Q3_QUEUE
-            )
+            if DATE_ENABLE_Q4:
+                self.output_queues[SCATTER_GATHER_MAPPER_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                    MOM_HOST, SCATTER_GATHER_MAPPER_QUEUE
+                )
+            if DATE_ENABLE_Q3:
+                self.output_queues[SUM_Q3_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                    MOM_HOST, SUM_Q3_QUEUE
+                )
 
         # Seccion de control
         # Primero Identificamos al Lider
@@ -130,6 +133,7 @@ class FilterWorker:
         # Procesados por cliente
         self.processed_by_client = {}
         self.forwarded_by_client = {}
+        self.forwarded_by_output_by_client = {}
         self.closed_by_client = set()
         self.control_responses_by_client = {}
         self.all_processed_by_client = {}
@@ -251,6 +255,8 @@ class FilterWorker:
                 del self.processed_by_client[client_id]
             if client_id in self.forwarded_by_client:
                 del self.forwarded_by_client[client_id]
+            if client_id in self.forwarded_by_output_by_client:
+                del self.forwarded_by_output_by_client[client_id]
             if client_id in self.all_processed_by_client:
                 del self.all_processed_by_client[client_id]
             if client_id in self.all_forwarded_by_client:
@@ -262,6 +268,13 @@ class FilterWorker:
             self.pending_eof_by_client.pop(client_id, None)
             self.closed_by_client.add(client_id)
     
+    def _record_forwarded_output(self, client_id: int, output_name: str):
+        if client_id not in self.forwarded_by_output_by_client:
+            self.forwarded_by_output_by_client[client_id] = {}
+        if output_name not in self.forwarded_by_output_by_client[client_id]:
+            self.forwarded_by_output_by_client[client_id][output_name] = 0
+        self.forwarded_by_output_by_client[client_id][output_name] += 1
+
     def _forward_transaction(self, transaction: Transaction, client_id: int):
         '''
         Envia una transaccion a la cola de salida correspondiente segun la configuracion del worker
@@ -273,52 +286,86 @@ class FilterWorker:
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=payload
         )
+        sent = False
         if CONFIGURATION == C_Q1:
             self.output_queues[GATEWAY_QUEUE].send(message)
+            with self.lock:
+                self._record_forwarded_output(client_id, GATEWAY_QUEUE)
+            sent = True
         if CONFIGURATION == C_Q5:
             self.output_queues[FILTER_Q5_USD_QUEUE].send(message)
+            with self.lock:
+                self._record_forwarded_output(client_id, FILTER_Q5_USD_QUEUE)
+            sent = True
         if CONFIGURATION == C_USD:
-            self.output_queues[FILTER_Q1_QUEUE].send(message)
-            self.output_queues[SUM_Q2_QUEUE].send(message)
-            self.output_queues[FILTER_DATE_QUEUE].send(message)
+            if USD_ENABLE_Q1:
+                self.output_queues[FILTER_Q1_QUEUE].send(message)
+                with self.lock:
+                    self._record_forwarded_output(client_id, FILTER_Q1_QUEUE)
+                sent = True
+            if USD_ENABLE_Q2:
+                self.output_queues[SUM_Q2_QUEUE].send(message)
+                with self.lock:
+                    self._record_forwarded_output(client_id, SUM_Q2_QUEUE)
+                sent = True
+            if USD_ENABLE_DATE:
+                self.output_queues[FILTER_DATE_QUEUE].send(message)
+                with self.lock:
+                    self._record_forwarded_output(client_id, FILTER_DATE_QUEUE)
+                sent = True
         if CONFIGURATION == C_DATE:
-            # Si la transaccion esta entre las fechas 2022-09-06 y 2022-09-15, va al sum de Q3 por sharding
-            # Si la transaccion esta entre las fechas 2022-09-01 y 2022-09-05, va al filtro de Q3
-            # Si la transaccion esta entre las fechas 2022-09-01 y 2022-09-05, va al scatter gather mapper de Q4
-            if self._filter_transaction(transaction, start_date="2022-09-06", end_date="2022-09-15"):
+            if DATE_ENABLE_Q3 and self._filter_transaction(transaction, start_date="2022-09-06", end_date="2022-09-15"):
                 self.output_queues[SUM_Q3_QUEUE].send(message)
-            if self._filter_transaction(transaction, start_date="2022-09-01", end_date="2022-09-05"):
-                self.output_queues[FILTER_Q3_QUEUE].send(message)
+                with self.lock:
+                    self._record_forwarded_output(client_id, SUM_Q3_QUEUE)
+                sent = True
+            if DATE_ENABLE_Q4 and self._filter_transaction(transaction, start_date="2022-09-01", end_date="2022-09-05"):
                 self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(message)
+                with self.lock:
+                    self._record_forwarded_output(client_id, SCATTER_GATHER_MAPPER_QUEUE)
+                sent = True
+        return sent
 
     def _forward_eof(self, client_id: int, expected_total: int):
         '''
         Envia un mensaje de EOF a la cola de salida correspondiente segun la configuracion del worker
         '''
-        message = self.control_serializer.serialize(
-            message_protocol.internal.ControlMessage(
-                sender_id=ID,
-                expected_total=expected_total,
-                processed_count=0
+        def eof_packet(total: int):
+            message = self.control_serializer.serialize(
+                message_protocol.internal.ControlMessage(
+                    sender_id=ID,
+                    expected_total=total,
+                    processed_count=0
+                )
             )
-        )
-        message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.internal.MessageType.EOF,
-            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
-            payload=message
-        )
+            return self.internal_packet_serializer.create_packet(
+                msg_type=message_protocol.internal.MessageType.EOF,
+                client_id_bytes=client_id.to_bytes(16, byteorder='big'),
+                payload=message
+            )
+
         if CONFIGURATION == C_Q1:
-            self.output_queues[GATEWAY_QUEUE].send(message)
+            self.output_queues[GATEWAY_QUEUE].send(eof_packet(expected_total))
         if CONFIGURATION == C_Q5:
-            self.output_queues[FILTER_Q5_USD_QUEUE].send(message)
+            self.output_queues[FILTER_Q5_USD_QUEUE].send(eof_packet(expected_total))
         if CONFIGURATION == C_USD:
-            self.output_queues[FILTER_Q1_QUEUE].send(message)
-            self.output_queues[SUM_Q2_QUEUE].send(message)
-            self.output_queues[FILTER_DATE_QUEUE].send(message)
+            if USD_ENABLE_Q1:
+                self.output_queues[FILTER_Q1_QUEUE].send(eof_packet(expected_total))
+            if USD_ENABLE_Q2:
+                self.output_queues[SUM_Q2_QUEUE].send(eof_packet(expected_total))
+            if USD_ENABLE_DATE:
+                self.output_queues[FILTER_DATE_QUEUE].send(eof_packet(expected_total))
         if CONFIGURATION == C_DATE:
-            self.output_queues[SUM_Q3_QUEUE].send(message)
-            self.output_queues[FILTER_Q3_QUEUE].send(message)
-            self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(message)
+            with self.lock:
+                forwarded_by_output = dict(self.forwarded_by_output_by_client.get(client_id, {}))
+            if DATE_ENABLE_Q3:
+                self.output_queues[SUM_Q3_QUEUE].send(
+                    eof_packet(forwarded_by_output.get(SUM_Q3_QUEUE, 0))
+                )
+            if DATE_ENABLE_Q4:
+                self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(
+                    eof_packet(forwarded_by_output.get(SCATTER_GATHER_MAPPER_QUEUE, 0))
+                )
 
     
     def _filter_transaction(self, transaction: Transaction, start_date=None, end_date=None):
@@ -409,13 +456,14 @@ class FilterWorker:
                     deserialized_count,
                 )
 
-            # Aplicamos el filtro y forwrdeamos
+            # Aplicamos el filtro y forwardeamos
             if CONFIGURATION == C_DATE or self._filter_transaction(transaction):
-                with self.lock:
-                    if client_id not in self.forwarded_by_client:
-                        self.forwarded_by_client[client_id] = 0
-                    self.forwarded_by_client[client_id] += 1
-                self._forward_transaction(transaction, client_id)
+                sent = self._forward_transaction(transaction, client_id)
+                if sent:
+                    with self.lock:
+                        if client_id not in self.forwarded_by_client:
+                            self.forwarded_by_client[client_id] = 0
+                        self.forwarded_by_client[client_id] += 1
 
             # Actualizamos el conteo de procesados para este cliente
             with self.lock:
