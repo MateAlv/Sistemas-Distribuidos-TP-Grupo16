@@ -15,9 +15,10 @@ MOM_HOST = "rabbitmq"
 SERVER_HOST = "gateway"
 SERVER_PORT = 5678
 FILE_INGESTOR_EXCHANGE = "file_ingestor_exchange"
-FILE_INGESTOR_QUEUE_PREFIX = "file_ingestor"
+FILE_SPLITTER_QUEUE_PREFIX = "file_splitter"
 FILTER_PREFIX = "filter"
 
+LINE_BATCH_QUEUE = "line_batch_queue"
 FILTER_USD_QUEUE = "filter_usd_queue"
 FILTER_Q1_QUEUE = "filter_q1_queue"
 FILTER_DATE_QUEUE = "filter_date_queue"
@@ -104,6 +105,11 @@ def validate_config(config: dict, path: Path) -> None:
         )
 
     positive_counts = {
+        "workers.file_splitters": get_nested(
+            workers,
+            "file_splitters",
+            get_nested(workers, "file_ingestors", 1),
+        ),
         "workers.file_ingestors": get_nested(workers, "file_ingestors", 1),
         "workers.filters.usd": get_nested(workers, "filters.usd", 1),
         "workers.filters.q1": get_nested(workers, "filters.q1", 1),
@@ -147,6 +153,13 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
     settings = config.get("settings", {})
 
     counts = {
+        "file_splitters": int(
+            get_nested(
+                workers,
+                "file_splitters",
+                get_nested(workers, "file_ingestors", 1),
+            )
+        ),
         "file_ingestors": int(get_nested(workers, "file_ingestors", 1)),
         "filter_usd": int(get_nested(workers, "filters.usd", 1)),
         "filter_q1": int(get_nested(workers, "filters.q1", 1)),
@@ -163,7 +176,10 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
 
     services = {}
     services["rabbitmq"] = rabbitmq_service(expose_ports)
-    services["gateway"] = gateway_service(counts["file_ingestors"], settings)
+    services["gateway"] = gateway_service(counts["file_splitters"], settings)
+
+    for index in range(counts["file_splitters"]):
+        services[f"file_splitter_{index}"] = file_splitter_service(index, settings)
 
     for index in range(counts["file_ingestors"]):
         services[f"file_ingestor_{index}"] = file_ingestor_service(index, settings)
@@ -321,13 +337,30 @@ def file_ingestor_service(index: int, settings: dict) -> dict:
         "workers/file_ingestor/Dockerfile",
         depends_on=depends_on_rabbitmq(),
         environment=[
-            f"FILE_INGESTOR_EXCHANGE={FILE_INGESTOR_EXCHANGE}",
-            f"FILE_INGESTOR_QUEUE_PREFIX={FILE_INGESTOR_QUEUE_PREFIX}",
             f"ID={index}",
+            f"LINE_BATCH_INPUT_QUEUE={LINE_BATCH_QUEUE}",
             f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
             f"MOM_HOST={MOM_HOST}",
             "PYTHONUNBUFFERED=1",
             f"TRANSACTION_OUTPUT_QUEUE={FILTER_USD_QUEUE}",
+        ],
+    )
+
+
+def file_splitter_service(index: int, settings: dict) -> dict:
+    return base_service(
+        "workers/file_splitter/Dockerfile",
+        depends_on=depends_on_rabbitmq(),
+        environment=[
+            f"FILE_SPLITTER_INPUT_EXCHANGE={FILE_INGESTOR_EXCHANGE}",
+            f"FILE_SPLITTER_QUEUE_PREFIX={FILE_SPLITTER_QUEUE_PREFIX}",
+            f"ID={index}",
+            f"LINE_BATCH_OUTPUT_QUEUE={LINE_BATCH_QUEUE}",
+            f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
+            f"MAX_BATCH_BYTES={settings.get('chunk_max_bytes', 65536)}",
+            f"MAX_LINE_BYTES={settings.get('max_line_bytes', 16777216)}",
+            f"MOM_HOST={MOM_HOST}",
+            "PYTHONUNBUFFERED=1",
         ],
     )
 
