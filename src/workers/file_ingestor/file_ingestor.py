@@ -427,6 +427,7 @@ class FileIngestor:
             )
         )
 
+
     def _close(self) -> None:
         if self._closed:
             return
