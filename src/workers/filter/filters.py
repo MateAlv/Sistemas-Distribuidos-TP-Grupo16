@@ -37,6 +37,9 @@ SUM_Q3_QUEUE = os.getenv("SUM_Q3_QUEUE", SUM_PREFIX)
 FILTER_AMOUNT = int(os.environ["FILTER_AMOUNT"])
 FILTER_PREFIX = os.environ["FILTER_PREFIX"] + "_" + CONFIGURATION
 CONTROL_EXCHANGE = os.environ["FILTER_PREFIX"] + "_" + "CONTROL_EXCHANGE_" + CONFIGURATION
+USD_ENABLE_Q1 = os.getenv("USD_ENABLE_Q1", "1") != "0"
+USD_ENABLE_Q2 = os.getenv("USD_ENABLE_Q2", "1") != "0"
+USD_ENABLE_DATE = os.getenv("USD_ENABLE_DATE", "1") != "0"
 
 class FilterWorker:
     def __init__(self):
@@ -70,15 +73,18 @@ class FilterWorker:
             #    - Una para el filtro de Q1
             #    - Una para el sum de Q2
             #    - Una para el filtro de rango de fechas
-            self.output_queues[FILTER_Q1_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                MOM_HOST, FILTER_Q1_QUEUE
-            )
-            self.output_queues[SUM_Q2_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                MOM_HOST, SUM_Q2_QUEUE
-            )
-            self.output_queues[FILTER_DATE_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                MOM_HOST, FILTER_DATE_QUEUE
-            )
+            if USD_ENABLE_Q1:
+                self.output_queues[FILTER_Q1_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                    MOM_HOST, FILTER_Q1_QUEUE
+                )
+            if USD_ENABLE_Q2:
+                self.output_queues[SUM_Q2_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                    MOM_HOST, SUM_Q2_QUEUE
+                )
+            if USD_ENABLE_DATE:
+                self.output_queues[FILTER_DATE_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                    MOM_HOST, FILTER_DATE_QUEUE
+                )
         if CONFIGURATION == C_DATE:
             # Para el filtro de fecha, se necesitan tres colas de salida:
             #    - Una para el filtro de Q3
@@ -270,9 +276,12 @@ class FilterWorker:
         if CONFIGURATION == C_Q5:
             self.output_queues[FILTER_Q5_USD_QUEUE].send(message)
         if CONFIGURATION == C_USD:
-            self.output_queues[FILTER_Q1_QUEUE].send(message)
-            self.output_queues[SUM_Q2_QUEUE].send(message)
-            self.output_queues[FILTER_DATE_QUEUE].send(message)
+            if USD_ENABLE_Q1:
+                self.output_queues[FILTER_Q1_QUEUE].send(message)
+            if USD_ENABLE_Q2:
+                self.output_queues[SUM_Q2_QUEUE].send(message)
+            if USD_ENABLE_DATE:
+                self.output_queues[FILTER_DATE_QUEUE].send(message)
         if CONFIGURATION == C_DATE:
             # Si la transaccion esta entre las fechas 2022-09-06 y 2022-09-15, va al sum de Q3 por sharding
             # Si la transaccion esta entre las fechas 2022-09-01 y 2022-09-05, va al filtro de Q3
@@ -304,9 +313,12 @@ class FilterWorker:
         if CONFIGURATION == C_Q5:
             self.output_queues[FILTER_Q5_USD_QUEUE].send(message)
         if CONFIGURATION == C_USD:
-            self.output_queues[FILTER_Q1_QUEUE].send(message)
-            self.output_queues[SUM_Q2_QUEUE].send(message)
-            self.output_queues[FILTER_DATE_QUEUE].send(message)
+            if USD_ENABLE_Q1:
+                self.output_queues[FILTER_Q1_QUEUE].send(message)
+            if USD_ENABLE_Q2:
+                self.output_queues[SUM_Q2_QUEUE].send(message)
+            if USD_ENABLE_DATE:
+                self.output_queues[FILTER_DATE_QUEUE].send(message)
         if CONFIGURATION == C_DATE:
             self.output_queues[SUM_Q3_QUEUE].send(message)
             self.output_queues[FILTER_Q3_QUEUE].send(message)

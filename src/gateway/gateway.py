@@ -49,13 +49,23 @@ class Gateway:
         self._pending_eofs_by_client = {}  # client_id -> pending EOF count
         self._client_queues_lock = threading.Lock()
 
+        self._q1_queue_name = (
+            os.environ.get("GATEWAY_QUEUE", "gateway_results_queue")
+            if os.environ.get("GATEWAY_Q1_ENABLED", "1") != "0"
+            else None
+        )
         q2_queue = os.environ.get("GATEWAY_Q2_QUEUE")
         q4_queue = os.environ.get("GATEWAY_Q4_QUEUE")
         q5_queue = os.environ.get("GATEWAY_Q5_QUEUE")
         self._q2_queue_name = q2_queue
         self._q4_queue_name = q4_queue
         self._q5_queue_name = q5_queue
-        self._num_result_queues = 1 + int(bool(q2_queue)) + int(bool(q4_queue)) + int(bool(q5_queue))
+        self._num_result_queues = (
+            int(bool(self._q1_queue_name))
+            + int(bool(q2_queue))
+            + int(bool(q4_queue))
+            + int(bool(q5_queue))
+        )
 
         self._q1_consumer = None
         self._q2_consumer = None
@@ -63,13 +73,15 @@ class Gateway:
         self._q5_consumer = None
 
     def run(self) -> None:
-        q1_queue = os.environ.get("GATEWAY_QUEUE", "gateway_results_queue")
-        self._q1_consumer = MessageMiddlewareQueueRabbitMQ(self._config.mom_host, q1_queue)
-        threading.Thread(
-            target=self._run_result_consumer,
-            args=(self._q1_consumer, self._q1_csv, ""),
-            daemon=True,
-        ).start()
+        if self._q1_queue_name:
+            self._q1_consumer = MessageMiddlewareQueueRabbitMQ(
+                self._config.mom_host, self._q1_queue_name
+            )
+            threading.Thread(
+                target=self._run_result_consumer,
+                args=(self._q1_consumer, self._q1_csv, ""),
+                daemon=True,
+            ).start()
 
         if self._q2_queue_name:
             self._q2_consumer = MessageMiddlewareQueueRabbitMQ(
