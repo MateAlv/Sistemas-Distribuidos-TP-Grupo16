@@ -51,7 +51,7 @@ SG_DETECTOR_EXCHANGE = "sg_detector_exchange"
 def main() -> int:
     args = parse_args()
     if args.preset:
-        config = preset_config(args.preset, args.dataset)
+        config = preset_config(args.preset, args.dataset, args.filter_usd_workers, args.filter_q5_format_workers, args.prefetch)
         config_label = f"preset:{args.preset}"
     else:
         config_path = resolve_path(args.config)
@@ -72,7 +72,7 @@ def main() -> int:
         write_compose(config, output_file, expose_ports=bool_value(config, "rabbitmq_ports", True))
         generated.append(relative(output_file))
     if not args.skip_test_output:
-        write_compose(config, test_output_file, expose_ports=False)
+        write_compose(config, test_output_file, expose_ports=bool_value(config, "rabbitmq_ports", False))
         generated.append(relative(test_output_file))
     print(f"generated {', '.join(generated)} from {config_label}")
     return 0
@@ -85,6 +85,9 @@ def parse_args():
     parser.add_argument("--test-output", help="Path for docker-compose.test.yaml.")
     parser.add_argument("--preset", choices=("q5-test",), help="Use a built-in compose config preset.")
     parser.add_argument("--dataset", default="LI-Mini", help="Dataset name for presets that need one.")
+    parser.add_argument("--filter-usd-workers", type=int, default=None, help="Override filter_usd worker count (preset only).")
+    parser.add_argument("--filter-q5-format-workers", type=int, default=None, help="Override filter_q5_format worker count (preset only).")
+    parser.add_argument("--prefetch", type=int, default=None, help="PREFETCH_COUNT for filter services (preset only).")
     parser.add_argument("--skip-output", action="store_true", help="Do not write docker-compose.yaml.")
     parser.add_argument("--skip-test-output", action="store_true", help="Do not write docker-compose.test.yaml.")
     parser.set_defaults(skip_output=False, skip_test_output=False)
@@ -94,7 +97,7 @@ def parse_args():
     return args
 
 
-def preset_config(name: str, dataset: str) -> dict:
+def preset_config(name: str, dataset: str, filter_usd_workers: int | None = None, filter_q5_format_workers: int | None = None, prefetch: int | None = None) -> dict:
     if name != "q5-test":
         raise ValueError(f"unknown preset: {name}")
 
@@ -111,14 +114,15 @@ def preset_config(name: str, dataset: str) -> dict:
             "result_line_max_bytes": 1048576,
             "connect_timeout_seconds": 30,
             "io_timeout_seconds": 3600,
+            **({"filter_prefetch_count": prefetch} if prefetch is not None else {}),
         },
         "workers": {
             "file_ingestors": 1,
             "filters": {
-                "usd": 1,
+                "usd": filter_usd_workers if filter_usd_workers is not None else 1,
                 "q1": 1,
                 "date": 1,
-                "q5_format": 1,
+                "q5_format": filter_q5_format_workers if filter_q5_format_workers is not None else 1,
                 "q5_usd": 1,
             },
             "sums": {
@@ -483,6 +487,9 @@ def filter_service(
     ]
     if transaction_exchange:
         environment.append(f"TRANSACTION_EXCHANGE={transaction_exchange}")
+    prefetch = settings.get("filter_prefetch_count")
+    if prefetch is not None:
+        environment.append(f"PREFETCH_COUNT={prefetch}")
 
     return base_service(
         "workers/filter/Dockerfile",

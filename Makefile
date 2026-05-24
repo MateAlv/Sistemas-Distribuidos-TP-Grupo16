@@ -233,12 +233,25 @@ test-q2:
 .PHONY: test-q2
 
 Q5_DATASET ?= LI-Mini
+Q5_FORMAT_WORKERS ?=
+USD_WORKERS ?=
+PREFETCH_COUNT ?=
 test-q5:
-	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q5-test --dataset $(Q5_DATASET) --test-output $(TEST_COMPOSE_FILE) --skip-output
+	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q5-test --dataset $(Q5_DATASET) \
+		$(if $(Q5_FORMAT_WORKERS),--filter-q5-format-workers $(Q5_FORMAT_WORKERS)) \
+		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
+		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
+		--test-output $(TEST_COMPOSE_FILE) --skip-output
 	@bash -lc 'set -euo pipefail; \
 		compose="docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE)"; \
 		cleanup() { $$compose down --volumes --remove-orphans >/dev/null 2>&1; }; \
-		trap cleanup EXIT; \
+		if [ -z "$(KEEP_CONTAINERS)" ]; then \
+			trap cleanup EXIT; \
+		else \
+			echo "KEEP_CONTAINERS set — containers will remain after test"; \
+			echo "  logs:  $$compose logs -f <service>"; \
+			echo "  down:  $$compose down --volumes --remove-orphans"; \
+		fi; \
 		cleanup; \
 		mkdir -p data/output; \
 		rm -f data/output/results_q5_*.csv; \
