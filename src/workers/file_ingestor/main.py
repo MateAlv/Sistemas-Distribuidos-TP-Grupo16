@@ -7,10 +7,10 @@ from file_ingestor import FileIngestor, FileIngestorConfig
 
 DEFAULT_ID = 0
 DEFAULT_MOM_HOST = "rabbitmq"
-DEFAULT_FILE_INGESTOR_EXCHANGE = "file_ingestor_exchange"
-DEFAULT_FILE_INGESTOR_QUEUE_PREFIX = "file_ingestor"
-DEFAULT_TRANSACTION_OUTPUT_EXCHANGE = "transaction_fanout_exchange"
-DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024
+DEFAULT_LINE_BATCH_INPUT_QUEUE = "line_batch_queue"
+DEFAULT_TRANSACTION_OUTPUT_QUEUE = "filter_usd_queue"
+DEFAULT_CONTROL_EXCHANGE = "file_ingestor_control"
+DEFAULT_RESPONSE_QUEUE_PREFIX = "file_ingestor_response"
 DEFAULT_LOGGING_LEVEL = "INFO"
 
 
@@ -34,23 +34,22 @@ def load_config() -> FileIngestorConfig:
     if ingestor_id < 0:
         raise ValueError("ID must be greater than or equal to 0")
 
-    max_line_bytes = get_int("MAX_LINE_BYTES", DEFAULT_MAX_LINE_BYTES)
-    if max_line_bytes <= 0:
-        raise ValueError("MAX_LINE_BYTES must be greater than 0")
-
     return FileIngestorConfig(
         id=ingestor_id,
         mom_host=os.getenv("MOM_HOST", DEFAULT_MOM_HOST),
-        file_ingestor_exchange=os.getenv(
-            "FILE_INGESTOR_EXCHANGE",
-            DEFAULT_FILE_INGESTOR_EXCHANGE,
+        queue_name=os.getenv("LINE_BATCH_INPUT_QUEUE", DEFAULT_LINE_BATCH_INPUT_QUEUE),
+        transaction_output_queue=os.getenv(
+            "TRANSACTION_OUTPUT_QUEUE",
+            DEFAULT_TRANSACTION_OUTPUT_QUEUE,
         ),
-        queue_name=file_ingestor_queue_name(ingestor_id),
-        transaction_output_exchange=os.getenv(
-            "TRANSACTION_OUTPUT_EXCHANGE",
-            DEFAULT_TRANSACTION_OUTPUT_EXCHANGE,
+        control_exchange=os.getenv(
+            "FILE_INGESTOR_CONTROL_EXCHANGE",
+            DEFAULT_CONTROL_EXCHANGE,
         ),
-        max_line_bytes=max_line_bytes,
+        response_queue_prefix=os.getenv(
+            "FILE_INGESTOR_RESPONSE_QUEUE_PREFIX",
+            DEFAULT_RESPONSE_QUEUE_PREFIX,
+        ),
         logging_level=os.getenv("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
     )
 
@@ -72,14 +71,6 @@ def get_int(name: str, default: int) -> int:
         return int(value)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer") from exc
-
-
-def file_ingestor_queue_name(ingestor_id: int) -> str:
-    prefix = os.getenv(
-        "FILE_INGESTOR_QUEUE_PREFIX",
-        DEFAULT_FILE_INGESTOR_QUEUE_PREFIX,
-    )
-    return f"{prefix}_{ingestor_id}"
 
 
 if __name__ == "__main__":

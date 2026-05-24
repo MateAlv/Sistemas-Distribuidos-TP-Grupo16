@@ -4,6 +4,10 @@ from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import (
     ControlMessageSerializer,
 )
+from common.message_protocol.internal.line_batch_serializer import (
+    LineBatch,
+    LineBatchSerializer,
+)
 from common.message_protocol.internal.partial_result_serializer import (
     Q2BankMaxPartialSerializer,
     Q3AverageResultSerializer,
@@ -28,6 +32,8 @@ __all__ = [
     "ControlMessage",
     "ControlMessageSerializer",
     "InternalProtocol",
+    "LineBatch",
+    "LineBatchSerializer",
     "MessageType",
     "Q2BankMaxPartialSerializer",
     "Q3AverageResultSerializer",

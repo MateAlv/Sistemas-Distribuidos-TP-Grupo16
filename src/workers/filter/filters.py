@@ -137,6 +137,13 @@ class FilterWorker:
         self.flushed_acks_by_client = {}
         self.first_data_logged_by_client = set()
         self.deserialized_by_client = {}
+        # Solo para el caso de un unico filtro (FILTER_AMOUNT == 1): expected_total
+        # de un EOF que llego pero todavia no se reenvia porque faltan procesar
+        # mensajes. filter_usd es un punto de fan-in (varios file_ingestors
+        # producen DATA en conexiones distintas y el EOF llega por otra), asi que
+        # no se puede confiar en el orden de llegada del EOF: hay que esperar a
+        # processed_by_client >= expected_total antes de cerrar.
+        self.pending_eof_by_client = {}
 
     def _pass_eof_control_message(
             self, client_id, expected_total
@@ -252,6 +259,7 @@ class FilterWorker:
                 del self.control_responses_by_client[client_id]
             if client_id in self.flushed_acks_by_client:
                 del self.flushed_acks_by_client[client_id]
+            self.pending_eof_by_client.pop(client_id, None)
             self.closed_by_client.add(client_id)
     
     def _forward_transaction(self, transaction: Transaction, client_id: int):
@@ -414,7 +422,12 @@ class FilterWorker:
                 if client_id not in self.processed_by_client:
                     self.processed_by_client[client_id] = 0
                 self.processed_by_client[client_id] += 1
-            
+
+            # Si habia un EOF pendiente (caso un unico filtro), intentar cerrarlo
+            # ahora que se proceso un mensaje mas.
+            if FILTER_AMOUNT == 1:
+                self._try_forward_single_filter_eof(client_id)
+
         elif msg_type == message_protocol.internal.MessageType.EOF:
             # Cuando recibimos un EOF:
             # - Si se es el lider, se le avisa a los demas workers que se recibio un EOF 
@@ -429,10 +442,12 @@ class FilterWorker:
             logging.info(f"Received EOF for client {client_id} in filter_{CONFIGURATION}. Expected total: {expected_total}.")
             
             if self.is_leader and FILTER_AMOUNT == 1:
+                # No cerrar al llegar el EOF: registrar el expected_total y cerrar
+                # recien cuando se hayan procesado todos los mensajes esperados
+                # (pueden seguir llegando DATA de file_ingestors mas lentos).
                 with self.lock:
-                    msgs_sent = self.forwarded_by_client.get(client_id, 0)
-                self._forward_eof(client_id, msgs_sent)
-                self._cleanup_client(client_id)
+                    self.pending_eof_by_client[client_id] = expected_total
+                self._try_forward_single_filter_eof(client_id)
             elif self.is_leader:
                 self._request_control_message(client_id, expected_total)
             else:
@@ -440,7 +455,30 @@ class FilterWorker:
         
         else:
             logging.warning(f"Received unknown message type: {msg_type} for filter_{CONFIGURATION}")
-    
+
+    def _try_forward_single_filter_eof(self, client_id):
+        '''
+        Caso FILTER_AMOUNT == 1: reenvia el EOF y limpia el cliente solo cuando ya
+        se procesaron todos los mensajes esperados (processed_count >= expected_total).
+        Usa >= (no ==) para que un mensaje reentregado no impida nunca el cierre.
+        No bloquea: se invoca tras cada DATA y al recibir el EOF.
+        '''
+        with self.lock:
+            expected_total = self.pending_eof_by_client.get(client_id)
+            if expected_total is None:
+                return
+            if self.processed_by_client.get(client_id, 0) < expected_total:
+                return
+            msgs_sent = self.forwarded_by_client.get(client_id, 0)
+            del self.pending_eof_by_client[client_id]
+
+        logging.info(
+            f"All {expected_total} expected messages processed for client {client_id} "
+            f"in filter_{CONFIGURATION}, forwarding EOF (forwarded={msgs_sent})"
+        )
+        self._forward_eof(client_id, msgs_sent)
+        self._cleanup_client(client_id)
+
     def _process_control_message(self, message):
         '''
         Procesa un mensaje de control recibido por el exchange de control, actualizando el estado interno del worker

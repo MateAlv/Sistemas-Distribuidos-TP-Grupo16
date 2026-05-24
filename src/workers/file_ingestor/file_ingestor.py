@@ -1,116 +1,135 @@
-import csv
 import logging
+import threading
 from dataclasses import dataclass
 
 from common.domain.transaction import Transaction
-from common.message_protocol.external import FileChunk
-from common.message_protocol.external.types import (
-    FILE_TYPE_ACCOUNTS,
-    FILE_TYPE_TRANSACTIONS,
-    MSG_CHUNK,
-    MSG_EOF,
-    file_type_name,
-    file_ingestor_routing_key,
+from common.message_protocol.external.types import file_type_name
+from common.message_protocol.internal import (
+    InternalProtocol,
+    LineBatchSerializer,
 )
 from common.message_protocol.internal.common import ControlMessage, MessageType
-from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
-from common.message_protocol.internal import InternalProtocol
+from common.message_protocol.internal.control_message_serializer import (
+    ControlMessageSerializer,
+)
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 from common.middleware import MessageMiddlewareQueueRabbitMQ
 from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
+from workers.file_ingestor.line_batch_parser import LineBatchParser
 
 
 @dataclass(frozen=True)
 class FileIngestorConfig:
     id: int
     mom_host: str
-    file_ingestor_exchange: str
     queue_name: str
-    transaction_output_exchange: str
-    max_line_bytes: int
+    transaction_output_queue: str
+    control_exchange: str
+    response_queue_prefix: str
     logging_level: str
-
-
-@dataclass(frozen=True)
-class FileKey:
-    client_id: int
-    rel_path: str
-
-
-@dataclass
-class FileState:
-    pending: bytes = b""
-    file_type: int | None = None
-    header: tuple[str, ...] | None = None
-    expected_offset: int = 0
-    chunks_received: int = 0
-    lines_received: int = 0
-    transactions_sent: int = 0
-    bytes_received: int = 0
 
 
 class FileIngestor:
     def __init__(self, config: FileIngestorConfig) -> None:
         self._config = config
-        self._stopped = False
-        self._consumer: MessageMiddlewareExchangeRabbitMQ | None = None
-        self._chunks_received = 0
-        self._eofs_received = 0
-        self._files: dict[FileKey, FileState] = {}
-        self._transaction_output: MessageMiddlewareExchangeRabbitMQ | None = None
-        self._transaction_serializer = TransactionSerializer()
-        self._control_serializer = ControlMessageSerializer()
+
         self._internal_protocol = InternalProtocol()
+        self._transaction_serializer = TransactionSerializer()
+        self._line_batch_serializer = LineBatchSerializer()
+        self._control_serializer = ControlMessageSerializer()
+
+        # Consumers/senders. Each thread owns its own connection because pika
+        # BlockingConnection is not thread-safe.
+        self._input_queue: MessageMiddlewareQueueRabbitMQ | None = None
+        self._transaction_output: MessageMiddlewareQueueRabbitMQ | None = None
+        self._control_sender: MessageMiddlewareExchangeRabbitMQ | None = None
+        self._control_consumer: MessageMiddlewareExchangeRabbitMQ | None = None
+        self._response_consumer: MessageMiddlewareQueueRabbitMQ | None = None
+        self._control_thread: threading.Thread | None = None
+        self._response_thread: threading.Thread | None = None
+        self._closed = False
+
+        # Per-client EOF state, guarded by _lock.
+        self._lock = threading.Lock()
+        # transactions this ingestor forwarded for a client.
+        self._processed_by_client: dict[int, int] = {}
+        # client_id -> (expected_total, leader_id) once the EOF was broadcast.
+        self._pending_eof_by_client: dict[int, tuple[int, int]] = {}
+        # Leader-side accumulators (only meaningful on the elected leader).
+        self._leader_processed_by_client: dict[int, int] = {}
+        self._leader_forwarded_by_client: dict[int, int] = {}
+        self._leader_expected_by_client: dict[int, int] = {}
+
+    @property
+    def _response_queue_name(self) -> str:
+        return f"{self._config.response_queue_prefix}_{self._config.id}"
 
     def start(self) -> None:
-        routing_key = file_ingestor_routing_key(self._config.id)
         logging.info(
-            "file_ingestor_start | id=%s | mom_host=%s | exchange=%s | queue=%s | "
-            "routing_key=%s",
+            "file_ingestor_start | id=%s | mom_host=%s | queue=%s | "
+            "control_exchange=%s | response_queue=%s",
             self._config.id,
             self._config.mom_host,
-            self._config.file_ingestor_exchange,
             self._config.queue_name,
-            routing_key,
+            self._config.control_exchange,
+            self._response_queue_name,
         )
 
-        with MessageMiddlewareExchangeRabbitMQ(
-            host=self._config.mom_host,
-            exchange_name=self._config.file_ingestor_exchange,
-            routing_keys=[routing_key],
-            queue_name=self._config.queue_name,
-            exclusive=False,
-        ) as consumer:
-            self._consumer = consumer
-            consumer.start_consuming(self._on_message)
+        self._control_sender = MessageMiddlewareExchangeRabbitMQ(
+            self._config.mom_host,
+            self._config.control_exchange,
+            [self._config.control_exchange],
+        )
+
+        self._control_thread = threading.Thread(target=self._run_control_consumer)
+        self._response_thread = threading.Thread(target=self._run_response_consumer)
+        self._control_thread.start()
+        self._response_thread.start()
+
+        self._input_queue = MessageMiddlewareQueueRabbitMQ(
+            self._config.mom_host,
+            self._config.queue_name,
+        )
+        try:
+            self._input_queue.start_consuming(self._process_message)
+        finally:
+            self.stop()
+            if self._control_thread is not None:
+                self._control_thread.join(timeout=5)
+            if self._response_thread is not None:
+                self._response_thread.join(timeout=5)
+            self._close()
 
     def stop(self) -> None:
-        self._stopped = True
         logging.info("file_ingestor_stop | id=%s", self._config.id)
-        if self._consumer is not None:
-            self._consumer.stop_consuming()
-        if self._transaction_output is not None:
-            self._transaction_output.close()
+        for consumer in (
+            self._input_queue,
+            self._control_consumer,
+            self._response_consumer,
+        ):
+            if consumer is not None:
+                try:
+                    consumer.stop_consuming()
+                except Exception:
+                    pass
 
-    def _on_message(self, message: bytes, ack, nack) -> None:
+
+
+    def _process_message(self, message: bytes, ack, nack) -> None:
         try:
             if not message:
                 raise ValueError("empty file ingestor message")
 
-            msg_type = message[0]
-            payload = message[1:]
+            msg_type, client_id, payload = self._internal_protocol.unpack_packet(message)
 
-            if msg_type == MSG_CHUNK:
-                self._handle_chunk(FileChunk.deserialize(payload))
-                ack()
-                return
+            if msg_type == MessageType.DATA:
+                self._handle_line_batch(client_id, payload)
+            elif msg_type == MessageType.EOF:
+                self._handle_upstream_eof(client_id, payload)
+            else:
+                raise ValueError(f"unknown file ingestor message type: {msg_type}")
 
-            if msg_type == MSG_EOF:
-                self._handle_eof(_deserialize_eof(payload))
-                ack()
-                return
-
-            raise ValueError(f"unknown file ingestor message type: {msg_type}")
+            ack()
         except Exception as e:
             logging.error(
                 "file_ingestor_message_error | id=%s | error=%s",
@@ -119,195 +138,271 @@ class FileIngestor:
             )
             nack()
 
-    def _handle_chunk(self, chunk: FileChunk) -> None:
-        key = FileKey(client_id=chunk.client_id(), rel_path=chunk.path())
-        state = self._files.setdefault(key, FileState())
+    def _handle_line_batch(self, client_id: int, payload: bytes) -> None:
+        batch = self._line_batch_serializer.deserialize(payload)
+        transactions = LineBatchParser.parse(batch)
 
-        if state.file_type is None:
-            state.file_type = chunk.file_type()
-        elif state.file_type != chunk.file_type():
-            raise ValueError(
-                "file_type changed for file "
-                f"(client_id={key.client_id}, path={key.rel_path}, "
-                f"expected={state.file_type}, received={chunk.file_type()})"
+        for transaction in transactions:
+            self._send_transaction(self._transaction_sender(), client_id, transaction)
+
+        forwarded = len(transactions)
+        with self._lock:
+            self._processed_by_client[client_id] = (
+                self._processed_by_client.get(client_id, 0) + forwarded
             )
-
-        if chunk.offset() != state.expected_offset:
-            raise ValueError(
-                "unexpected chunk offset "
-                f"(client_id={key.client_id}, path={key.rel_path}, "
-                f"expected={state.expected_offset}, received={chunk.offset()})"
-            )
-
-        complete_lines, state.pending = _split_complete_lines(
-            state.pending + chunk.payload(),
-            self._config.max_line_bytes,
-        )
-
-        for line in complete_lines:
-            self._handle_line(key, state, line)
-
-        state.expected_offset += chunk.payload_size()
-        state.bytes_received += chunk.payload_size()
-        state.chunks_received += 1
-        self._chunks_received += 1
+            pending = self._pending_eof_by_client.get(client_id)
 
         logging.info(
-            "file_ingestor_chunk | id=%s | client_id=%s | file_type=%s | path=%s | "
-            "offset=%s | payload_bytes=%s | complete_lines=%s | pending_bytes=%s | "
-            "file_chunks=%s | chunks_received=%s",
-            self._config.id,
-            key.client_id,
-            file_type_name(state.file_type),
-            key.rel_path,
-            chunk.offset(),
-            chunk.payload_size(),
-            len(complete_lines),
-            len(state.pending),
-            state.chunks_received,
-            self._chunks_received,
-        )
-
-    def _handle_eof(self, client_id: int) -> None:
-        keys = [key for key in self._files if key.client_id == client_id]
-        transactions_sent = 0
-        saw_transactions_file = False
-
-        for key in keys:
-            state = self._files[key]
-            if state.pending:
-                self._handle_line(key, state, state.pending)
-                state.pending = b""
-
-            if state.file_type == FILE_TYPE_TRANSACTIONS:
-                saw_transactions_file = True
-                transactions_sent += state.transactions_sent
-
-            logging.info(
-                "file_ingestor_file_finished | id=%s | client_id=%s | file_type=%s | "
-                "path=%s | chunks=%s | lines=%s | transactions_sent=%s | bytes=%s",
-                self._config.id,
-                key.client_id,
-                file_type_name(state.file_type),
-                key.rel_path,
-                state.chunks_received,
-                state.lines_received,
-                state.transactions_sent,
-                state.bytes_received,
-            )
-            del self._files[key]
-
-        if saw_transactions_file:
-            self._send_eof(client_id, transactions_sent)
-
-        self._eofs_received += 1
-        logging.info(
-            "file_ingestor_eof | id=%s | client_id=%s | files_finished=%s | "
-            "transactions_file=%s | transactions_sent=%s | eofs_received=%s",
+            "file_ingestor_line_batch | id=%s | client_id=%s | file_type=%s | "
+            "path=%s | batch_id=%s | first_line_number=%s | lines=%s | "
+            "transactions_sent=%s",
             self._config.id,
             client_id,
-            len(keys),
-            saw_transactions_file,
-            transactions_sent,
-            self._eofs_received,
+            file_type_name(batch.file_type),
+            batch.rel_path,
+            batch.batch_id,
+            batch.first_line_number,
+            len(batch.lines),
+            forwarded,
         )
 
-    def _handle_line(self, key: FileKey, state: FileState, line: bytes) -> None:
-        clean_line = line[:-1] if line.endswith(b"\r") else line
-        if not clean_line:
-            return
-
-        _validate_line_size(clean_line, self._config.max_line_bytes)
-        state.lines_received += 1
-
-        if state.file_type == FILE_TYPE_TRANSACTIONS:
-            self._handle_transaction_line(key, state, clean_line)
-            return
-
-        if state.file_type == FILE_TYPE_ACCOUNTS:
-            logging.debug(
-                "file_ingestor_line | id=%s | client_id=%s | file_type=%s | "
-                "path=%s | line_bytes=%s | file_lines=%s",
-                self._config.id,
-                key.client_id,
-                file_type_name(state.file_type),
-                key.rel_path,
-                len(clean_line),
-                state.lines_received,
+        if pending is not None and forwarded:
+            _, leader_id = pending
+            self._report_to_leader(
+                client_id,
+                leader_id,
+                processed_count=forwarded,
+                forwarded_count=forwarded,
             )
-            return
 
-        raise ValueError(
-            "unknown file_type for file "
-            f"(client_id={key.client_id}, path={key.rel_path}, "
-            f"file_type={state.file_type})"
+    def _handle_upstream_eof(self, client_id: int, payload: bytes) -> None:
+        control = self._control_serializer.deserialize(payload)
+        expected_total = control.expected_total
+
+        with self._lock:
+            self._leader_expected_by_client[client_id] = expected_total
+
+        logging.info(
+            "file_ingestor_upstream_eof | id=%s | client_id=%s | expected_total=%s",
+            self._config.id,
+            client_id,
+            expected_total,
         )
+        self._broadcast_eof(client_id, expected_total)
 
-    def _handle_transaction_line(
-        self,
-        key: FileKey,
-        state: FileState,
-        line: bytes,
-    ) -> None:
-        fields: list[str] | None = None
+
+    def _run_control_consumer(self) -> None:
+        self._control_consumer = MessageMiddlewareExchangeRabbitMQ(
+            self._config.mom_host,
+            self._config.control_exchange,
+            [self._config.control_exchange],
+        )
         try:
-            fields = _parse_csv_line(line)
-
-            if state.header is None:
-                state.header = tuple(fields)
-                logging.debug(
-                    "file_ingestor_transaction_header | id=%s | client_id=%s | path=%s | "
-                    "columns=%s",
+            self._control_consumer.start_consuming(self._handle_eof_broadcast)
+        except Exception as e:
+            if not self._closed:
+                logging.error(
+                    "file_ingestor_control_consumer_stopped | id=%s | error=%s",
                     self._config.id,
-                    key.client_id,
-                    key.rel_path,
-                    len(fields),
+                    e,
                 )
+        finally:
+            try:
+                self._control_consumer.close()
+            except Exception:
+                pass
+
+    def _handle_eof_broadcast(self, message: bytes, ack, nack) -> None:
+        try:
+            msg_type, client_id, payload = self._internal_protocol.unpack_packet(message)
+            if msg_type != MessageType.EOF_RECEIVED:
+                raise ValueError(f"unexpected control message type: {msg_type}")
+
+            control = self._control_serializer.deserialize(payload)
+            leader_id = control.sender_id
+
+            with self._lock:
+                duplicate = client_id in self._pending_eof_by_client
+                if not duplicate:
+                    snapshot = self._processed_by_client.get(client_id, 0)
+                    self._pending_eof_by_client[client_id] = (
+                        control.expected_total,
+                        leader_id,
+                    )
+
+            if duplicate:
+                logging.info(
+                    "file_ingestor_duplicate_eof | id=%s | client_id=%s | leader_id=%s",
+                    self._config.id,
+                    client_id,
+                    leader_id,
+                )
+                ack()
                 return
 
-            transaction = _parse_transaction(state.header, fields)
-            self._send_transaction(key.client_id, transaction)
-            state.transactions_sent += 1
-        except ValueError as exc:
-            preview = line.decode("utf-8", errors="replace")[:200]
+
+            self._report_to_leader(
+                client_id,
+                leader_id,
+                processed_count=snapshot,
+                forwarded_count=snapshot,
+            )
+            ack()
+        except Exception as e:
             logging.error(
-                "file_ingestor_parse_error | id=%s | client_id=%s | path=%s | "
-                "file_type=%s | line_number=%s | header_cols=%s | fields_cols=%s | "
-                "error=%s | line_preview=%s",
+                "file_ingestor_control_error | id=%s | error=%s",
                 self._config.id,
-                key.client_id,
-                key.rel_path,
-                file_type_name(state.file_type),
-                state.lines_received,
-                len(state.header) if state.header is not None else "no_header",
-                len(fields) if fields is not None else "csv_parse_failed",
-                exc,
-                preview,
+                e,
             )
+            nack()
 
-    def _send_transaction(self, client_id: int, transaction: Transaction) -> None:
-        payload = self._transaction_serializer.serialize(transaction)
-        message = self._internal_protocol.create_packet(
-            msg_type=MessageType.DATA,
-            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-            payload=payload,
-        )
-        self._transaction_sender().send(message)
-
-    def _send_eof(self, client_id: int, expected_total: int) -> None:
-        payload = self._control_serializer.serialize(
-            ControlMessage(
-                sender_id=self._config.id,
-                expected_total=expected_total,
-                processed_count=0,
+    def _broadcast_eof(self, client_id: int, expected_total: int) -> None:
+        self._control_sender.send(
+            self._packet(
+                MessageType.EOF_RECEIVED,
+                client_id,
+                self._control_payload(self._config.id, expected_total, 0),
             )
         )
-        message = self._internal_protocol.create_packet(
-            msg_type=MessageType.EOF,
-            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-            payload=payload,
+
+    def _report_to_leader(
+        self,
+        client_id: int,
+        leader_id: int,
+        processed_count: int,
+        forwarded_count: int,
+    ) -> None:
+        response_queue = MessageMiddlewareQueueRabbitMQ(
+            self._config.mom_host,
+            f"{self._config.response_queue_prefix}_{leader_id}",
         )
-        self._transaction_sender().send(message)
+        try:
+            response_queue.send(
+                self._packet(
+                    MessageType.PROCESSED_ANSWER,
+                    client_id,
+                    self._control_payload(self._config.id, forwarded_count, processed_count),
+                )
+            )
+        finally:
+            response_queue.close()
+
+
+    def _run_response_consumer(self) -> None:
+        self._response_consumer = MessageMiddlewareQueueRabbitMQ(
+            self._config.mom_host,
+            self._response_queue_name,
+        )
+        eof_sender = MessageMiddlewareQueueRabbitMQ(
+            self._config.mom_host,
+            self._config.transaction_output_queue,
+        )
+        try:
+            self._response_consumer.start_consuming(
+                lambda message, ack, nack: self._handle_leader_report(
+                    message, ack, nack, eof_sender
+                )
+            )
+        except Exception as e:
+            if not self._closed:
+                logging.error(
+                    "file_ingestor_response_consumer_stopped | id=%s | error=%s",
+                    self._config.id,
+                    e,
+                )
+        finally:
+            try:
+                eof_sender.close()
+            except Exception:
+                pass
+            try:
+                self._response_consumer.close()
+            except Exception:
+                pass
+
+    def _handle_leader_report(self, message: bytes, ack, nack, eof_sender) -> None:
+        try:
+            msg_type, client_id, payload = self._internal_protocol.unpack_packet(message)
+            if msg_type != MessageType.PROCESSED_ANSWER:
+                raise ValueError(f"unexpected response message type: {msg_type}")
+
+            control = self._control_serializer.deserialize(payload)
+            should_forward = False
+            forwarded_total = 0
+
+            with self._lock:
+                self._leader_processed_by_client[client_id] = (
+                    self._leader_processed_by_client.get(client_id, 0)
+                    + control.processed_count
+                )
+                self._leader_forwarded_by_client[client_id] = (
+                    self._leader_forwarded_by_client.get(client_id, 0)
+                    + control.expected_total
+                )
+                expected_total = self._leader_expected_by_client.get(client_id)
+
+                if (
+                    expected_total is not None
+                    and self._leader_processed_by_client[client_id] >= expected_total
+                ):
+                    should_forward = True
+                    forwarded_total = self._leader_forwarded_by_client[client_id]
+                    self._cleanup_client(client_id)
+
+            if should_forward:
+                self._forward_eof_downstream(eof_sender, client_id, forwarded_total)
+                logging.info(
+                    "file_ingestor_eof_forwarded | id=%s | client_id=%s | "
+                    "expected_total=%s",
+                    self._config.id,
+                    client_id,
+                    forwarded_total,
+                )
+
+            ack()
+        except Exception as e:
+            logging.error(
+                "file_ingestor_response_error | id=%s | error=%s",
+                self._config.id,
+                e,
+            )
+            nack()
+
+    def _cleanup_client(self, client_id: int) -> None:
+        self._processed_by_client.pop(client_id, None)
+        self._pending_eof_by_client.pop(client_id, None)
+        self._leader_processed_by_client.pop(client_id, None)
+        self._leader_forwarded_by_client.pop(client_id, None)
+        self._leader_expected_by_client.pop(client_id, None)
+
+
+    def _send_transaction(
+        self,
+        sender: MessageMiddlewareQueueRabbitMQ,
+        client_id: int,
+        transaction: Transaction,
+    ) -> None:
+        sender.send(
+            self._packet(
+                MessageType.DATA,
+                client_id,
+                self._transaction_serializer.serialize(transaction),
+            )
+        )
+
+    def _forward_eof_downstream(
+        self,
+        sender: MessageMiddlewareQueueRabbitMQ,
+        client_id: int,
+        expected_total: int,
+    ) -> None:
+        sender.send(
+            self._packet(
+                MessageType.EOF,
+                client_id,
+                self._control_payload(self._config.id, expected_total, 0),
+            )
+        )
 
     def _transaction_sender(self) -> MessageMiddlewareExchangeRabbitMQ:
         if self._transaction_output is None:
@@ -320,73 +415,43 @@ class FileIngestor:
         return self._transaction_output
 
 
-def _deserialize_eof(payload: bytes) -> int:
-    if len(payload) != 4:
-        raise ValueError(f"invalid EOF payload size: {len(payload)}")
-    return int.from_bytes(payload, byteorder="big")
-
-
-def _split_complete_lines(data: bytes, max_line_bytes: int) -> tuple[list[bytes], bytes]:
-    lines = data.split(b"\n")
-    pending = lines[-1]
-    _validate_line_size(pending, max_line_bytes)
-    return lines[:-1], pending
-
-
-def _validate_line_size(line: bytes, max_line_bytes: int) -> None:
-    if len(line) > max_line_bytes:
-        raise ValueError(f"line exceeded max_line_bytes={max_line_bytes}")
-
-
-def _parse_csv_line(line: bytes) -> list[str]:
-    rows = list(csv.reader([line.decode("utf-8")]))
-    if len(rows) != 1:
-        raise ValueError("expected exactly one CSV row")
-    return rows[0]
-
-
-def _parse_transaction(header: tuple[str, ...], fields: list[str]) -> Transaction:
-    if len(fields) != len(header):
-        raise ValueError(
-            f"transaction row has {len(fields)} fields, expected {len(header)}"
+    def _packet(self, msg_type: MessageType, client_id: int, payload: bytes) -> bytes:
+        return self._internal_protocol.create_packet(
+            msg_type=msg_type,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            payload=payload,
         )
 
-    from_bank_idx = _column_index(header, "From Bank")
-    to_bank_idx = _column_index(header, "To Bank")
-    return Transaction(
-        date=_required(fields, _column_index(header, "Timestamp")),
-        from_bank=_required(fields, from_bank_idx),
-        from_account=_required(
-            fields,
-            _column_index_after(header, "Account", from_bank_idx),
-        ),
-        to_bank=_required(fields, to_bank_idx),
-        to_account=_required(
-            fields,
-            _column_index_after(header, "Account", to_bank_idx),
-        ),
-        amount=float(_required(fields, _column_index(header, "Amount Paid"))),
-        currency=_required(fields, _column_index(header, "Payment Currency")),
-        format=_required(fields, _column_index(header, "Payment Format")),
-    )
+    def _control_payload(
+        self,
+        sender_id: int,
+        expected_total: int,
+        processed_count: int,
+    ) -> bytes:
+        return self._control_serializer.serialize(
+            ControlMessage(
+                sender_id=sender_id,
+                expected_total=expected_total,
+                processed_count=processed_count,
+            )
+        )
 
-
-def _column_index(header: tuple[str, ...], name: str) -> int:
-    try:
-        return header.index(name)
-    except ValueError as exc:
-        raise ValueError(f"missing required transaction column: {name}") from exc
-
-
-def _column_index_after(header: tuple[str, ...], name: str, start_index: int) -> int:
-    for index in range(start_index + 1, len(header)):
-        if header[index] == name:
-            return index
-    raise ValueError(f"missing required transaction column after {start_index}: {name}")
-
-
-def _required(fields: list[str], index: int) -> str:
-    value = fields[index].strip()
-    if not value:
-        raise ValueError(f"empty required transaction field at index {index}")
-    return value
+    def _close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for resource in (
+            self._input_queue,
+            self._transaction_output,
+            self._control_sender,
+        ):
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except Exception as e:
+                logging.warning(
+                    "file_ingestor_close_error | id=%s | error=%s",
+                    self._config.id,
+                    e,
+                )

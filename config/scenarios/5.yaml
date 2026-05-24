@@ -12,6 +12,7 @@ settings:
   io_timeout_seconds: 3600
 
 workers:
+  file_splitters: 2
   file_ingestors: 2
   filters:
     usd: 2
