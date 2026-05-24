@@ -30,19 +30,6 @@ class FileIngestorConfig:
 
 
 class FileIngestor:
-    """Stateless line-batch parser with sum-style distributed EOF.
-
-    Batches arrive on a shared work queue consumed by N competing ingestors,
-    so the splitter's EOF (which also rides that queue) is picked up by a single
-    ingestor that becomes the leader for that client. Because batches and the
-    EOF race on the same queue, the leader does not close on EOF arrival: it
-    broadcasts the EOF to all ingestors, every ingestor reports how many
-    transactions it has forwarded (a snapshot now plus a +n increment per
-    in-flight batch), and the leader emits exactly one downstream EOF once the
-    reported total reaches the splitter's expected_total. See the EOF protocol
-    discussion; mirrors workers/sum/sums.py.
-    """
-
     def __init__(self, config: FileIngestorConfig) -> None:
         self._config = config
 
