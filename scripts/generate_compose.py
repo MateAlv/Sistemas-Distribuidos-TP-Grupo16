@@ -497,6 +497,7 @@ def rates_service() -> dict:
         "depends_on": depends_on_rabbitmq(),
         "environment": [
             f"RABBIT_HOST={MOM_HOST}",
+            "RATES_REFERENCE_OVERLAY=q5",
             "PYTHONUNBUFFERED=1",
         ],
         "volumes": ["./data/rates:/data/rates:rw"],

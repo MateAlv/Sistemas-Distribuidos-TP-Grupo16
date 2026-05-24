@@ -9,6 +9,8 @@ import sys
 import csv
 import json
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from common.rates.q5_reference_rates import Q5_REFERENCE_RATES
 
 Q5_START_DATE = "2022-09-01"
 Q5_END_DATE = "2022-09-05"
@@ -54,14 +56,18 @@ CURRENCY_NAME_TO_ISO = {
     "Romanian Leu": "RON",
     "Danish Krone": "DKK",
     "Bulgarian Lev": "BGN",
+    "Bitcoin": "BTC",
 }
 
 
 def load_rates():
     if not RATES_CACHE.exists():
-        return None
+        return dict(Q5_REFERENCE_RATES)
     with open(RATES_CACHE, "r") as f:
-        return json.load(f)
+        rates = json.load(f)
+    for date, day_rates in Q5_REFERENCE_RATES.items():
+        rates.setdefault(date, {}).update(day_rates)
+    return rates
 
 
 def convert_to_usd(amount, currency_name, date, rates):
