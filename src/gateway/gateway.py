@@ -1,4 +1,3 @@
-import hashlib
 import logging
 import select
 import socket
@@ -9,6 +8,8 @@ from dataclasses import dataclass, field
 
 from common.message_protocol.external import FileChunk, FileEof, recv_exact, sendall
 from common.message_protocol.external.types import (
+    FILE_TYPE_ACCOUNTS,
+    FILE_TYPE_TRANSACTIONS,
     HANDSHAKE, FILE_CHUNK, FINISH, ACK,
     MSG_CHUNK, MSG_EOF,
     file_ingestor_routing_key,
@@ -198,7 +199,7 @@ class Gateway:
 
                     partition = partition_for(
                         client_id=session.client_id,
-                        rel_path=chunk.path(),
+                        file_type=chunk.file_type(),
                         partitions=cfg.file_ingestor_partitions,
                     )
                     current_file = (chunk.path(), chunk.file_type(), partition)
@@ -398,9 +399,13 @@ class FileIngestorPublisher:
         return self._senders[partition]
 
 
-def partition_for(client_id: int, rel_path: str, partitions: int) -> int:
+def partition_for(client_id: int, file_type: int, partitions: int) -> int:
     if partitions <= 0:
         raise ValueError("partitions must be greater than 0")
 
-    key = f"{int(client_id)}:{rel_path}".encode("utf-8")
-    return int(hashlib.md5(key).hexdigest(), 16) % partitions
+    base_partition = (int(client_id) * 2) % partitions
+    if file_type == FILE_TYPE_TRANSACTIONS:
+        return base_partition
+    if file_type == FILE_TYPE_ACCOUNTS:
+        return (base_partition + 1) % partitions
+    raise ValueError(f"unknown file_type for partitioning: {file_type}")
