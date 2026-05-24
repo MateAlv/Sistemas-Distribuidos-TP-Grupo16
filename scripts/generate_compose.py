@@ -17,6 +17,8 @@ SERVER_PORT = 5678
 FILE_INGESTOR_EXCHANGE = "file_ingestor_exchange"
 FILE_SPLITTER_QUEUE_PREFIX = "file_splitter"
 TRANSACTION_EXCHANGE = "transaction_fanout_exchange"
+FILE_INGESTOR_CONTROL_EXCHANGE = "file_ingestor_control"
+FILE_INGESTOR_RESPONSE_QUEUE_PREFIX = "file_ingestor_response"
 FILTER_PREFIX = "filter"
 
 LINE_BATCH_QUEUE = "line_batch_queue"
@@ -513,6 +515,8 @@ def file_ingestor_service(index: int, settings: dict) -> dict:
         depends_on=depends_on_rabbitmq(),
         environment=[
             f"ID={index}",
+            f"FILE_INGESTOR_CONTROL_EXCHANGE={FILE_INGESTOR_CONTROL_EXCHANGE}",
+            f"FILE_INGESTOR_RESPONSE_QUEUE_PREFIX={FILE_INGESTOR_RESPONSE_QUEUE_PREFIX}",
             f"LINE_BATCH_INPUT_QUEUE={LINE_BATCH_QUEUE}",
             f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
             f"MOM_HOST={MOM_HOST}",

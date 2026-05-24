@@ -9,6 +9,8 @@ DEFAULT_ID = 0
 DEFAULT_MOM_HOST = "rabbitmq"
 DEFAULT_LINE_BATCH_INPUT_QUEUE = "line_batch_queue"
 DEFAULT_TRANSACTION_OUTPUT_EXCHANGE = "transaction_fanout_exchange"
+DEFAULT_CONTROL_EXCHANGE = "file_ingestor_control"
+DEFAULT_RESPONSE_QUEUE_PREFIX = "file_ingestor_response"
 DEFAULT_LOGGING_LEVEL = "INFO"
 
 
@@ -39,6 +41,14 @@ def load_config() -> FileIngestorConfig:
         transaction_output_exchange=os.getenv(
             "TRANSACTION_OUTPUT_EXCHANGE",
             DEFAULT_TRANSACTION_OUTPUT_EXCHANGE,
+        ),
+        control_exchange=os.getenv(
+            "FILE_INGESTOR_CONTROL_EXCHANGE",
+            DEFAULT_CONTROL_EXCHANGE,
+        ),
+        response_queue_prefix=os.getenv(
+            "FILE_INGESTOR_RESPONSE_QUEUE_PREFIX",
+            DEFAULT_RESPONSE_QUEUE_PREFIX,
         ),
         logging_level=os.getenv("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
     )
