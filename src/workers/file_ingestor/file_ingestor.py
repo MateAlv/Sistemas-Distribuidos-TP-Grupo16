@@ -26,7 +26,7 @@ class FileIngestorConfig:
     mom_host: str
     file_ingestor_exchange: str
     queue_name: str
-    transaction_output_queue: str
+    transaction_output_exchange: str
     max_line_bytes: int
     logging_level: str
 
@@ -57,7 +57,7 @@ class FileIngestor:
         self._chunks_received = 0
         self._eofs_received = 0
         self._files: dict[FileKey, FileState] = {}
-        self._transaction_output: MessageMiddlewareQueueRabbitMQ | None = None
+        self._transaction_output: MessageMiddlewareExchangeRabbitMQ | None = None
         self._transaction_serializer = TransactionSerializer()
         self._control_serializer = ControlMessageSerializer()
         self._internal_protocol = InternalProtocol()
@@ -249,23 +249,41 @@ class FileIngestor:
         state: FileState,
         line: bytes,
     ) -> None:
-        fields = _parse_csv_line(line)
+        fields: list[str] | None = None
+        try:
+            fields = _parse_csv_line(line)
 
-        if state.header is None:
-            state.header = tuple(fields)
-            logging.debug(
-                "file_ingestor_transaction_header | id=%s | client_id=%s | path=%s | "
-                "columns=%s",
+            if state.header is None:
+                state.header = tuple(fields)
+                logging.debug(
+                    "file_ingestor_transaction_header | id=%s | client_id=%s | path=%s | "
+                    "columns=%s",
+                    self._config.id,
+                    key.client_id,
+                    key.rel_path,
+                    len(fields),
+                )
+                return
+
+            transaction = _parse_transaction(state.header, fields)
+            self._send_transaction(key.client_id, transaction)
+            state.transactions_sent += 1
+        except ValueError as exc:
+            preview = line.decode("utf-8", errors="replace")[:200]
+            logging.error(
+                "file_ingestor_parse_error | id=%s | client_id=%s | path=%s | "
+                "file_type=%s | line_number=%s | header_cols=%s | fields_cols=%s | "
+                "error=%s | line_preview=%s",
                 self._config.id,
                 key.client_id,
                 key.rel_path,
-                len(fields),
+                file_type_name(state.file_type),
+                state.lines_received,
+                len(state.header) if state.header is not None else "no_header",
+                len(fields) if fields is not None else "csv_parse_failed",
+                exc,
+                preview,
             )
-            return
-
-        transaction = _parse_transaction(state.header, fields)
-        self._send_transaction(key.client_id, transaction)
-        state.transactions_sent += 1
 
     def _send_transaction(self, client_id: int, transaction: Transaction) -> None:
         payload = self._transaction_serializer.serialize(transaction)
@@ -291,11 +309,13 @@ class FileIngestor:
         )
         self._transaction_sender().send(message)
 
-    def _transaction_sender(self) -> MessageMiddlewareQueueRabbitMQ:
+    def _transaction_sender(self) -> MessageMiddlewareExchangeRabbitMQ:
         if self._transaction_output is None:
-            self._transaction_output = MessageMiddlewareQueueRabbitMQ(
-                self._config.mom_host,
-                self._config.transaction_output_queue,
+            self._transaction_output = MessageMiddlewareExchangeRabbitMQ(
+                host=self._config.mom_host,
+                exchange_name=self._config.transaction_output_exchange,
+                routing_keys=[],
+                exchange_type="fanout",
             )
         return self._transaction_output
 

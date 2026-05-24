@@ -3,12 +3,11 @@ PWD := $(shell pwd)
 MAIN_PROJECT ?= $(shell basename "$(PWD)" | tr '[:upper:]' '[:lower:]')
 COMPOSE_FILE := docker-compose.yaml
 TEST_COMPOSE_FILE := docker-compose.test.yaml
-TEST_PROJECT := mla-forward-pass-test
+TEST_PROJECT := distribuidos-test
 MAIN_CONFIG_FILE ?= config/main-config.yaml
 TEST_CONFIG_FILE ?= config/test-config.yaml
-CONDA_ENV ?= distribuidos
-PYTHON ?= conda run -n $(CONDA_ENV) python
-LOG_PYTHON ?= conda run --no-capture-output -n $(CONDA_ENV) python -u
+PYTHON ?= $(if $(wildcard venv/bin/python),venv/bin/python,python3)
+LOG_PYTHON ?= $(PYTHON) -u
 COMPOSE_SCRIPT := scripts/generate_compose.py
 LOG_FORMATTER := scripts/pretty_logs.py
 LOG_COLOR ?= always
@@ -232,6 +231,39 @@ test-q2:
 		echo "=== aggregation_q2_0 logs ==="; \
 		docker compose -f docker-compose.test.yaml logs aggregation_q2_0'
 .PHONY: test-q2
+
+Q5_DATASET ?= LI-Mini
+test-q5:
+	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q5-test --dataset $(Q5_DATASET) --test-output $(TEST_COMPOSE_FILE) --skip-output
+	@bash -lc 'set -euo pipefail; \
+		compose="docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE)"; \
+		cleanup() { $$compose down --volumes --remove-orphans >/dev/null 2>&1; }; \
+		trap cleanup EXIT; \
+		cleanup; \
+		mkdir -p data/output; \
+		rm -f data/output/results_q5_*.csv; \
+		start_time=$$SECONDS; \
+		echo "Starting Q5 flow test (preset=q5-test, dataset=$(Q5_DATASET))..."; \
+		$$compose up --build --remove-orphans --detach; \
+		clients="$$($$compose config --services | grep "^client_" | tr "\n" " ")"; \
+		if [ -z "$$clients" ]; then echo "no client services found" >&2; exit 2; fi; \
+		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
+		elapsed=$$((SECONDS - start_time)); \
+		echo "Client finished in $${elapsed}s"; \
+		Q5_DATASET_DIR=data/datasets/client-1/$(Q5_DATASET) \
+		Q5_DATASET_TRANS=$(Q5_DATASET)_Trans.csv \
+			$(PYTHON) scripts/validate_q5_output.py \
+			&& echo "✓ Q5 test PASSED ($${elapsed}s)" \
+			|| echo "✗ Q5 test FAILED ($${elapsed}s)"; \
+		echo ""; \
+		echo "=== client_0 logs ==="; $$compose logs client_0; \
+		echo "=== gateway logs ==="; $$compose logs gateway; \
+		echo "=== filter_q5_format_0 logs ==="; $$compose logs filter_q5_format_0; \
+		echo "=== filter_q5_usd_0 logs ==="; $$compose logs filter_q5_usd_0; \
+		echo "=== aggregation_q5_0 logs ==="; $$compose logs aggregation_q5_0; \
+		echo "=== join_q5 logs ==="; $$compose logs join_q5'
+.PHONY: test-q5
+
 
 switch:
 	@echo Escenarios de prueba:
