@@ -30,8 +30,6 @@ class FileIngestorConfig:
 
 
 class FileIngestor:
-    """Stateless line-batch parser with sum-style distributed EOF."""
-
     def __init__(self, config: FileIngestorConfig) -> None:
         self._config = config
 

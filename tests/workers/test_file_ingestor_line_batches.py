@@ -69,7 +69,7 @@ def test_file_ingestor_emits_transactions_from_line_batch():
         ),
     )
 
-    ingestor._on_message(_data_packet(9, batch), calls.ack, calls.nack)
+    ingestor._process_message(_data_packet(9, batch), calls.ack, calls.nack)
 
     assert calls.acks == 1
     assert calls.nacks == 0
@@ -90,9 +90,13 @@ def test_file_ingestor_emits_transactions_from_line_batch():
     assert transaction.format == "Wire"
 
 
-def test_file_ingestor_forwards_eof_control():
+def test_file_ingestor_broadcasts_eof_on_upstream_eof():
+    # The splitter EOF no longer goes straight downstream: the ingestor that
+    # grabs it becomes leader and broadcasts EOF_RECEIVED to the pool.
     sender = RecordingSender()
+    control_sender = RecordingSender()
     ingestor = _ingestor(sender)
+    ingestor._control_sender = control_sender
     calls = AckNack()
     control_payload = ControlMessageSerializer.serialize(
         ControlMessage(sender_id=5, expected_total=42, processed_count=0)
@@ -103,11 +107,46 @@ def test_file_ingestor_forwards_eof_control():
         payload=control_payload,
     )
 
-    ingestor._on_message(message, calls.ack, calls.nack)
+    ingestor._process_message(message, calls.ack, calls.nack)
 
     assert calls.acks == 1
     assert calls.nacks == 0
-    assert sender.messages == [message]
+    # Nothing forwarded downstream on EOF arrival.
+    assert sender.messages == []
+    # Leader recorded the expected total and broadcast EOF_RECEIVED.
+    assert ingestor._leader_expected_by_client[9] == 42
+    assert len(control_sender.messages) == 1
+    msg_type, client_id, payload = InternalProtocol.unpack_packet(control_sender.messages[0])
+    control = ControlMessageSerializer.deserialize(payload)
+    assert msg_type == MessageType.EOF_RECEIVED
+    assert client_id == 9
+    assert control.sender_id == 3  # this ingestor's id
+    assert control.expected_total == 42
+
+
+def test_file_ingestor_leader_forwards_eof_when_total_reached():
+    # Leader accumulates reports and forwards one downstream EOF once the
+    # reported total reaches expected_total (>= guard).
+    eof_sender = RecordingSender()
+    ingestor = _ingestor(RecordingSender())
+    ingestor._leader_expected_by_client[9] = 4
+    calls = AckNack()
+
+    # First report: 2 of 4 -> not yet.
+    ingestor._handle_leader_report(_answer_packet(9, processed=2, forwarded=2), calls.ack, calls.nack, eof_sender)
+    assert eof_sender.messages == []
+    assert calls.acks == 1
+
+    # Second report: total 4 >= 4 -> forward and clean up.
+    ingestor._handle_leader_report(_answer_packet(9, processed=2, forwarded=2), calls.ack, calls.nack, eof_sender)
+    assert calls.acks == 2
+    assert len(eof_sender.messages) == 1
+    msg_type, client_id, payload = InternalProtocol.unpack_packet(eof_sender.messages[0])
+    control = ControlMessageSerializer.deserialize(payload)
+    assert msg_type == MessageType.EOF
+    assert client_id == 9
+    assert control.expected_total == 4  # forwarded total
+    assert 9 not in ingestor._leader_expected_by_client
 
 
 def test_file_ingestor_nacks_invalid_batch_without_output():
@@ -123,7 +162,7 @@ def test_file_ingestor_nacks_invalid_batch_without_output():
         lines=(b"",),
     )
 
-    ingestor._on_message(_data_packet(9, batch), calls.ack, calls.nack)
+    ingestor._process_message(_data_packet(9, batch), calls.ack, calls.nack)
 
     assert calls.acks == 0
     assert calls.nacks == 1
@@ -143,7 +182,7 @@ def test_file_ingestor_ignores_accounts_batches():
         lines=(b"Bank,Account",),
     )
 
-    ingestor._on_message(_data_packet(9, batch), calls.ack, calls.nack)
+    ingestor._process_message(_data_packet(9, batch), calls.ack, calls.nack)
 
     assert calls.acks == 1
     assert calls.nacks == 0
@@ -157,6 +196,8 @@ def _ingestor(sender: RecordingSender) -> FileIngestor:
             mom_host="localhost",
             queue_name="line_batch_queue",
             transaction_output_queue="transactions",
+            control_exchange="file_ingestor_control",
+            response_queue_prefix="file_ingestor_response",
             logging_level="INFO",
         )
     )
@@ -169,4 +210,15 @@ def _data_packet(client_id: int, batch: LineBatch) -> bytes:
         msg_type=MessageType.DATA,
         client_id_bytes=client_id.to_bytes(16, byteorder="big"),
         payload=LineBatchSerializer.serialize(batch),
+    )
+
+
+def _answer_packet(client_id: int, processed: int, forwarded: int) -> bytes:
+    return InternalProtocol.create_packet(
+        msg_type=MessageType.PROCESSED_ANSWER,
+        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        payload=ControlMessageSerializer.serialize(
+            # expected_total carries the forwarded count, matching the protocol.
+            ControlMessage(sender_id=1, expected_total=forwarded, processed_count=processed)
+        ),
     )
