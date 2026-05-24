@@ -195,7 +195,7 @@ def _ingestor(sender: RecordingSender) -> FileIngestor:
             id=3,
             mom_host="localhost",
             queue_name="line_batch_queue",
-            transaction_output_queue="transactions",
+            transaction_output_exchange="transactions",
             control_exchange="file_ingestor_control",
             response_queue_prefix="file_ingestor_response",
             logging_level="INFO",

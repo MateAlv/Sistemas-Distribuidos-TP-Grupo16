@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Valida que el flujo Q2 funcionó correctamente.
-Verifica que el max amount por banco coincide con el dataset original.
+Verifica que el max amount por banco coincide con el dataset original y
+que el nombre del banco corresponde al dataset de cuentas.
 """
 import sys
 import csv
@@ -11,6 +12,24 @@ from pathlib import Path
 USD_CURRENCY = "US Dollar"
 DATASET_DIR = os.environ.get("Q2_DATASET_DIR", "data/datasets/client-1/LI-Mini")
 DATASET_TRANS = os.environ.get("Q2_DATASET_TRANS", "LI-Mini_Trans.csv")
+DATASET_ACCOUNTS = os.environ.get("Q2_DATASET_ACCOUNTS")
+
+
+def _normalize_bank_id(value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if value.isdigit():
+        return str(int(value))
+    return value.lstrip("0") or "0"
+
+
+def _accounts_file_for(dataset_dir: Path, dataset_trans: str) -> Path:
+    if DATASET_ACCOUNTS:
+        return dataset_dir / DATASET_ACCOUNTS
+    if dataset_trans.endswith("_Trans.csv"):
+        return dataset_dir / dataset_trans.replace("_Trans.csv", "_accounts.csv")
+    return dataset_dir / "accounts.csv"
 
 
 def validate_q2_results():
@@ -24,10 +43,14 @@ def validate_q2_results():
     """
     # 1. Leer dataset original
     dataset_file = Path(DATASET_DIR) / DATASET_TRANS
+    accounts_file = _accounts_file_for(Path(DATASET_DIR), DATASET_TRANS)
     output_dir = Path("data/output")
 
     if not dataset_file.exists():
         print(f"ERROR: Dataset not found: {dataset_file}")
+        return False
+    if not accounts_file.exists():
+        print(f"ERROR: Accounts dataset not found: {accounts_file}")
         return False
 
     if not output_dir.exists():
@@ -39,7 +62,22 @@ def validate_q2_results():
         print("ERROR: No Q2 output files found in data/output")
         return False
 
-    # 2. Leer transacciones del dataset original
+    # 2. Leer cuentas para validar el enriquecimiento de Bank Name.
+    bank_names: dict[str, str] = {}
+    try:
+        with open(accounts_file, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                bank_id = _normalize_bank_id(row["Bank ID"])
+                if bank_id:
+                    bank_names.setdefault(bank_id, row["Bank Name"].strip())
+    except Exception as e:
+        print(f"ERROR reading accounts dataset: {e}")
+        return False
+
+    print(f"✓ Dataset has {len(bank_names)} bank account mappings")
+
+    # 3. Leer transacciones del dataset original
     max_by_bank: dict[str, float] = {}
     total_usd = 0
     try:
@@ -79,6 +117,12 @@ def validate_q2_results():
             print("\nERROR: Output file is empty")
             return False
 
+        required_columns = {"bank_id", "from_account", "bank_name", "max_amount"}
+        missing_columns = required_columns - set(reader.fieldnames or [])
+        if missing_columns:
+            print(f"ERROR: Output missing required columns: {sorted(missing_columns)}")
+            return False
+
         # 4. Verificar que hay un registro por banco (sin duplicados)
         seen_banks: set[str] = set()
         for row in output_rows:
@@ -92,6 +136,7 @@ def validate_q2_results():
 
         # 5. Verificar que cada banco tiene el monto máximo correcto
         errors = 0
+        missing_bank_names = 0
         for row in output_rows:
             bank_id = row.get("bank_id", "").strip()
             try:
@@ -113,11 +158,33 @@ def validate_q2_results():
                 )
                 errors += 1
 
+            expected_bank_name = bank_names.get(_normalize_bank_id(bank_id))
+            reported_bank_name = row.get("bank_name", "").strip()
+            if expected_bank_name is None:
+                missing_bank_names += 1
+                if reported_bank_name:
+                    print(
+                        f"ERROR: bank_id='{bank_id}' has no Bank Name in accounts "
+                        f"dataset but output reported {reported_bank_name!r}"
+                    )
+                    errors += 1
+            elif reported_bank_name != expected_bank_name:
+                print(
+                    f"ERROR: bank_id='{bank_id}' bank_name mismatch: "
+                    f"got={reported_bank_name!r}, expected={expected_bank_name!r}"
+                )
+                errors += 1
+
         if errors > 0:
-            print(f"\nERROR: {errors} rows with incorrect max_amount")
+            print(f"\nERROR: {errors} rows with incorrect Q2 values")
             return False
 
-        print("    ✓ All max amounts match the dataset")
+        print("    ✓ All max amounts and mapped bank names match the dataset")
+        if missing_bank_names:
+            print(
+                f"    ✓ {missing_bank_names} banks have no accounts mapping "
+                "and were emitted with an empty bank_name"
+            )
 
         # 6. Verificar count: debe haber un registro por cada banco distinto
         if len(output_rows) != len(max_by_bank):

@@ -245,16 +245,19 @@ test-q2:
 		echo "=== gateway logs ==="; $$compose logs gateway; \
 		echo "=== sum_q2 logs ==="; $$compose logs $$($$compose config --services | grep "^sum_q2_"); \
 		echo "=== aggregation_q2_0 logs ==="; $$compose logs aggregation_q2_0; \
-		echo "=== join_q2 logs ==="; $$compose logs join_q2'
+		echo "=== join_q2 logs ==="; $$compose logs join_q2; \
+		echo "=== q2_bank_name_joiner logs ==="; $$compose logs q2_bank_name_joiner'
 .PHONY: test-q2
 
 Q5_DATASET ?= LI-Mini
 Q5_FORMAT_WORKERS ?=
+Q5_USD_WORKERS ?=
 USD_WORKERS ?=
 PREFETCH_COUNT ?=
 test-q5:
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q5-test --dataset $(Q5_DATASET) \
 		$(if $(Q5_FORMAT_WORKERS),--filter-q5-format-workers $(Q5_FORMAT_WORKERS)) \
+		$(if $(Q5_USD_WORKERS),--filter-q5-usd-workers $(Q5_USD_WORKERS)) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
 		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
 		--test-output $(TEST_COMPOSE_FILE) --skip-output
@@ -270,7 +273,7 @@ test-q5:
 		fi; \
 		cleanup; \
 		mkdir -p data/output; \
-		rm -f data/output/results_q5_*.csv; \
+		rm -f data/output/results_q*.csv; \
 		start_time=$$SECONDS; \
 		echo "Starting Q5 flow test (preset=q5-test, dataset=$(Q5_DATASET))..."; \
 		$$compose up --build --remove-orphans --detach; \
@@ -283,7 +286,7 @@ test-q5:
 		Q5_DATASET_TRANS=$(Q5_DATASET)_Trans.csv \
 			$(PYTHON) scripts/validate_q5_output.py \
 			&& echo "✓ Q5 test PASSED ($${elapsed}s)" \
-			|| echo "✗ Q5 test FAILED ($${elapsed}s)"; \
+			|| { echo "✗ Q5 test FAILED ($${elapsed}s)"; exit 1; }; \
 		echo ""; \
 		echo "=== client_0 logs ==="; $$compose logs client_0; \
 		echo "=== gateway logs ==="; $$compose logs gateway; \

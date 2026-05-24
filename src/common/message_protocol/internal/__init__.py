@@ -10,6 +10,7 @@ from common.message_protocol.internal.line_batch_serializer import (
 )
 from common.message_protocol.internal.partial_result_serializer import (
     Q2BankMaxPartialSerializer,
+    Q2BankMaxResultSerializer,
     Q3AverageResultSerializer,
     Q3PaymentFormatPartialSerializer,
     partial_serializer_for,
@@ -36,6 +37,7 @@ __all__ = [
     "LineBatchSerializer",
     "MessageType",
     "Q2BankMaxPartialSerializer",
+    "Q2BankMaxResultSerializer",
     "Q3AverageResultSerializer",
     "Q3PaymentFormatPartialSerializer",
     "ScatterGatherRelation",

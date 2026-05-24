@@ -17,7 +17,10 @@ from common.message_protocol.external.types import (
 from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ, MessageMiddlewareQueueRabbitMQ
 from common.message_protocol.internal import InternalProtocol, TransactionSerializer
 from common.message_protocol.internal.common import MessageType
-from common.message_protocol.internal.partial_result_serializer import Q2BankMaxPartialSerializer
+from common.message_protocol.internal.partial_result_serializer import (
+    Q2BankMaxPartialSerializer,
+    Q2BankMaxResultSerializer,
+)
 from common.message_protocol.internal.scatter_gather_serializer import ScatterGatherResultSerializer
 from common.message_protocol.internal.aggregation_serializer import AggregationSerializer
 
@@ -367,8 +370,11 @@ class Gateway:
 
     @staticmethod
     def _q2_csv(payload: bytes) -> str:
-        partial = Q2BankMaxPartialSerializer.deserialize(payload)
-        return f"{partial.bank_id},{partial.from_account},{partial.amount}"
+        result = Q2BankMaxResultSerializer.deserialize(payload)
+        return (
+            f"{result.bank_id},{result.from_account},"
+            f"{result.bank_name},{result.amount}"
+        )
 
     @staticmethod
     def _q4_csv(payload: bytes) -> str:

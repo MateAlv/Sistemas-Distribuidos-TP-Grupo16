@@ -52,7 +52,7 @@ _middleware.MessageMiddlewareExchangeRabbitMQ = _DummyMiddlewareExchange
 
 from workers.aggregator.aggregators import AggregatorWorker
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
-from common.message_protocol.internal.common import MessageType
+from common.message_protocol.internal.common import ControlMessage, MessageType
 
 
 class DummyQueue:
@@ -73,10 +73,13 @@ def _send_data(worker, client_id: int, payload: bytes) -> None:
 
 
 def _send_eof(worker, client_id: int) -> None:
+    payload = ControlMessageSerializer.serialize(
+        ControlMessage(sender_id=0, expected_total=worker.data_count_by_client.get(client_id, 0), processed_count=0)
+    )
     packet = worker.internal_protocol.create_packet(
         msg_type=MessageType.EOF,
         client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-        payload=b"",
+        payload=payload,
     )
     worker._process_data_message(packet)
 

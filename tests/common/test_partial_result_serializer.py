@@ -1,9 +1,11 @@
 import pytest
 
 from common.constants import C_Q2, C_Q3
+from common.domain.account import Q2BankMaxResult
 from common.domain.partial_result import Q2BankMaxPartial, Q3PaymentFormatPartial
 from common.message_protocol.internal.partial_result_serializer import (
     Q2BankMaxPartialSerializer,
+    Q2BankMaxResultSerializer,
     Q3PaymentFormatPartialSerializer,
     partial_serializer_for,
 )
@@ -21,6 +23,21 @@ def test_q2_bank_max_partial_roundtrip():
     )
 
     assert recovered == partial
+
+
+def test_q2_bank_max_result_roundtrip():
+    result = Q2BankMaxResult(
+        bank_id="001120",
+        from_account="8006AA910",
+        bank_name="First Bank of Portland",
+        amount=592571.0,
+    )
+
+    recovered = Q2BankMaxResultSerializer.deserialize(
+        Q2BankMaxResultSerializer.serialize(result)
+    )
+
+    assert recovered == result
 
 
 def test_q3_payment_format_partial_roundtrip():
@@ -54,3 +71,15 @@ def test_partial_serializer_rejects_oversized_fields():
 
     with pytest.raises(ValueError):
         Q2BankMaxPartialSerializer.serialize(partial)
+
+
+def test_q2_bank_max_result_serializer_rejects_oversized_bank_name():
+    result = Q2BankMaxResult(
+        bank_id="001120",
+        from_account="8006AA910",
+        bank_name="x" * (Q2BankMaxResultSerializer.BANK_NAME_SIZE + 1),
+        amount=1.0,
+    )
+
+    with pytest.raises(ValueError):
+        Q2BankMaxResultSerializer.serialize(result)
