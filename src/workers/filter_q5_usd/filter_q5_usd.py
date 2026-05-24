@@ -46,6 +46,7 @@ CURRENCY_NAME_TO_ISO = {
     "Romanian Leu": "RON",
     "Danish Krone": "DKK",
     "Bulgarian Lev": "BGN",
+    "Bitcoin": "BTC"
 }
 
 ID = int(os.environ["ID"])
