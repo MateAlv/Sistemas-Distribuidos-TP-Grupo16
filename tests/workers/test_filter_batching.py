@@ -31,7 +31,9 @@ class FakeExchange(FakeQueue):
     pass
 
 
-def _import_filter_module(monkeypatch, configuration: str = "USD"):
+def _import_filter_module(
+    monkeypatch, configuration: str = "USD", filter_amount: str = "1"
+):
     # Solo activamos USD_ENABLE_Q2 para acotar el output del filter al
     # SUM_Q2_QUEUE en este test. El resto se desactiva con flags.
     monkeypatch.setenv("ID", "0")
@@ -47,7 +49,7 @@ def _import_filter_module(monkeypatch, configuration: str = "USD"):
     monkeypatch.setenv("FILTER_Q5_USD_QUEUE", "filter_q5_usd_queue")
     monkeypatch.setenv("SUM_PREFIX", "sum_q3")
     monkeypatch.setenv("SUM_Q3_QUEUE", "sum_q3_queue")
-    monkeypatch.setenv("FILTER_AMOUNT", "1")
+    monkeypatch.setenv("FILTER_AMOUNT", filter_amount)
     monkeypatch.setenv("FILTER_PREFIX", "filter")
     monkeypatch.setenv("USD_ENABLE_Q1", "0")
     monkeypatch.setenv("USD_ENABLE_Q2", "1")
@@ -244,3 +246,89 @@ def test_batcher_isolates_buffers_between_clients(monkeypatch):
     _, client_id, payload = InternalProtocol.unpack_packet(sent_now[1])
     assert client_id == 2
     assert TransactionSerializer.deserialize_batch(payload)[0].amount == 2.0
+
+
+def test_control_path_uses_thread_local_output_publishers(monkeypatch):
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="Q1",
+        filter_amount="2",
+    )
+    worker = module.FilterWorker()
+
+    client_id = 123
+    worker.forwarded_by_client[client_id] = 3
+    thread_control_output = FakeExchange()
+    thread_output_queues = {
+        "gateway_results_queue": FakeQueue(),
+    }
+
+    control_payload = module.message_protocol.internal.ControlMessageSerializer.serialize(
+        module.message_protocol.internal.ControlMessage(
+            sender_id=1, expected_total=0, processed_count=2
+        )
+    )
+    flush_ack = InternalProtocol.create_packet(
+        msg_type=MessageType.FLUSH_ACK,
+        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        payload=control_payload,
+    )
+
+    worker._process_control_message(
+        flush_ack,
+        control_output=thread_control_output,
+        output_queues=thread_output_queues,
+    )
+
+    assert len(worker.output_queues["gateway_results_queue"].sent) == 0
+    assert len(thread_output_queues["gateway_results_queue"].sent) == 1
+    msg_type, sent_client_id, payload = InternalProtocol.unpack_packet(
+        thread_output_queues["gateway_results_queue"].sent[0]
+    )
+    forwarded_eof = module.message_protocol.internal.ControlMessageSerializer.deserialize(
+        payload
+    )
+    assert msg_type == MessageType.EOF
+    assert sent_client_id == client_id
+    assert forwarded_eof.expected_total == 5
+
+
+def test_control_path_uses_thread_local_control_publisher(monkeypatch):
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="Q1",
+        filter_amount="2",
+    )
+    worker = module.FilterWorker()
+
+    client_id = 456
+    worker.processed_by_client[client_id] = 3
+    thread_control_output = FakeExchange()
+    thread_output_queues = {
+        "gateway_results_queue": FakeQueue(),
+    }
+
+    control_payload = module.message_protocol.internal.ControlMessageSerializer.serialize(
+        module.message_protocol.internal.ControlMessage(
+            sender_id=1, expected_total=5, processed_count=2
+        )
+    )
+    processed_answer = InternalProtocol.create_packet(
+        msg_type=MessageType.PROCESSED_ANSWER,
+        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        payload=control_payload,
+    )
+
+    worker._process_control_message(
+        processed_answer,
+        control_output=thread_control_output,
+        output_queues=thread_output_queues,
+    )
+
+    assert len(worker.control_output.sent) == 0
+    assert len(thread_control_output.sent) == 1
+    msg_type, sent_client_id, _ = InternalProtocol.unpack_packet(
+        thread_control_output.sent[0]
+    )
+    assert msg_type == MessageType.FLUSH_ORDER
+    assert sent_client_id == client_id

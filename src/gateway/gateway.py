@@ -389,14 +389,17 @@ class Gateway:
     @staticmethod
     def _q1_csv(payload: bytes) -> str:
         tx = TransactionSerializer().deserialize(payload)
-        return f"{tx.date},{tx.from_bank},{tx.from_account},{tx.to_bank},{tx.to_account},{tx.amount},{tx.currency},{tx.format}"
+        return (
+            f"{tx.from_bank},{tx.from_account},"
+            f"{tx.to_bank},{tx.to_account},{tx.amount:.2f}"
+        )
 
     @staticmethod
     def _q2_csv(payload: bytes) -> str:
         result = Q2BankMaxResultSerializer.deserialize(payload)
         return (
             f"{result.bank_id},{result.from_account},"
-            f"{result.bank_name},{result.amount}"
+            f"{result.bank_name},{result.amount:.2f}"
         )
 
     @staticmethod

@@ -6,12 +6,14 @@ Verifica que solo las transacciones que pasan ambos filtros (USD + Q1) llegaron.
 import sys
 import csv
 import os
+from collections import Counter
 from pathlib import Path
 
 Q1_MAX_AMOUNT = 50
 USD_CURRENCY = "US Dollar"
 DATASET_DIR = os.environ.get("Q1_DATASET_DIR", "data/datasets/client-1/LI-Mini")
 DATASET_TRANS = os.environ.get("Q1_DATASET_TRANS", "LI-Mini_Trans.csv")
+Q1_OUTPUT_COLUMNS = ["From Bank", "Account", "To Bank", "Account.1", "Amount Paid"]
 
 def validate_q1_results():
     """
@@ -45,9 +47,11 @@ def validate_q1_results():
     
     # 4. Leer transacciones del dataset original
     original_transactions = []
+    original_header = []
     try:
         with open(dataset_file, 'r') as f:
-            reader = csv.DictReader(f)
+            reader = csv.reader(f)
+            original_header = next(reader)
             for row in reader:
                 original_transactions.append(row)
     except Exception as e:
@@ -56,14 +60,17 @@ def validate_q1_results():
     
     print(f"✓ Dataset has {len(original_transactions)} transactions")
     
-    expected_count = 0
-    for i, tx in enumerate(original_transactions):
-        currency = tx['Payment Currency'].strip()
-        amount = float(tx['Amount Paid'])
+    original_columns = _transaction_columns(original_header)
+    expected_rows = Counter()
+    for tx in original_transactions:
+        currency = tx[original_columns["currency"]].strip()
+        amount = float(tx[original_columns["amount"]])
         
         # Q1 requires: currency == "US Dollar" AND amount < 50
         if currency == USD_CURRENCY and amount < Q1_MAX_AMOUNT:
-            expected_count += 1
+            expected_rows[_dataset_q1_output_key(tx, original_columns)] += 1
+
+    expected_count = sum(expected_rows.values())
             
     print(f"✓ Found {expected_count} expected transactions in dataset")
     
@@ -75,6 +82,13 @@ def validate_q1_results():
         try:
             with open(output_file, 'r') as f:
                 reader = csv.DictReader(f)
+                if reader.fieldnames != Q1_OUTPUT_COLUMNS:
+                    print(
+                        f"    ERROR: invalid header {reader.fieldnames}, "
+                        f"expected {Q1_OUTPUT_COLUMNS}"
+                    )
+                    mismatches += 1
+                    continue
                 rows = list(reader)
         except Exception as e:
             print(f"ERROR reading {output_file}: {e}")
@@ -90,28 +104,31 @@ def validate_q1_results():
             mismatches += 1
             continue
 
-        # Validar que cada transaction del archivo respeta el filtro Q1.
-        invalid = 0
-        for i, tx in enumerate(rows):
-            if 'currency' in tx and 'amount' in tx:
-                currency = tx['currency'].strip()
-                try:
-                    amount = float(tx['amount'])
-                except ValueError:
-                    print(f"    ERROR: row {i} amount not numeric: {tx['amount']!r}")
-                    invalid += 1
-                    continue
-                if currency != USD_CURRENCY:
-                    print(f"    ERROR: row {i} invalid currency: {currency}")
-                    invalid += 1
-                elif amount >= Q1_MAX_AMOUNT:
-                    print(f"    ERROR: row {i} invalid amount: {amount}")
-                    invalid += 1
+        output_rows = Counter()
+        invalid = False
+        for i, row in enumerate(rows):
+            try:
+                output_rows[_output_q1_key(row)] += 1
+            except ValueError as e:
+                print(f"    ERROR: row {i} invalid amount: {e}")
+                invalid = True
 
-        if invalid > 0:
+        if invalid:
+            mismatches += 1
+        elif output_rows != expected_rows:
+            missing = expected_rows - output_rows
+            unexpected = output_rows - expected_rows
+            print(
+                f"    ERROR: output rows differ from expected "
+                f"(missing={sum(missing.values())}, "
+                f"unexpected={sum(unexpected.values())})"
+            )
             mismatches += 1
         else:
-            print(f"    ✓ matches expected ({expected_count}) and all rows pass Q1")
+            print(
+                f"    ✓ matches expected ({expected_count}) and schema "
+                f"{','.join(Q1_OUTPUT_COLUMNS)}"
+            )
 
     if mismatches > 0:
         print(
@@ -124,6 +141,48 @@ def validate_q1_results():
         f"({expected_count})"
     )
     return True
+
+
+def _transaction_columns(header):
+    from_bank_idx = header.index("From Bank")
+    to_bank_idx = header.index("To Bank")
+    return {
+        "from_bank": from_bank_idx,
+        "from_account": _column_index_after(header, "Account", from_bank_idx),
+        "to_bank": to_bank_idx,
+        "to_account": _column_index_after(header, "Account", to_bank_idx),
+        "amount": header.index("Amount Paid"),
+        "currency": header.index("Payment Currency"),
+    }
+
+
+def _column_index_after(header, name, start_index):
+    for index in range(start_index + 1, len(header)):
+        if header[index] == name:
+            return index
+    raise ValueError(f"missing required column {name!r} after index {start_index}")
+
+
+def _dataset_q1_output_key(row, columns):
+    amount = float(row[columns["amount"]])
+    return (
+        row[columns["from_bank"]].strip(),
+        row[columns["from_account"]].strip(),
+        row[columns["to_bank"]].strip(),
+        row[columns["to_account"]].strip(),
+        f"{amount:.2f}",
+    )
+
+
+def _output_q1_key(row):
+    amount = float(row["Amount Paid"])
+    return (
+        row["From Bank"].strip(),
+        row["Account"].strip(),
+        row["To Bank"].strip(),
+        row["Account.1"].strip(),
+        f"{amount:.2f}",
+    )
 
 if __name__ == "__main__":
     print("=" * 60)

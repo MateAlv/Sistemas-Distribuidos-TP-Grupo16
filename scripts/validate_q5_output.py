@@ -20,6 +20,7 @@ USD_CURRENCY = "US Dollar"
 DATASET_DIR = os.environ.get("Q5_DATASET_DIR", "data/datasets/client-1/LI-Small")
 DATASET_TRANS = os.environ.get("Q5_DATASET_TRANS", "LI-Small_Trans.csv")
 RATES_CACHE = Path("data/rates/cache.json")
+Q5_OUTPUT_COLUMNS = ["count"]
 
 CURRENCY_NAME_TO_ISO = {
     "US Dollar": "USD",
@@ -162,6 +163,13 @@ def validate_q5_results():
         try:
             with open(output_file, "r") as f:
                 reader = csv.DictReader(f)
+                if reader.fieldnames != Q5_OUTPUT_COLUMNS:
+                    print(
+                        f"    ERROR: invalid header {reader.fieldnames}, "
+                        f"expected {Q5_OUTPUT_COLUMNS}"
+                    )
+                    mismatches += 1
+                    continue
                 rows = list(reader)
         except Exception as e:
             print(f"ERROR reading {output_file}: {e}")

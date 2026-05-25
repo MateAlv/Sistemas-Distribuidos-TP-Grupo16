@@ -66,51 +66,14 @@ class FilterWorker:
                 MOM_HOST, INPUT_QUEUE
             )
 
-        # Output Queue o Exchange dependiendo de la configuracion
-        self.output_queues = {}
+        self.output_queues = self._new_output_queues()
         self.output_exchanges = []
-        if CONFIGURATION == C_Q1:
-            # Filtro Q1: la salida es el gateway para devolver datos al cliente
-            self.output_queues[GATEWAY_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                MOM_HOST, GATEWAY_QUEUE
-            )
-        if CONFIGURATION == C_Q5:
-            # Filtro Q5_PF: la salida es la queue para el filtro Q5_USD
-            self.output_queues[FILTER_Q5_USD_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                MOM_HOST, FILTER_Q5_USD_QUEUE
-            )
-        if CONFIGURATION == C_USD:
-            # Para el filtro de tipo de moneda, se necesitan tres colas de salida:
-            #    - Una para el filtro de Q1
-            #    - Una para el sum de Q2
-            #    - Una para el filtro de rango de fechas
-            if USD_ENABLE_Q1:
-                self.output_queues[FILTER_Q1_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                    MOM_HOST, FILTER_Q1_QUEUE
-                )
-            if USD_ENABLE_Q2:
-                self.output_queues[SUM_Q2_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                    MOM_HOST, SUM_Q2_QUEUE
-                )
-            if USD_ENABLE_DATE:
-                self.output_queues[FILTER_DATE_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                    MOM_HOST, FILTER_DATE_QUEUE
-                )
-        if CONFIGURATION == C_DATE:
-            if DATE_ENABLE_Q4:
-                self.output_queues[SCATTER_GATHER_MAPPER_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                    MOM_HOST, SCATTER_GATHER_MAPPER_QUEUE
-                )
-            if DATE_ENABLE_Q3:
-                self.output_queues[SUM_Q3_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                    MOM_HOST, SUM_Q3_QUEUE
-                )
 
         # Seccion de control
         # Primero Identificamos al Lider
         self.is_leader = ID == 0
 
-        # Definicion de las keys de los exchanges 
+        # Definicion de las keys de los exchanges
         self.personal_control_key = f"{FILTER_PREFIX}_{ID}"
         self.output_control_keys = []
         if self.is_leader:
@@ -125,9 +88,7 @@ class FilterWorker:
         )
 
         # Definicion del output del exchange de control
-        self.control_output = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, CONTROL_EXCHANGE, self.output_control_keys
-        )
+        self.control_output = self._new_control_output()
 
         # Serializadores para transacciones y mensajes de control
         self.transaction_serializer = message_protocol.internal.TransactionSerializer()
@@ -166,8 +127,53 @@ class FilterWorker:
         # processed_by_client >= expected_total antes de cerrar.
         self.pending_eof_by_client = {}
 
+    def _new_output_queues(self):
+        output_queues = {}
+        if CONFIGURATION == C_Q1:
+            # Filtro Q1: la salida es el gateway para devolver datos al cliente
+            output_queues[GATEWAY_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                MOM_HOST, GATEWAY_QUEUE
+            )
+        if CONFIGURATION == C_Q5:
+            # Filtro Q5_PF: la salida es la queue para el filtro Q5_USD
+            output_queues[FILTER_Q5_USD_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                MOM_HOST, FILTER_Q5_USD_QUEUE
+            )
+        if CONFIGURATION == C_USD:
+            # Para el filtro de tipo de moneda, se necesitan tres colas de salida:
+            #    - Una para el filtro de Q1
+            #    - Una para el sum de Q2
+            #    - Una para el filtro de rango de fechas
+            if USD_ENABLE_Q1:
+                output_queues[FILTER_Q1_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                    MOM_HOST, FILTER_Q1_QUEUE
+                )
+            if USD_ENABLE_Q2:
+                output_queues[SUM_Q2_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                    MOM_HOST, SUM_Q2_QUEUE
+                )
+            if USD_ENABLE_DATE:
+                output_queues[FILTER_DATE_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                    MOM_HOST, FILTER_DATE_QUEUE
+                )
+        if CONFIGURATION == C_DATE:
+            if DATE_ENABLE_Q4:
+                output_queues[SCATTER_GATHER_MAPPER_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                    MOM_HOST, SCATTER_GATHER_MAPPER_QUEUE
+                )
+            if DATE_ENABLE_Q3:
+                output_queues[SUM_Q3_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                    MOM_HOST, SUM_Q3_QUEUE
+                )
+        return output_queues
+
+    def _new_control_output(self):
+        return middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, CONTROL_EXCHANGE, self.output_control_keys
+        )
+
     def _pass_eof_control_message(
-            self, client_id, expected_total
+            self, client_id, expected_total, control_output=None
     ):
         '''
         Envia un mensaje de control al lider indicando que se recibio un EOF para un cliente, 
@@ -185,10 +191,10 @@ class FilterWorker:
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=message
         )
-        self.control_output.send(message)
+        (control_output or self.control_output).send(message)
 
     def _answer_control_message(
-            self, client_id, expected_total, processed_count
+            self, client_id, expected_total, processed_count, control_output=None
     ):
         '''
         Responde a una solicitud de control con un mensaje indicando
@@ -205,9 +211,9 @@ class FilterWorker:
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=message
         )
-        self.control_output.send(message)
+        (control_output or self.control_output).send(message)
 
-    def _request_control_message(self, client_id, expected_total):
+    def _request_control_message(self, client_id, expected_total, control_output=None):
         '''
         Envia un mensaje de control a los workers correspondientes solicitando informacion de cuantos mensajes han procesado
         '''
@@ -223,9 +229,9 @@ class FilterWorker:
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=message
         )
-        self.control_output.send(message)
+        (control_output or self.control_output).send(message)
 
-    def _flush_control_message(self, client_id):
+    def _flush_control_message(self, client_id, control_output=None):
         '''
         Envia un mensaje de control a los workers correspondientes 
         solicitando que liberen los recursos asociados a un cliente
@@ -242,9 +248,9 @@ class FilterWorker:
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=message
         )
-        self.control_output.send(message)
+        (control_output or self.control_output).send(message)
 
-    def _ack_flush_control_message(self, client_id, msgs_sent):
+    def _ack_flush_control_message(self, client_id, msgs_sent, control_output=None):
         '''
         Envia un mensaje de control a los workers correspondientes 
         indicando que se han liberado los recursos asociados a un cliente
@@ -261,7 +267,7 @@ class FilterWorker:
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
             payload=message
         )
-        self.control_output.send(message)
+        (control_output or self.control_output).send(message)
 
     def _cleanup_client(self, client_id):
         '''
@@ -302,30 +308,33 @@ class FilterWorker:
         )
 
     def _publish_to_queue(
-        self, queue_name: str, client_id: int, transaction: Transaction
+        self, queue_name: str, client_id: int, transaction: Transaction,
+        output_queues=None,
     ) -> None:
+        output_queues = output_queues or self.output_queues
         if self._batcher is not None:
             batch_payload = self._batcher.append(queue_name, client_id, transaction)
             if batch_payload is not None:
-                self.output_queues[queue_name].send(
+                output_queues[queue_name].send(
                     self._data_packet(client_id, batch_payload)
                 )
             return
         payload = self.transaction_serializer.serialize(transaction)
-        self.output_queues[queue_name].send(self._data_packet(client_id, payload))
+        output_queues[queue_name].send(self._data_packet(client_id, payload))
 
-    def _flush_batcher_for_client(self, client_id: int) -> None:
+    def _flush_batcher_for_client(self, client_id: int, output_queues=None) -> None:
         if self._batcher is None:
             return
+        output_queues = output_queues or self.output_queues
         for queue_name, payload in self._batcher.drain_client(client_id).items():
-            self.output_queues[queue_name].send(self._data_packet(client_id, payload))
+            output_queues[queue_name].send(self._data_packet(client_id, payload))
             logging.info(
                 "filter_batcher_flush | filter=%s | id=%s | client_id=%s | "
                 "queue=%s | bytes=%s",
                 CONFIGURATION, ID, client_id, queue_name, len(payload),
             )
 
-    def _forward_transaction(self, transaction: Transaction, client_id: int):
+    def _forward_transaction(self, transaction: Transaction, client_id: int, output_queues=None):
         '''
         Envia una transaccion a la(s) cola(s) de salida segun la configuracion.
         Devuelve True si fue forwardeada a al menos una cola.
@@ -336,45 +345,45 @@ class FilterWorker:
         )
         sent = False
         if CONFIGURATION == C_Q1:
-            self._publish_to_queue(GATEWAY_QUEUE, client_id, transaction)
+            self._publish_to_queue(GATEWAY_QUEUE, client_id, transaction, output_queues)
             with self.lock:
                 self._record_forwarded_output(client_id, GATEWAY_QUEUE)
             sent = True
         if CONFIGURATION == C_Q5:
-            self._publish_to_queue(FILTER_Q5_USD_QUEUE, client_id, transaction)
+            self._publish_to_queue(FILTER_Q5_USD_QUEUE, client_id, transaction, output_queues)
             with self.lock:
                 self._record_forwarded_output(client_id, FILTER_Q5_USD_QUEUE)
             sent = True
         if CONFIGURATION == C_USD:
             if USD_ENABLE_Q1:
-                self._publish_to_queue(FILTER_Q1_QUEUE, client_id, transaction)
+                self._publish_to_queue(FILTER_Q1_QUEUE, client_id, transaction, output_queues)
                 with self.lock:
                     self._record_forwarded_output(client_id, FILTER_Q1_QUEUE)
                 sent = True
             if USD_ENABLE_Q2:
-                self._publish_to_queue(SUM_Q2_QUEUE, client_id, transaction)
+                self._publish_to_queue(SUM_Q2_QUEUE, client_id, transaction, output_queues)
                 with self.lock:
                     self._record_forwarded_output(client_id, SUM_Q2_QUEUE)
                 sent = True
             if USD_ENABLE_DATE:
-                self._publish_to_queue(FILTER_DATE_QUEUE, client_id, transaction)
+                self._publish_to_queue(FILTER_DATE_QUEUE, client_id, transaction, output_queues)
                 with self.lock:
                     self._record_forwarded_output(client_id, FILTER_DATE_QUEUE)
                 sent = True
         if CONFIGURATION == C_DATE:
             if DATE_ENABLE_Q3 and self._filter_transaction(transaction, start_date="2022-09-06", end_date="2022-09-15"):
-                self._publish_to_queue(SUM_Q3_QUEUE, client_id, transaction)
+                self._publish_to_queue(SUM_Q3_QUEUE, client_id, transaction, output_queues)
                 with self.lock:
                     self._record_forwarded_output(client_id, SUM_Q3_QUEUE)
                 sent = True
             if DATE_ENABLE_Q4 and self._filter_transaction(transaction, start_date="2022-09-01", end_date="2022-09-05"):
-                self._publish_to_queue(SCATTER_GATHER_MAPPER_QUEUE, client_id, transaction)
+                self._publish_to_queue(SCATTER_GATHER_MAPPER_QUEUE, client_id, transaction, output_queues)
                 with self.lock:
                     self._record_forwarded_output(client_id, SCATTER_GATHER_MAPPER_QUEUE)
                 sent = True
         return sent
 
-    def _forward_eof(self, client_id: int, expected_total: int):
+    def _forward_eof(self, client_id: int, expected_total: int, output_queues=None):
         '''
         Envia un mensaje de EOF a la cola de salida correspondiente segun la configuracion del worker
         '''
@@ -392,26 +401,27 @@ class FilterWorker:
                 payload=message
             )
 
+        output_queues = output_queues or self.output_queues
         if CONFIGURATION == C_Q1:
-            self.output_queues[GATEWAY_QUEUE].send(eof_packet(expected_total))
+            output_queues[GATEWAY_QUEUE].send(eof_packet(expected_total))
         if CONFIGURATION == C_Q5:
-            self.output_queues[FILTER_Q5_USD_QUEUE].send(eof_packet(expected_total))
+            output_queues[FILTER_Q5_USD_QUEUE].send(eof_packet(expected_total))
         if CONFIGURATION == C_USD:
             if USD_ENABLE_Q1:
-                self.output_queues[FILTER_Q1_QUEUE].send(eof_packet(expected_total))
+                output_queues[FILTER_Q1_QUEUE].send(eof_packet(expected_total))
             if USD_ENABLE_Q2:
-                self.output_queues[SUM_Q2_QUEUE].send(eof_packet(expected_total))
+                output_queues[SUM_Q2_QUEUE].send(eof_packet(expected_total))
             if USD_ENABLE_DATE:
-                self.output_queues[FILTER_DATE_QUEUE].send(eof_packet(expected_total))
+                output_queues[FILTER_DATE_QUEUE].send(eof_packet(expected_total))
         if CONFIGURATION == C_DATE:
             with self.lock:
                 forwarded_by_output = dict(self.forwarded_by_output_by_client.get(client_id, {}))
             if DATE_ENABLE_Q3:
-                self.output_queues[SUM_Q3_QUEUE].send(
+                output_queues[SUM_Q3_QUEUE].send(
                     eof_packet(forwarded_by_output.get(SUM_Q3_QUEUE, 0))
                 )
             if DATE_ENABLE_Q4:
-                self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(
+                output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(
                     eof_packet(forwarded_by_output.get(SCATTER_GATHER_MAPPER_QUEUE, 0))
                 )
 
@@ -578,7 +588,7 @@ class FilterWorker:
         self._forward_eof(client_id, msgs_sent)
         self._cleanup_client(client_id)
 
-    def _process_control_message(self, message):
+    def _process_control_message(self, message, control_output=None, output_queues=None):
         '''
         Procesa un mensaje de control recibido por el exchange de control, actualizando el estado interno del worker
         y respondiendo a los mensajes de control correspondientes
@@ -592,7 +602,9 @@ class FilterWorker:
                 logging.warning(f"Received EOF_RECEIVED control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
                 return
             # Si se recibe un mensaje indicando que se recibio un EOF para un cliente, se responde con una solicitud de conteo de procesados para ese cliente
-            self._request_control_message(client_id, control_message.expected_total)
+            self._request_control_message(
+                client_id, control_message.expected_total, control_output
+            )
 
         elif msg_type == message_protocol.internal.MessageType.PROCESSED_REQUEST:
             if self.is_leader:
@@ -602,7 +614,12 @@ class FilterWorker:
             # cuantos mensajes se han procesado para ese cliente
             with self.lock:
                 processed_count = self.processed_by_client.get(client_id, 0)
-            self._answer_control_message(client_id, control_message.expected_total, processed_count)
+            self._answer_control_message(
+                client_id,
+                control_message.expected_total,
+                processed_count,
+                control_output,
+            )
         
         elif msg_type == message_protocol.internal.MessageType.PROCESSED_ANSWER:
             if not self.is_leader:
@@ -623,10 +640,12 @@ class FilterWorker:
             if len(self.control_responses_by_client[client_id]) == FILTER_AMOUNT - 1:
                 if self.all_processed_by_client[client_id] + procesados == control_message.expected_total:
                     logging.info(f"Received all PROCESSED_ANSWER control messages for client {client_id} in filter_{CONFIGURATION}, total processed: {procesados + control_message.processed_count}, expected: {control_message.expected_total}, sending FLUSH_ORDER")
-                    self._flush_control_message(client_id)
+                    self._flush_control_message(client_id, control_output)
                 else:
                     logging.info(f"Received all PROCESSED_ANSWER control messages for client {client_id} in filter_{CONFIGURATION}, total processed: {procesados + control_message.processed_count}, expected: {control_message.expected_total}, but counts do not match, resending PROCESSED_REQUEST")
-                    self._request_control_message(client_id, control_message.expected_total)
+                    self._request_control_message(
+                        client_id, control_message.expected_total, control_output
+                    )
                     self.control_responses_by_client[client_id] = set()
                     self.all_processed_by_client[client_id] = 0
         
@@ -634,12 +653,12 @@ class FilterWorker:
             if self.is_leader:
                 logging.warning(f"Received FLUSH_ORDER control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am the leader, ignoring")
                 return
-            self._flush_batcher_for_client(client_id)
+            self._flush_batcher_for_client(client_id, output_queues)
             msgs_sent = 0
             with self.lock:
                 msgs_sent = self.forwarded_by_client.get(client_id, 0)
             self._cleanup_client(client_id)
-            self._ack_flush_control_message(client_id, msgs_sent)
+            self._ack_flush_control_message(client_id, msgs_sent, control_output)
             
         
         elif msg_type == message_protocol.internal.MessageType.FLUSH_ACK:
@@ -656,10 +675,10 @@ class FilterWorker:
 
             if len(self.flushed_acks_by_client[client_id]) == FILTER_AMOUNT - 1:
                 logging.info(f"Received all FLUSH_ACK control messages for client {client_id} in filter_{CONFIGURATION}, cleaning up client")
-                self._flush_batcher_for_client(client_id)
+                self._flush_batcher_for_client(client_id, output_queues)
                 with self.lock:
                     msgs_sent = self.all_forwarded_by_client[client_id] + self.forwarded_by_client.get(client_id, 0)
-                self._forward_eof(client_id, msgs_sent)
+                self._forward_eof(client_id, msgs_sent, output_queues)
                 self._cleanup_client(client_id)
 
         else:
@@ -676,26 +695,48 @@ class FilterWorker:
             logging.error(f"Error processing data message in filter_{CONFIGURATION} with id {ID}: {e}")
             nack()
 
-    def process_control_messages(self, message, ack, nack):
-        '''
-        Callback para procesar los mensajes recibidos por el exchange de control
-        '''
+    def _start_control_consumer(self):
+        control_output = self._new_control_output()
+        output_queues = self._new_output_queues()
         try:
-            self._process_control_message(message)
+            self.control_input.start_consuming(
+                lambda message, ack, nack: self._process_control_message_with_publishers(
+                    message, ack, nack, control_output, output_queues
+                )
+            )
+        finally:
+            self._close_control_thread_publishers(control_output, output_queues)
+
+    def _process_control_message_with_publishers(
+        self, message, ack, nack, control_output, output_queues
+    ):
+        try:
+            self._process_control_message(message, control_output, output_queues)
             ack()
         except Exception as e:
-            logging.error(f"Error processing control message in filter_{CONFIGURATION} with id {ID}: {e}")
+            logging.error(
+                f"Error processing control message in filter_{CONFIGURATION} "
+                f"with id {ID}: {e}"
+            )
             nack()
+
+    def _close_control_thread_publishers(self, control_output, output_queues):
+        try:
+            control_output.close()
+        except Exception as e:
+            logging.error(f"Error closing control thread output in filter_{CONFIGURATION} with id {ID}: {e}")
+        for queue in output_queues.values():
+            try:
+                queue.close()
+            except Exception as e:
+                logging.error(f"Error closing control thread queue in filter_{CONFIGURATION} with id {ID}: {e}")
 
     def start(self):
         '''
         Inicia el procesamiento de mensajes de la cola de entrada y del exchange de control
         '''
         # Se inicia un thread para procesar los mensajes de control
-        self.control_thread = threading.Thread(
-            target=self.control_input.start_consuming,
-            args=(self.process_control_messages,)
-        )
+        self.control_thread = threading.Thread(target=self._start_control_consumer)
         self.control_thread.start()
 
         try:
