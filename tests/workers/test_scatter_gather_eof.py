@@ -551,6 +551,42 @@ def test_detector_reports_late_relations_after_pending_eof(monkeypatch):
     assert result.to_account == "B"
 
 
+def test_detector_emits_once_threshold_distinct_intermediaries_reached(monkeypatch):
+    module = _import_module(
+        monkeypatch,
+        "workers.scatter_gather.detector.detector",
+        {
+            "ID": "0",
+            "MOM_HOST": "rabbitmq",
+            "SG_DETECTOR_EXCHANGE": "sg_detector_exchange",
+            "GATEWAY_Q4_QUEUE": "gateway_q4_results_queue",
+            "SG_LINKER_AMOUNT": "1",
+            "SG_DETECTOR_AMOUNT": "1",
+            "MIN_INTERMEDIARIES": "5",
+        },
+    )
+    worker = module.ScatterGatherDetector()
+    client_id = 51
+
+    # Four distinct intermediaries: below threshold, nothing emitted yet.
+    for index in range(1, 5):
+        worker._add_relation(client_id, "A", f"M{index}", "B")
+    assert worker._output.sent == []
+    # State is a plain count, not a set of accounts (Option A).
+    assert worker._intermediaries[client_id][("A", "B")] == 4
+
+    # Fifth distinct intermediary crosses the threshold: emit once, then drop
+    # the pair's state.
+    worker._add_relation(client_id, "A", "M5", "B")
+    assert len(worker._output.sent) == 1
+    assert ("A", "B") not in worker._intermediaries[client_id]
+    assert ("A", "B") in worker._emitted[client_id]
+
+    _, _, payload = worker._proto.unpack_packet(worker._output.sent[0])
+    result = ScatterGatherResultSerializer.deserialize(payload)
+    assert (result.from_account, result.to_account) == ("A", "B")
+
+
 def test_detector_leader_report_can_use_thread_local_gateway_output(monkeypatch):
     module = _import_module(
         monkeypatch,

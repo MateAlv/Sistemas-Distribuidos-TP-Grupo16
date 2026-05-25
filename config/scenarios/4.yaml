@@ -30,7 +30,7 @@ workers:
   scatter_gather:
     mappers: 3
     linkers: 3
-    detectors: 3
+    detectors: 6
     min_intermediaries: 5
 
 clients: 3
