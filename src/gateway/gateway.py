@@ -14,7 +14,11 @@ from common.message_protocol.external.types import (
     MSG_CHUNK, MSG_EOF,
     file_ingestor_routing_key,
 )
-from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ, MessageMiddlewareQueueRabbitMQ
+from common.middleware.middleware_rabbitmq import (
+    MessageMiddlewareExchangeRabbitMQ,
+    MessageMiddlewareQueueRabbitMQ,
+    ensure_exchange_queue_bindings,
+)
 from common.message_protocol.internal import InternalProtocol, TransactionSerializer
 from common.message_protocol.internal.common import MessageType
 from common.message_protocol.internal.partial_result_serializer import (
@@ -32,6 +36,7 @@ class GatewayConfig:
     mom_host: str
     file_ingestor_exchange: str
     file_ingestor_partitions: int
+    file_splitter_queue_prefix: str
     logging_level: str
 
 
@@ -78,6 +83,8 @@ class Gateway:
         self._q5_consumer = None
 
     def run(self) -> None:
+        self._ensure_file_splitter_bindings()
+
         if self._q1_queue_name:
             self._q1_consumer = MessageMiddlewareQueueRabbitMQ(
                 self._config.mom_host, self._q1_queue_name
@@ -363,6 +370,22 @@ class Gateway:
             if not self._stopped:
                 logging.error("gateway_results_consumer_stopped | prefix=%s | error=%s", prefix or "Q1", e)
 
+    def _ensure_file_splitter_bindings(self) -> None:
+        bindings = file_splitter_bindings(
+            self._config.file_splitter_queue_prefix,
+            self._config.file_ingestor_partitions,
+        )
+        ensure_exchange_queue_bindings(
+            self._config.mom_host,
+            self._config.file_ingestor_exchange,
+            bindings,
+        )
+        logging.info(
+            "gateway_file_splitter_bindings_ready | exchange=%s | partitions=%s",
+            self._config.file_ingestor_exchange,
+            self._config.file_ingestor_partitions,
+        )
+
     @staticmethod
     def _q1_csv(payload: bytes) -> str:
         tx = TransactionSerializer().deserialize(payload)
@@ -446,3 +469,12 @@ def partition_for(client_id: int, file_type: int, partitions: int) -> int:
     if file_type == FILE_TYPE_ACCOUNTS:
         return (base_partition + 1) % partitions
     raise ValueError(f"unknown file_type for partitioning: {file_type}")
+
+
+def file_splitter_bindings(queue_prefix: str, partitions: int) -> dict[str, str]:
+    if partitions <= 0:
+        raise ValueError("partitions must be greater than 0")
+    return {
+        f"{queue_prefix}_{partition}": file_ingestor_routing_key(partition)
+        for partition in range(partitions)
+    }

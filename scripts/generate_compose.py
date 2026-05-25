@@ -511,6 +511,7 @@ def gateway_service(file_ingestor_count: int, settings: dict, enabled_queries: s
     environment = [
         f"FILE_INGESTOR_EXCHANGE={FILE_INGESTOR_EXCHANGE}",
         f"FILE_INGESTOR_PARTITIONS={file_ingestor_count}",
+        f"FILE_SPLITTER_QUEUE_PREFIX={FILE_SPLITTER_QUEUE_PREFIX}",
         f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
         f"MOM_HOST={MOM_HOST}",
         "PYTHONUNBUFFERED=1",

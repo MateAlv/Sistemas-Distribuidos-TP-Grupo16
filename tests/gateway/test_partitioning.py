@@ -4,7 +4,7 @@ from common.message_protocol.external.types import (
     FILE_TYPE_ACCOUNTS,
     FILE_TYPE_TRANSACTIONS,
 )
-from gateway.gateway import partition_for
+from gateway.gateway import file_splitter_bindings, partition_for
 
 
 def test_partition_for_splits_client_files_when_possible():
@@ -29,3 +29,16 @@ def test_partition_for_rejects_invalid_inputs():
 
     with pytest.raises(ValueError, match="unknown file_type"):
         partition_for(0, 99, 2)
+
+
+def test_file_splitter_bindings_match_partitions():
+    assert file_splitter_bindings("file_splitter", 3) == {
+        "file_splitter_0": "file_ingestor.0",
+        "file_splitter_1": "file_ingestor.1",
+        "file_splitter_2": "file_ingestor.2",
+    }
+
+
+def test_file_splitter_bindings_reject_invalid_partitions():
+    with pytest.raises(ValueError, match="partitions must be greater than 0"):
+        file_splitter_bindings("file_splitter", 0)
