@@ -65,6 +65,7 @@ def main() -> int:
             args.filter_q5_format_workers,
             args.prefetch,
             args.filter_q5_usd_workers,
+            clients=args.clients,
         )
         config_label = f"preset:{args.preset}"
     else:
@@ -104,6 +105,7 @@ def parse_args():
     parser.add_argument("--filter-q5-format-workers", type=int, default=None, help="Override filter_q5_format worker count (preset only).")
     parser.add_argument("--filter-q5-usd-workers", type=int, default=None, help="Override filter_q5_usd worker count (preset only).")
     parser.add_argument("--prefetch", type=int, default=None, help="PREFETCH_COUNT for Q2 filter/sum services (preset only).")
+    parser.add_argument("--clients", type=int, default=1, help="Number of client containers to spawn (preset only). Each gets a distinct client_id sharing the same dataset.")
     parser.add_argument("--skip-output", action="store_true", help="Do not write docker-compose.yaml.")
     parser.add_argument("--skip-test-output", action="store_true", help="Do not write docker-compose.test.yaml.")
     parser.set_defaults(skip_output=False, skip_test_output=False)
@@ -121,9 +123,21 @@ def preset_config(
     filter_q5_format_workers: int | None = None,
     prefetch: int | None = None,
     filter_q5_usd_workers: int | None = None,
+    clients: int = 1,
 ) -> dict:
     if name not in ("q2-test", "q5-test"):
         raise ValueError(f"unknown preset: {name}")
+    if clients < 1:
+        raise ValueError("clients must be >= 1")
+
+    client_accounts = [
+        {
+            "client_id": client_id,
+            "accounts_file": f"data/datasets/client-1/{dataset}/{dataset}_accounts.csv",
+            "transactions_file": f"data/datasets/client-1/{dataset}/{dataset}_Trans.csv",
+        }
+        for client_id in range(clients)
+    ]
 
     config = {
         "compose": {
@@ -171,14 +185,8 @@ def preset_config(
                 "min_intermediaries": 5,
             },
         },
-        "clients": 1,
-        "client_accounts": [
-            {
-                "client_id": 0,
-                "accounts_file": f"data/datasets/client-1/{dataset}/{dataset}_accounts.csv",
-                "transactions_file": f"data/datasets/client-1/{dataset}/{dataset}_Trans.csv",
-            }
-        ],
+        "clients": len(client_accounts),
+        "client_accounts": client_accounts,
     }
     validate_config(config, Path(f"preset:{name}"))
     return config

@@ -154,31 +154,48 @@ def validate_q5_results():
 
     print(f"Expected Q5 count: {expected_count}")
 
-    total_count = 0
-    for output_file in output_files:
+    # Multiclient: cada client_X procesa el mismo dataset y debe emitir su
+    # propio count que matchea expected. NO se suman entre clientes.
+    mismatches = 0
+    for output_file in sorted(output_files):
         print(f"\n  Reading: {output_file.name}")
         try:
             with open(output_file, "r") as f:
                 reader = csv.DictReader(f)
-                for row in reader:
-                    count = int(row["count"])
-                    total_count += count
-                    print(f"    count = {count}")
+                rows = list(reader)
         except Exception as e:
             print(f"ERROR reading {output_file}: {e}")
             return False
 
-    if total_count == 0:
-        print("\nERROR: Output count is 0")
+        if not rows:
+            print(f"    ERROR: {output_file.name} is empty")
+            mismatches += 1
+            continue
+
+        client_total = sum(int(row["count"]) for row in rows)
+        for row in rows:
+            print(f"    count = {row['count']}")
+
+        if client_total == 0:
+            print(f"    ERROR: {output_file.name} count is 0")
+            mismatches += 1
+        elif client_total != expected_count:
+            print(
+                f"    ERROR: {output_file.name} count {client_total} "
+                f"!= expected {expected_count}"
+            )
+            mismatches += 1
+        else:
+            print(f"    ✓ matches expected ({expected_count})")
+
+    if mismatches > 0:
+        print(f"\nERROR: {mismatches} of {len(output_files)} client outputs do not match")
         return False
 
-    print(f"\nTotal Q5 count from output: {total_count}")
-
-    if total_count != expected_count:
-        print(f"ERROR: Output count {total_count} != expected {expected_count}")
-        return False
-
-    print(f"Q5 count matches expected ({expected_count})")
+    print(
+        f"\nAll {len(output_files)} client outputs match expected count "
+        f"({expected_count})"
+    )
     return True
 
 

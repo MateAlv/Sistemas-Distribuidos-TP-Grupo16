@@ -208,11 +208,13 @@ test-q1:
 
 Q2_DATASET ?= LI-Mini
 Q2_SUM_WORKERS ?=
+CLIENTS ?=
 test-q2:
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q2-test --dataset $(Q2_DATASET) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
 		$(if $(Q2_SUM_WORKERS),--sum-q2-workers $(Q2_SUM_WORKERS)) \
 		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
+		$(if $(CLIENTS),--clients $(CLIENTS)) \
 		--test-output $(TEST_COMPOSE_FILE) --skip-output
 	@bash -lc 'set -euo pipefail; \
 		compose="docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE)"; \
@@ -255,6 +257,7 @@ test-q5:
 		$(if $(Q5_USD_WORKERS),--filter-q5-usd-workers $(Q5_USD_WORKERS)) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
 		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
+		$(if $(CLIENTS),--clients $(CLIENTS)) \
 		--test-output $(TEST_COMPOSE_FILE) --skip-output
 	@bash -lc 'set -euo pipefail; \
 		compose="docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE)"; \
