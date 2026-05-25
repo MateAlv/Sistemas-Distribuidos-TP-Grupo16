@@ -135,10 +135,14 @@ stats:
 
 test:
 	$(PYTHON) $(COMPOSE_SCRIPT) --config $(TEST_CONFIG_FILE) \
+		$(if $(TEST_DATASET),--dataset $(TEST_DATASET)) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
 		$(if $(Q2_SUM_WORKERS),--sum-q2-workers $(Q2_SUM_WORKERS)) \
 		$(if $(Q5_FORMAT_WORKERS),--filter-q5-format-workers $(Q5_FORMAT_WORKERS)) \
 		$(if $(Q5_USD_WORKERS),--filter-q5-usd-workers $(Q5_USD_WORKERS)) \
+		$(if $(SG_MAPPER_WORKERS),--sg-mapper-workers $(SG_MAPPER_WORKERS)) \
+		$(if $(SG_LINKER_WORKERS),--sg-linker-workers $(SG_LINKER_WORKERS)) \
+		$(if $(SG_DETECTOR_WORKERS),--sg-detector-workers $(SG_DETECTOR_WORKERS)) \
 		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
 		$(if $(CLIENTS),--clients $(CLIENTS)) \
 		--test-output $(TEST_COMPOSE_FILE) --skip-output

@@ -59,12 +59,15 @@ def main() -> int:
     if args.preset:
         config = preset_config(
             args.preset,
-            args.dataset,
+            args.dataset or "LI-Mini",
             args.filter_usd_workers,
             args.sum_q2_workers,
             args.filter_q5_format_workers,
             args.prefetch,
             args.filter_q5_usd_workers,
+            args.sg_mapper_workers,
+            args.sg_linker_workers,
+            args.sg_detector_workers,
             clients=args.clients,
         )
         config_label = f"preset:{args.preset}"
@@ -100,11 +103,14 @@ def parse_args():
     parser.add_argument("--output", help="Path for docker-compose.yaml.")
     parser.add_argument("--test-output", help="Path for docker-compose.test.yaml.")
     parser.add_argument("--preset", choices=("q1-test", "q2-test", "q5-test"), help="Use a built-in compose config preset.")
-    parser.add_argument("--dataset", default="LI-Mini", help="Dataset name for presets that need one.")
+    parser.add_argument("--dataset", default=None, help="Dataset name override.")
     parser.add_argument("--filter-usd-workers", type=int, default=None, help="Override filter_usd worker count.")
     parser.add_argument("--sum-q2-workers", type=int, default=None, help="Override sum_q2 worker count.")
     parser.add_argument("--filter-q5-format-workers", type=int, default=None, help="Override filter_q5_format worker count.")
     parser.add_argument("--filter-q5-usd-workers", type=int, default=None, help="Override filter_q5_usd worker count.")
+    parser.add_argument("--sg-mapper-workers", type=int, default=None, help="Override scatter-gather mapper worker count.")
+    parser.add_argument("--sg-linker-workers", type=int, default=None, help="Override scatter-gather linker worker count.")
+    parser.add_argument("--sg-detector-workers", type=int, default=None, help="Override scatter-gather detector worker count.")
     parser.add_argument("--prefetch", type=int, default=None, help="PREFETCH_COUNT for filter/sum services.")
     parser.add_argument("--clients", type=int, default=None, help="Number of client containers to spawn. Each gets a distinct client_id sharing the first configured dataset.")
     parser.add_argument("--skip-output", action="store_true", help="Do not write docker-compose.yaml.")
@@ -124,6 +130,9 @@ def preset_config(
     filter_q5_format_workers: int | None = None,
     prefetch: int | None = None,
     filter_q5_usd_workers: int | None = None,
+    sg_mapper_workers: int | None = None,
+    sg_linker_workers: int | None = None,
+    sg_detector_workers: int | None = None,
     clients: int | None = None,
 ) -> dict:
     if name not in ("q1-test", "q2-test", "q5-test"):
@@ -181,9 +190,9 @@ def preset_config(
                 "q5": 1,
             },
             "scatter_gather": {
-                "mappers": 1,
-                "linkers": 1,
-                "detectors": 1,
+                "mappers": sg_mapper_workers if sg_mapper_workers is not None else 1,
+                "linkers": sg_linker_workers if sg_linker_workers is not None else 1,
+                "detectors": sg_detector_workers if sg_detector_workers is not None else 1,
                 "min_intermediaries": 5,
             },
         },
@@ -198,6 +207,7 @@ def apply_cli_overrides(config: dict, args, path: Path) -> None:
     workers = config.setdefault("workers", {})
     filters = workers.setdefault("filters", {})
     sums = workers.setdefault("sums", {})
+    scatter_gather = workers.setdefault("scatter_gather", {})
     settings = config.setdefault("settings", {})
 
     if args.filter_usd_workers is not None:
@@ -208,6 +218,12 @@ def apply_cli_overrides(config: dict, args, path: Path) -> None:
         filters["q5_format"] = args.filter_q5_format_workers
     if args.filter_q5_usd_workers is not None:
         filters["q5_usd"] = args.filter_q5_usd_workers
+    if args.sg_mapper_workers is not None:
+        scatter_gather["mappers"] = args.sg_mapper_workers
+    if args.sg_linker_workers is not None:
+        scatter_gather["linkers"] = args.sg_linker_workers
+    if args.sg_detector_workers is not None:
+        scatter_gather["detectors"] = args.sg_detector_workers
     if args.prefetch is not None:
         settings["filter_prefetch_count"] = args.prefetch
     if args.clients is not None:
@@ -222,6 +238,22 @@ def apply_cli_overrides(config: dict, args, path: Path) -> None:
             for client_id in range(args.clients)
         ]
         config["clients"] = args.clients
+    if args.dataset is not None:
+        clients = int(config.get("clients", len(config.get("client_accounts", []))))
+        config["client_accounts"] = [
+            {
+                "client_id": client_id,
+                "accounts_file": (
+                    f"data/datasets/client-1/{args.dataset}/"
+                    f"{args.dataset}_accounts.csv"
+                ),
+                "transactions_file": (
+                    f"data/datasets/client-1/{args.dataset}/"
+                    f"{args.dataset}_Trans.csv"
+                ),
+            }
+            for client_id in range(clients)
+        ]
 
     validate_config(config, path)
 
@@ -495,17 +527,20 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 detector_amount=counts["sg_detector"],
                 linker_amount=counts["sg_linker"],
                 min_intermediaries=min_intermediaries,
+                settings=settings,
             )
         for index in range(counts["sg_linker"]):
             services[f"scatter_gather_linker_{index}"] = scatter_linker_service(
                 index=index,
                 detector_amount=counts["sg_detector"],
+                settings=settings,
             )
         for index in range(counts["sg_mapper"]):
             services[f"scatter_gather_mapper_{index}"] = scatter_mapper_service(
                 index=index,
                 mapper_amount=counts["sg_mapper"],
                 linker_amount=counts["sg_linker"],
+                settings=settings,
             )
 
     client_dependencies = [
@@ -801,51 +836,69 @@ def scatter_detector_service(
     detector_amount: int,
     linker_amount: int,
     min_intermediaries: int,
+    settings: dict,
 ) -> dict:
+    environment = [
+        f"GATEWAY_Q4_QUEUE={GATEWAY_Q4_QUEUE}",
+        f"ID={index}",
+        f"MIN_INTERMEDIARIES={min_intermediaries}",
+        f"MOM_HOST={MOM_HOST}",
+        "PYTHONUNBUFFERED=1",
+        f"SG_DETECTOR_AMOUNT={detector_amount}",
+        f"SG_DETECTOR_EXCHANGE={SG_DETECTOR_EXCHANGE}",
+        f"SG_LINKER_AMOUNT={linker_amount}",
+    ]
+    prefetch = settings.get("filter_prefetch_count")
+    if prefetch is not None:
+        environment.append(f"PREFETCH_COUNT={prefetch}")
+
     return base_service(
         "workers/scatter_gather/detector/Dockerfile",
         depends_on=depends_on_rabbitmq(),
-        environment=[
-            f"GATEWAY_Q4_QUEUE={GATEWAY_Q4_QUEUE}",
-            f"ID={index}",
-            f"MIN_INTERMEDIARIES={min_intermediaries}",
-            f"MOM_HOST={MOM_HOST}",
-            "PYTHONUNBUFFERED=1",
-            f"SG_DETECTOR_AMOUNT={detector_amount}",
-            f"SG_DETECTOR_EXCHANGE={SG_DETECTOR_EXCHANGE}",
-            f"SG_LINKER_AMOUNT={linker_amount}",
-        ],
+        environment=environment,
     )
 
 
-def scatter_linker_service(index: int, detector_amount: int) -> dict:
+def scatter_linker_service(index: int, detector_amount: int, settings: dict) -> dict:
+    environment = [
+        f"ID={index}",
+        f"MOM_HOST={MOM_HOST}",
+        "PYTHONUNBUFFERED=1",
+        f"SG_DETECTOR_AMOUNT={detector_amount}",
+        f"SG_DETECTOR_EXCHANGE={SG_DETECTOR_EXCHANGE}",
+        f"SG_LINKER_EXCHANGE={SG_LINKER_EXCHANGE}",
+    ]
+    prefetch = settings.get("filter_prefetch_count")
+    if prefetch is not None:
+        environment.append(f"PREFETCH_COUNT={prefetch}")
+
     return base_service(
         "workers/scatter_gather/linker/Dockerfile",
         depends_on=depends_on_rabbitmq(),
-        environment=[
-            f"ID={index}",
-            f"MOM_HOST={MOM_HOST}",
-            "PYTHONUNBUFFERED=1",
-            f"SG_DETECTOR_AMOUNT={detector_amount}",
-            f"SG_DETECTOR_EXCHANGE={SG_DETECTOR_EXCHANGE}",
-            f"SG_LINKER_EXCHANGE={SG_LINKER_EXCHANGE}",
-        ],
+        environment=environment,
     )
 
 
-def scatter_mapper_service(index: int, mapper_amount: int, linker_amount: int) -> dict:
+def scatter_mapper_service(
+    index: int, mapper_amount: int, linker_amount: int, settings: dict
+) -> dict:
+    environment = [
+        f"ID={index}",
+        f"INPUT_QUEUE={SG_MAPPER_QUEUE}",
+        f"MOM_HOST={MOM_HOST}",
+        "PYTHONUNBUFFERED=1",
+        f"SG_LINKER_AMOUNT={linker_amount}",
+        f"SG_LINKER_EXCHANGE={SG_LINKER_EXCHANGE}",
+        f"SG_MAPPER_AMOUNT={mapper_amount}",
+    ]
+    prefetch = settings.get("filter_prefetch_count")
+    if prefetch is not None:
+        environment.append(f"PREFETCH_COUNT={prefetch}")
+
     return base_service(
         "workers/scatter_gather/mapper/Dockerfile",
         depends_on=depends_on_rabbitmq(),
-        environment=[
-            f"ID={index}",
-            f"INPUT_QUEUE={SG_MAPPER_QUEUE}",
-            f"MOM_HOST={MOM_HOST}",
-            "PYTHONUNBUFFERED=1",
-            f"SG_LINKER_AMOUNT={linker_amount}",
-            f"SG_LINKER_EXCHANGE={SG_LINKER_EXCHANGE}",
-            f"SG_MAPPER_AMOUNT={mapper_amount}",
-        ],
+        environment=environment,
     )
 
 

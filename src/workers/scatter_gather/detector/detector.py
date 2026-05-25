@@ -41,7 +41,7 @@ class ScatterGatherDetector:
             queue_name=f"sg_detector_{ID}",
             exclusive=False,
         )
-        self._output = MessageMiddlewareQueueRabbitMQ(MOM_HOST, GATEWAY_Q4_QUEUE)
+        self._output = self._new_gateway_output()
         self._control_sender = None
         if SG_DETECTOR_AMOUNT > 1:
             self._control_sender = MessageMiddlewareExchangeRabbitMQ(
@@ -66,6 +66,7 @@ class ScatterGatherDetector:
         self._leader_expected_by_client = {}
         self._leader_processed_by_client = defaultdict(int)
         self._leader_emitted_by_client = defaultdict(int)
+        self._leader_responses_by_client = defaultdict(set)
         self._closed_by_client = set()
         self._lock = threading.Lock()
 
@@ -74,6 +75,9 @@ class ScatterGatherDetector:
         self._control_thread = None
         self._response_thread = None
         self._closed = False
+
+    def _new_gateway_output(self):
+        return MessageMiddlewareQueueRabbitMQ(MOM_HOST, GATEWAY_Q4_QUEUE)
 
     def _on_message(self, raw, ack, nack):
         try:
@@ -97,13 +101,13 @@ class ScatterGatherDetector:
                 ack()
                 return
 
-            relation = ScatterGatherRelationSerializer.deserialize(payload)
-            self._add_relation(
-                client_id,
-                relation.from_account,
-                relation.intermediate_account,
-                relation.to_account,
-            )
+            for relation in ScatterGatherRelationSerializer.deserialize_batch(payload):
+                self._add_relation(
+                    client_id,
+                    relation.from_account,
+                    relation.intermediate_account,
+                    relation.to_account,
+                )
             ack()
         except Exception:
             logging.exception("detector_%s error", ID)
@@ -157,20 +161,10 @@ class ScatterGatherDetector:
             if client_id in self._closed_by_client:
                 return
             self._processed_by_client[client_id] += 1
-            pending = self._pending_eof_by_client.get(client_id)
-            if pending is not None:
-                _, leader_id = pending
 
-        if leader_id is not None:
-            self._report_to_leader(
-                client_id,
-                leader_id,
-                processed_count=1,
-                emitted_count=emitted_delta,
-            )
-
-    def _emit(self, client_id: int, a: str, b: str):
-        self._output.send(
+    def _emit(self, client_id: int, a: str, b: str, output=None):
+        output = output or self._output
+        output.send(
             self._packet(
                 MessageType.DATA,
                 client_id,
@@ -181,8 +175,11 @@ class ScatterGatherDetector:
         )
         logging.debug("detector_%s emitted (%s, %s)", ID, a, b)
 
-    def _forward_eof_to_gateway(self, client_id: int, expected_total: int):
-        self._output.send(
+    def _forward_eof_to_gateway(
+        self, client_id: int, expected_total: int, output=None
+    ):
+        output = output or self._output
+        output.send(
             self._packet(
                 MessageType.EOF,
                 client_id,
@@ -236,6 +233,8 @@ class ScatterGatherDetector:
     def _try_initial_report_locked(self, client_id: int):
         if client_id in self._reported_initial_by_client:
             return None
+        if client_id not in self._complete_by_client:
+            return None
         pending = self._pending_eof_by_client.get(client_id)
         if pending is None:
             return None
@@ -261,6 +260,7 @@ class ScatterGatherDetector:
         self._leader_expected_by_client.pop(client_id, None)
         self._leader_processed_by_client.pop(client_id, None)
         self._leader_emitted_by_client.pop(client_id, None)
+        self._leader_responses_by_client.pop(client_id, None)
         self._closed_by_client.add(client_id)
 
     def _maybe_cleanup_after_report(self, client_id: int):
@@ -302,6 +302,9 @@ class ScatterGatherDetector:
                 should_forward_single_eof = True
             elif ID == 0:
                 self._leader_expected_by_client[client_id] = expected_total
+                self._leader_emitted_by_client[client_id] = (
+                    self._emitted_count_by_client.get(client_id, 0)
+                )
                 should_broadcast = True
             else:
                 report = self._try_initial_report_locked(client_id)
@@ -367,7 +370,7 @@ class ScatterGatherDetector:
             logging.exception("detector_%s control_error", ID)
             nack()
 
-    def _handle_leader_report(self, message: bytes, ack, nack) -> None:
+    def _handle_leader_report(self, message: bytes, ack, nack, output=None) -> None:
         try:
             msg_type, client_id, payload = self._proto.unpack_packet(message)
             if msg_type != MessageType.PROCESSED_ANSWER:
@@ -388,18 +391,20 @@ class ScatterGatherDetector:
                 self._leader_emitted_by_client[client_id] += (
                     control_message.expected_total
                 )
-                expected_total = self._leader_expected_by_client.get(client_id)
+                self._leader_responses_by_client[client_id].add(
+                    control_message.sender_id
+                )
 
                 if (
-                    expected_total is not None
-                    and self._leader_processed_by_client[client_id] >= expected_total
+                    len(self._leader_responses_by_client[client_id])
+                    >= SG_DETECTOR_AMOUNT - 1
                 ):
                     should_forward_eof = True
                     emitted_total = self._leader_emitted_by_client[client_id]
                     self._cleanup_client_locked(client_id)
 
             if should_forward_eof:
-                self._forward_eof_to_gateway(client_id, emitted_total)
+                self._forward_eof_to_gateway(client_id, emitted_total, output)
 
             ack()
         except Exception:
@@ -424,9 +429,15 @@ class ScatterGatherDetector:
             self._response_queue_name,
         )
         self._response_consumer = response_consumer
+        output = self._new_gateway_output()
         try:
-            response_consumer.start_consuming(self._handle_leader_report)
+            response_consumer.start_consuming(
+                lambda message, ack, nack: self._handle_leader_report(
+                    message, ack, nack, output
+                )
+            )
         finally:
+            output.close()
             response_consumer.close()
 
     def start(self):

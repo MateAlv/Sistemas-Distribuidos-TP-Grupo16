@@ -30,12 +30,7 @@ SG_MAPPER_RESPONSE_QUEUE_PREFIX = os.environ.get(
 class ScatterGatherMapper:
     def __init__(self):
         self._input = MessageMiddlewareQueueRabbitMQ(MOM_HOST, INPUT_QUEUE)
-        self._linkers = [
-            MessageMiddlewareExchangeRabbitMQ(
-                MOM_HOST, SG_LINKER_EXCHANGE, [f"sg_linker_{i}"]
-            )
-            for i in range(SG_LINKER_AMOUNT)
-        ]
+        self._linkers = self._new_linker_outputs()
         self._control_sender = None
         if SG_MAPPER_AMOUNT > 1:
             self._control_sender = MessageMiddlewareExchangeRabbitMQ(
@@ -62,6 +57,14 @@ class ScatterGatherMapper:
         self._control_thread = None
         self._response_thread = None
         self._closed = False
+
+    def _new_linker_outputs(self):
+        return [
+            MessageMiddlewareExchangeRabbitMQ(
+                MOM_HOST, SG_LINKER_EXCHANGE, [f"sg_linker_{i}"]
+            )
+            for i in range(SG_LINKER_AMOUNT)
+        ]
 
     def _on_message(self, raw, ack, nack):
         try:
@@ -98,31 +101,45 @@ class ScatterGatherMapper:
             )
         )
 
-    def _emit(self, client_id: int, tag: int, tx_bytes: bytes, partition: int):
+    def _emit(
+        self,
+        client_id: int,
+        tag: int,
+        tx_bytes: bytes,
+        partition: int,
+        linkers=None,
+    ):
+        linkers = linkers or self._linkers
         msg = self._proto.create_packet(
             msg_type=MessageType.DATA,
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
             payload=bytes([tag]) + tx_bytes,
         )
-        self._linkers[partition].send(msg)
+        linkers[partition].send(msg)
 
-    def _forward_transaction(self, client_id: int, payload: bytes) -> int:
-        tx = self._tx_ser.deserialize(payload)
+    def _forward_transaction(self, client_id: int, tx, linkers=None) -> int:
+        payload = self._tx_ser.serialize(tx)
         self._emit(
             client_id,
             EDGE_A_TO_M,
             payload,
             partition_for_key(tx.to_account, SG_LINKER_AMOUNT),
+            linkers,
         )
         self._emit(
             client_id,
             EDGE_M_TO_B,
             payload,
             partition_for_key(tx.from_account, SG_LINKER_AMOUNT),
+            linkers,
         )
         return 2
 
     def _handle_data_packet(self, client_id: int, payload: bytes) -> None:
+        transactions = self._tx_ser.deserialize_batch(payload)
+        if not transactions:
+            return
+
         with self._lock:
             if client_id in self._closed_by_client:
                 logging.info(
@@ -132,9 +149,11 @@ class ScatterGatherMapper:
                 )
                 return
 
-            forwarded_count = self._forward_transaction(client_id, payload)
+            forwarded_count = 0
+            for tx in transactions:
+                forwarded_count += self._forward_transaction(client_id, tx)
             self._processed_by_client[client_id] = (
-                self._processed_by_client.get(client_id, 0) + 1
+                self._processed_by_client.get(client_id, 0) + len(transactions)
             )
             self._forwarded_by_client[client_id] = (
                 self._forwarded_by_client.get(client_id, 0) + forwarded_count
@@ -146,11 +165,14 @@ class ScatterGatherMapper:
             self._report_to_leader(
                 client_id,
                 leader_id,
-                processed_count=1,
+                processed_count=len(transactions),
                 forwarded_count=forwarded_count,
             )
 
-    def _forward_eof_to_linkers(self, client_id: int, expected_total: int) -> None:
+    def _forward_eof_to_linkers(
+        self, client_id: int, expected_total: int, linkers=None
+    ) -> None:
+        linkers = linkers or self._linkers
         payload = self._control_payload(
             sender_id=ID,
             expected_total=expected_total,
@@ -161,13 +183,13 @@ class ScatterGatherMapper:
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
             payload=payload,
         )
-        for linker in self._linkers:
+        for linker in linkers:
             linker.send(msg)
         logging.info(
             "mapper_%s forwarded_eof | client_id=%s | linkers=%s",
             ID,
             client_id,
-            len(self._linkers),
+            len(linkers),
         )
 
     def _handle_upstream_eof(self, client_id: int, payload: bytes) -> None:
@@ -271,7 +293,7 @@ class ScatterGatherMapper:
             logging.exception("mapper_%s control_error", ID)
             nack()
 
-    def _handle_leader_report(self, message: bytes, ack, nack) -> None:
+    def _handle_leader_report(self, message: bytes, ack, nack, linkers=None) -> None:
         try:
             msg_type, client_id, payload = self._proto.unpack_packet(message)
             if msg_type != MessageType.PROCESSED_ANSWER:
@@ -306,7 +328,7 @@ class ScatterGatherMapper:
                     self._cleanup_client_locked(client_id)
 
             if should_forward_eof:
-                self._forward_eof_to_linkers(client_id, forwarded_total)
+                self._forward_eof_to_linkers(client_id, forwarded_total, linkers)
 
             ack()
         except Exception:
@@ -331,9 +353,16 @@ class ScatterGatherMapper:
             self._response_queue_name,
         )
         self._response_consumer = response_consumer
+        linkers = self._new_linker_outputs()
         try:
-            response_consumer.start_consuming(self._handle_leader_report)
+            response_consumer.start_consuming(
+                lambda message, ack, nack: self._handle_leader_report(
+                    message, ack, nack, linkers
+                )
+            )
         finally:
+            for linker in linkers:
+                linker.close()
             response_consumer.close()
 
     def _cleanup_client_locked(self, client_id: int) -> None:

@@ -20,6 +20,8 @@ MOM_HOST = os.environ["MOM_HOST"]
 SG_LINKER_EXCHANGE = os.environ["SG_LINKER_EXCHANGE"]
 SG_DETECTOR_EXCHANGE = os.environ["SG_DETECTOR_EXCHANGE"]
 SG_DETECTOR_AMOUNT = int(os.environ["SG_DETECTOR_AMOUNT"])
+SG_LINKER_BATCH_BYTES = int(os.environ.get("SG_LINKER_BATCH_BYTES", str(1024 * 1024)))
+SG_LINKER_BATCH_MAX_RELATIONS = int(os.environ.get("SG_LINKER_BATCH_MAX_RELATIONS", "5000"))
 
 
 class ScatterGatherLinker:
@@ -46,6 +48,9 @@ class ScatterGatherLinker:
         self._outgoing = defaultdict(lambda: defaultdict(set))  # [client][M] = {B}
         self._emitted  = defaultdict(lambda: defaultdict(set))  # [client][M] = {(A,B)}
         self._emitted_count_by_client = defaultdict(int)
+        self._emitted_count_by_partition = defaultdict(lambda: defaultdict(int))
+        self._batch_buffers = defaultdict(list)
+        self._batch_bytes = defaultdict(int)
         self._eofs_by_client = defaultdict(set)
         self._closed_by_client = set()
 
@@ -103,21 +108,54 @@ class ScatterGatherLinker:
             return
 
         partition = partition_for_pair(a, b, SG_DETECTOR_AMOUNT)
+        relation = ScatterGatherRelation(
+            from_account=a,
+            intermediate_account=m,
+            to_account=b,
+        )
+        self._append_relation(client_id, partition, relation)
+        self._emitted[client_id][m].add((a, b))
+        self._emitted_count_by_client[client_id] += 1
+        self._emitted_count_by_partition[client_id][partition] += 1
+        logging.debug("linker_%s emitted (%s, %s, %s)", ID, a, m, b)
+
+    def _append_relation(
+        self,
+        client_id: int,
+        partition: int,
+        relation: ScatterGatherRelation,
+    ) -> None:
+        payload = ScatterGatherRelationSerializer.serialize(relation)
+        key = (client_id, partition)
+        self._batch_buffers[key].append(payload)
+        self._batch_bytes[key] += len(payload)
+        if (
+            len(self._batch_buffers[key]) >= SG_LINKER_BATCH_MAX_RELATIONS
+            or self._batch_bytes[key] >= SG_LINKER_BATCH_BYTES
+        ):
+            self._flush_batch(client_id, partition)
+
+    def _flush_batch(self, client_id: int, partition: int) -> None:
+        key = (client_id, partition)
+        payloads = self._batch_buffers.pop(key, [])
+        self._batch_bytes.pop(key, None)
+        if not payloads:
+            return
+
         msg = self._proto.create_packet(
             msg_type=MessageType.DATA,
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-            payload=ScatterGatherRelationSerializer.serialize(
-                ScatterGatherRelation(
-                    from_account=a,
-                    intermediate_account=m,
-                    to_account=b,
-                )
-            ),
+            payload=b"".join(payloads),
         )
         self._detectors[partition].send(msg)
-        self._emitted[client_id][m].add((a, b))
-        self._emitted_count_by_client[client_id] += 1
-        logging.debug("linker_%s emitted (%s, %s, %s)", ID, a, m, b)
+        logging.debug(
+            "linker_%s batch_flush | client_id=%s | detector=%s | relations=%s | bytes=%s",
+            ID, client_id, partition, len(payloads), len(msg),
+        )
+
+    def _flush_client(self, client_id: int) -> None:
+        for partition in range(SG_DETECTOR_AMOUNT):
+            self._flush_batch(client_id, partition)
 
     def _handle_eof(self, client_id: int, payload: bytes):
         control_message = self._control_serializer.deserialize(payload)
@@ -125,26 +163,32 @@ class ScatterGatherLinker:
             return
 
         self._eofs_by_client[client_id].add(control_message.sender_id)
+        self._flush_client(client_id)
 
-        control_payload = self._control_serializer.serialize(
-            ControlMessage(
-                sender_id=ID,
-                expected_total=self._emitted_count_by_client.get(client_id, 0),
-                processed_count=0,
+        for partition, detector in enumerate(self._detectors):
+            expected_total = self._emitted_count_by_partition[client_id].get(partition, 0)
+            control_payload = self._control_serializer.serialize(
+                ControlMessage(
+                    sender_id=ID,
+                    expected_total=expected_total,
+                    processed_count=0,
+                )
             )
-        )
-        msg = self._proto.create_packet(
-            msg_type=MessageType.EOF,
-            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-            payload=control_payload,
-        )
-        for detector in self._detectors:
+            msg = self._proto.create_packet(
+                msg_type=MessageType.EOF,
+                client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+                payload=control_payload,
+            )
             detector.send(msg)
 
         self._incoming.pop(client_id, None)
         self._outgoing.pop(client_id, None)
         self._emitted.pop(client_id, None)
         self._emitted_count_by_client.pop(client_id, None)
+        self._emitted_count_by_partition.pop(client_id, None)
+        for key in [key for key in self._batch_buffers if key[0] == client_id]:
+            self._batch_buffers.pop(key, None)
+            self._batch_bytes.pop(key, None)
         self._eofs_by_client.pop(client_id, None)
         self._closed_by_client.add(client_id)
         logging.info(
