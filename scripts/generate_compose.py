@@ -98,7 +98,7 @@ def parse_args():
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to the config YAML.")
     parser.add_argument("--output", help="Path for docker-compose.yaml.")
     parser.add_argument("--test-output", help="Path for docker-compose.test.yaml.")
-    parser.add_argument("--preset", choices=("q2-test", "q5-test"), help="Use a built-in compose config preset.")
+    parser.add_argument("--preset", choices=("q1-test", "q2-test", "q5-test"), help="Use a built-in compose config preset.")
     parser.add_argument("--dataset", default="LI-Mini", help="Dataset name for presets that need one.")
     parser.add_argument("--filter-usd-workers", type=int, default=None, help="Override filter_usd worker count (preset only).")
     parser.add_argument("--sum-q2-workers", type=int, default=None, help="Override sum_q2 worker count (preset only).")
@@ -125,7 +125,7 @@ def preset_config(
     filter_q5_usd_workers: int | None = None,
     clients: int = 1,
 ) -> dict:
-    if name not in ("q2-test", "q5-test"):
+    if name not in ("q1-test", "q2-test", "q5-test"):
         raise ValueError(f"unknown preset: {name}")
     if clients < 1:
         raise ValueError("clients must be >= 1")
@@ -154,7 +154,7 @@ def preset_config(
             "io_timeout_seconds": 3600,
             **({"filter_prefetch_count": prefetch} if prefetch is not None else {}),
         },
-        "queries": ["q2"] if name == "q2-test" else ["q5"],
+        "queries": {"q1-test": ["q1"], "q2-test": ["q2"], "q5-test": ["q5"]}[name],
         "workers": {
             "file_ingestors": 1,
             "filters": {

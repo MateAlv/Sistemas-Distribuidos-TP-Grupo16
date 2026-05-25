@@ -135,7 +135,7 @@ class FilterWorker:
         self.internal_packet_serializer = message_protocol.internal.InternalProtocol()
 
         self._batcher: OutputBatcher | None = None
-        if CONFIGURATION in (C_USD, C_Q5):
+        if CONFIGURATION in (C_USD, C_Q5, C_DATE):
             self._batcher = OutputBatcher(
                 self.transaction_serializer,
                 FILTER_OUTPUT_BATCH_BYTES,

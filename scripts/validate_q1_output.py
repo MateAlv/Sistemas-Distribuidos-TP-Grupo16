@@ -67,52 +67,62 @@ def validate_q1_results():
             
     print(f"✓ Found {expected_count} expected transactions in dataset")
     
-    # 6. Leer archivo de output y contar
-    output_transactions = []
-    for output_file in output_files:
+    # 6. Multiclient: cada client_X procesa el mismo dataset y debe emitir
+    # exactamente expected_count transactions. No se suman entre clientes.
+    mismatches = 0
+    for output_file in sorted(output_files):
         print(f"\n  Reading: {output_file.name}")
         try:
             with open(output_file, 'r') as f:
                 reader = csv.DictReader(f)
                 rows = list(reader)
-                output_transactions.extend(rows)
-                print(f"    Lines in output: {len(rows)}")
         except Exception as e:
             print(f"ERROR reading {output_file}: {e}")
             return False
-    
-    # 7. Verificar que el output tiene datos
-    if len(output_transactions) == 0:
-        print("\nWARNING: Output files are empty")
-        # Esto podría ser OK si el client aún está procesando
-        # Retorna True para no fallar completamente
-        return True
-    
-    print(f"\n✓ Total output transactions: {len(output_transactions)}")
-    
-    if len(output_transactions) != expected_count:
-        print(f"ERROR: Output has {len(output_transactions)} transactions, but expected {expected_count}")
-        return False
-    
-    # 8. Validar estructura de output
-    for i, tx in enumerate(output_transactions):
-        # Verificar que cada transacción en output pasa Q1
-        try:
+
+        print(f"    Lines in output: {len(rows)}")
+
+        if len(rows) != expected_count:
+            print(
+                f"    ERROR: {output_file.name} has {len(rows)} transactions, "
+                f"expected {expected_count}"
+            )
+            mismatches += 1
+            continue
+
+        # Validar que cada transaction del archivo respeta el filtro Q1.
+        invalid = 0
+        for i, tx in enumerate(rows):
             if 'currency' in tx and 'amount' in tx:
                 currency = tx['currency'].strip()
-                amount = float(tx['amount'])
-                
+                try:
+                    amount = float(tx['amount'])
+                except ValueError:
+                    print(f"    ERROR: row {i} amount not numeric: {tx['amount']!r}")
+                    invalid += 1
+                    continue
                 if currency != USD_CURRENCY:
-                    print(f"ERROR: Output transaction {i} has invalid currency: {currency}")
-                    return False
-                if amount >= Q1_MAX_AMOUNT:
-                    print(f"ERROR: Output transaction {i} has invalid amount: {amount}")
-                    return False
-        except (ValueError, KeyError) as e:
-            print(f"WARNING: Could not validate transaction {i}: {e}")
-    
-    print(f"✓ All output transactions pass Q1 filters")
-    
+                    print(f"    ERROR: row {i} invalid currency: {currency}")
+                    invalid += 1
+                elif amount >= Q1_MAX_AMOUNT:
+                    print(f"    ERROR: row {i} invalid amount: {amount}")
+                    invalid += 1
+
+        if invalid > 0:
+            mismatches += 1
+        else:
+            print(f"    ✓ matches expected ({expected_count}) and all rows pass Q1")
+
+    if mismatches > 0:
+        print(
+            f"\nERROR: {mismatches} of {len(output_files)} client outputs do not match"
+        )
+        return False
+
+    print(
+        f"\nAll {len(output_files)} client outputs match expected count "
+        f"({expected_count})"
+    )
     return True
 
 if __name__ == "__main__":
