@@ -3,6 +3,7 @@ import logging
 from collections import defaultdict
 
 from common import message_protocol
+from common.batch_buffer import BatchBuffer
 from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
 )
@@ -49,8 +50,11 @@ class ScatterGatherLinker:
         self._emitted  = defaultdict(lambda: defaultdict(set))  # [client][M] = {(A,B)}
         self._emitted_count_by_client = defaultdict(int)
         self._emitted_count_by_partition = defaultdict(lambda: defaultdict(int))
-        self._batch_buffers = defaultdict(list)
-        self._batch_bytes = defaultdict(int)
+        # Coalesces emitted relations into batches keyed by (client_id, detector
+        # partition) before they reach a detector.
+        self._batcher = BatchBuffer(
+            SG_LINKER_BATCH_BYTES, SG_LINKER_BATCH_MAX_RELATIONS
+        )
         self._eofs_by_client = defaultdict(set)
         self._closed_by_client = set()
 
@@ -74,15 +78,19 @@ class ScatterGatherLinker:
                 ack()
                 return
 
+            # The mapper batches many same-tagged edges into one message:
+            # a single tag byte followed by a batch of serialized transactions.
             edge_tag = payload[0]
-            tx = self._tx_ser.deserialize(payload[1:])
+            transactions = self._tx_ser.deserialize_batch(payload[1:])
 
             if edge_tag == EDGE_A_TO_M:
                 # to_account is M, from_account is A
-                self._add_incoming(client_id, m=tx.to_account, a=tx.from_account)
+                for tx in transactions:
+                    self._add_incoming(client_id, m=tx.to_account, a=tx.from_account)
             elif edge_tag == EDGE_M_TO_B:
                 # from_account is M, to_account is B
-                self._add_outgoing(client_id, m=tx.from_account, b=tx.to_account)
+                for tx in transactions:
+                    self._add_outgoing(client_id, m=tx.from_account, b=tx.to_account)
             else:
                 logging.warning("linker_%s unknown edge tag %s", ID, edge_tag)
 
@@ -126,36 +134,29 @@ class ScatterGatherLinker:
         relation: ScatterGatherRelation,
     ) -> None:
         payload = ScatterGatherRelationSerializer.serialize(relation)
-        key = (client_id, partition)
-        self._batch_buffers[key].append(payload)
-        self._batch_bytes[key] += len(payload)
-        if (
-            len(self._batch_buffers[key]) >= SG_LINKER_BATCH_MAX_RELATIONS
-            or self._batch_bytes[key] >= SG_LINKER_BATCH_BYTES
-        ):
-            self._flush_batch(client_id, partition)
+        batch_payload = self._batcher.append((client_id, partition), payload)
+        if batch_payload is not None:
+            self._send_batch(client_id, partition, batch_payload)
 
-    def _flush_batch(self, client_id: int, partition: int) -> None:
-        key = (client_id, partition)
-        payloads = self._batch_buffers.pop(key, [])
-        self._batch_bytes.pop(key, None)
-        if not payloads:
-            return
-
+    def _send_batch(
+        self, client_id: int, partition: int, batch_payload: bytes
+    ) -> None:
         msg = self._proto.create_packet(
             msg_type=MessageType.DATA,
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-            payload=b"".join(payloads),
+            payload=batch_payload,
         )
         self._detectors[partition].send(msg)
         logging.debug(
-            "linker_%s batch_flush | client_id=%s | detector=%s | relations=%s | bytes=%s",
-            ID, client_id, partition, len(payloads), len(msg),
+            "linker_%s batch_flush | client_id=%s | detector=%s | bytes=%s",
+            ID, client_id, partition, len(msg),
         )
 
     def _flush_client(self, client_id: int) -> None:
-        for partition in range(SG_DETECTOR_AMOUNT):
-            self._flush_batch(client_id, partition)
+        for (_, partition), batch_payload in self._batcher.flush(
+            lambda k: k[0] == client_id
+        ):
+            self._send_batch(client_id, partition, batch_payload)
 
     def _handle_eof(self, client_id: int, payload: bytes):
         control_message = self._control_serializer.deserialize(payload)
@@ -186,9 +187,7 @@ class ScatterGatherLinker:
         self._emitted.pop(client_id, None)
         self._emitted_count_by_client.pop(client_id, None)
         self._emitted_count_by_partition.pop(client_id, None)
-        for key in [key for key in self._batch_buffers if key[0] == client_id]:
-            self._batch_buffers.pop(key, None)
-            self._batch_bytes.pop(key, None)
+        self._batcher.discard(lambda k: k[0] == client_id)
         self._eofs_by_client.pop(client_id, None)
         self._closed_by_client.add(client_id)
         logging.info(

@@ -219,7 +219,24 @@ def test_mapper_accepts_batched_transactions(monkeypatch):
 
     assert worker._processed_by_client[client_id] == 2
     assert worker._forwarded_by_client[client_id] == 4
-    assert len(worker._linkers[0].sent) == 4
+    # Edges are buffered, not published one-by-one: nothing is sent until a
+    # flush (size threshold or EOF).
+    assert worker._linkers[0].sent == []
+
+    worker._flush_client_buffers(client_id)
+
+    # With a single linker partition the two edge tags produce two batched
+    # messages, each carrying both transactions.
+    assert len(worker._linkers[0].sent) == 2
+    tags = set()
+    for raw in worker._linkers[0].sent:
+        msg_type, received_client_id, payload = worker._proto.unpack_packet(raw)
+        assert msg_type == MessageType.DATA
+        assert received_client_id == client_id
+        tags.add(payload[0])
+        batch = TransactionSerializer.deserialize_batch(payload[1:])
+        assert len(batch) == 2
+    assert tags == {1, 2}
 
 
 def test_mapper_leader_report_can_use_thread_local_linkers(monkeypatch):
