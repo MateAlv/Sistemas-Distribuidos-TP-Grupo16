@@ -100,6 +100,7 @@ def _data_packet(client_id: int, transactions: list[Transaction]) -> bytes:
 
 
 def test_usd_filter_processes_batched_payload(monkeypatch):
+    monkeypatch.setenv("FILTER_OUTPUT_BATCH_MAX_TX", "2")
     module = _import_filter_module(monkeypatch, configuration="USD")
     worker = module.FilterWorker()
 
@@ -112,25 +113,23 @@ def test_usd_filter_processes_batched_payload(monkeypatch):
 
     worker._process_data_message(message)
 
-    # Counters reflejan transactions, no DATA messages.
     assert worker.processed_by_client[42] == 3
     assert worker.forwarded_by_client[42] == 2
 
-    # 2 USD pasan el filtro: una publish por cada tx hacia SUM_Q2_QUEUE.
     sum_q2_output = worker.output_queues["sum_q2_queue"]
-    assert len(sum_q2_output.sent) == 2
+    assert len(sum_q2_output.sent) == 1
 
-    for published in sum_q2_output.sent:
-        msg_type, client_id, payload = InternalProtocol.unpack_packet(published)
-        assert msg_type == MessageType.DATA
-        assert client_id == 42
-        tx = TransactionSerializer.deserialize(payload)
-        assert tx.currency == "US Dollar"
+    msg_type, client_id, payload = InternalProtocol.unpack_packet(sum_q2_output.sent[0])
+    assert msg_type == MessageType.DATA
+    assert client_id == 42
+    batch_txs = TransactionSerializer.deserialize_batch(payload)
+    assert len(batch_txs) == 2
+    assert all(tx.currency == "US Dollar" for tx in batch_txs)
 
 
-def test_usd_filter_handles_single_transaction_payload(monkeypatch):
-    # Backwards-compat: payload con 1 transaction (lo que mandaba file_ingestor
-    # antes del batching) debe seguir funcionando.
+def test_usd_filter_buffers_until_flush(monkeypatch):
+    monkeypatch.setenv("FILTER_OUTPUT_BATCH_MAX_TX", "1000")
+    monkeypatch.setenv("FILTER_OUTPUT_BATCH_BYTES", str(10 * 1024 * 1024))
     module = _import_filter_module(monkeypatch, configuration="USD")
     worker = module.FilterWorker()
 
@@ -139,4 +138,13 @@ def test_usd_filter_handles_single_transaction_payload(monkeypatch):
 
     assert worker.processed_by_client[7] == 1
     assert worker.forwarded_by_client[7] == 1
-    assert len(worker.output_queues["sum_q2_queue"].sent) == 1
+    assert len(worker.output_queues["sum_q2_queue"].sent) == 0
+
+    worker._flush_batcher_for_client(7)
+    sent = worker.output_queues["sum_q2_queue"].sent
+    assert len(sent) == 1
+    msg_type, client_id, payload = InternalProtocol.unpack_packet(sent[0])
+    assert msg_type == MessageType.DATA
+    assert client_id == 7
+    txs = TransactionSerializer.deserialize_batch(payload)
+    assert len(txs) == 1 and txs[0].currency == "US Dollar"

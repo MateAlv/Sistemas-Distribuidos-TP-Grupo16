@@ -7,6 +7,11 @@ from common.domain.transaction import Transaction
 from common import middleware
 from common.constants import *
 
+try:
+    from output_batcher import OutputBatcher
+except ImportError:
+    from workers.filter.output_batcher import OutputBatcher
+
 # Id correspondiente a la entidad
 ID = int(os.environ["ID"])
 # Host del middleware
@@ -42,6 +47,10 @@ USD_ENABLE_Q2 = os.getenv("USD_ENABLE_Q2", "1") != "0"
 USD_ENABLE_DATE = os.getenv("USD_ENABLE_DATE", "1") != "0"
 DATE_ENABLE_Q3 = os.getenv("DATE_ENABLE_Q3", "1") != "0"
 DATE_ENABLE_Q4 = os.getenv("DATE_ENABLE_Q4", "1") != "0"
+
+FILTER_OUTPUT_BATCH_BYTES = int(os.getenv("FILTER_OUTPUT_BATCH_BYTES", str(1024 * 1024)))
+FILTER_OUTPUT_BATCH_MAX_TX = int(os.getenv("FILTER_OUTPUT_BATCH_MAX_TX", "5000"))
+
 
 class FilterWorker:
     def __init__(self):
@@ -124,6 +133,14 @@ class FilterWorker:
         self.transaction_serializer = message_protocol.internal.TransactionSerializer()
         self.control_serializer = message_protocol.internal.ControlMessageSerializer()
         self.internal_packet_serializer = message_protocol.internal.InternalProtocol()
+
+        self._batcher: OutputBatcher | None = None
+        if CONFIGURATION in (C_USD, C_Q5):
+            self._batcher = OutputBatcher(
+                self.transaction_serializer,
+                FILTER_OUTPUT_BATCH_BYTES,
+                FILTER_OUTPUT_BATCH_MAX_TX,
+            )
 
         # Estado interno
         self.lock = threading.Lock()
@@ -250,6 +267,8 @@ class FilterWorker:
         '''
         Elimina toda la informacion asociada a un cliente, cerrando su procesamiento
         '''
+        if self._batcher is not None:
+            self._batcher.discard_client(client_id)
         with self.lock:
             if client_id in self.processed_by_client:
                 del self.processed_by_client[client_id]
@@ -275,52 +294,81 @@ class FilterWorker:
             self.forwarded_by_output_by_client[client_id][output_name] = 0
         self.forwarded_by_output_by_client[client_id][output_name] += 1
 
+    def _data_packet(self, client_id: int, payload: bytes) -> bytes:
+        return self.internal_packet_serializer.create_packet(
+            msg_type=message_protocol.internal.MessageType.DATA,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            payload=payload,
+        )
+
+    def _publish_to_queue(
+        self, queue_name: str, client_id: int, transaction: Transaction
+    ) -> None:
+        if self._batcher is not None:
+            batch_payload = self._batcher.append(queue_name, client_id, transaction)
+            if batch_payload is not None:
+                self.output_queues[queue_name].send(
+                    self._data_packet(client_id, batch_payload)
+                )
+            return
+        payload = self.transaction_serializer.serialize(transaction)
+        self.output_queues[queue_name].send(self._data_packet(client_id, payload))
+
+    def _flush_batcher_for_client(self, client_id: int) -> None:
+        if self._batcher is None:
+            return
+        for queue_name, payload in self._batcher.drain_client(client_id).items():
+            self.output_queues[queue_name].send(self._data_packet(client_id, payload))
+            logging.info(
+                "filter_batcher_flush | filter=%s | id=%s | client_id=%s | "
+                "queue=%s | bytes=%s",
+                CONFIGURATION, ID, client_id, queue_name, len(payload),
+            )
+
     def _forward_transaction(self, transaction: Transaction, client_id: int):
         '''
-        Envia una transaccion a la cola de salida correspondiente segun la configuracion del worker
+        Envia una transaccion a la(s) cola(s) de salida segun la configuracion.
+        Devuelve True si fue forwardeada a al menos una cola.
         '''
-        logging.debug(f"Transaction {transaction} passed filter in filter_{CONFIGURATION} with id {ID}, forwarding to output")
-        payload = self.transaction_serializer.serialize(transaction)
-        message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.internal.MessageType.DATA,
-            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
-            payload=payload
+        logging.debug(
+            f"Transaction {transaction} passed filter in filter_{CONFIGURATION} "
+            f"with id {ID}, forwarding to output"
         )
         sent = False
         if CONFIGURATION == C_Q1:
-            self.output_queues[GATEWAY_QUEUE].send(message)
+            self._publish_to_queue(GATEWAY_QUEUE, client_id, transaction)
             with self.lock:
                 self._record_forwarded_output(client_id, GATEWAY_QUEUE)
             sent = True
         if CONFIGURATION == C_Q5:
-            self.output_queues[FILTER_Q5_USD_QUEUE].send(message)
+            self._publish_to_queue(FILTER_Q5_USD_QUEUE, client_id, transaction)
             with self.lock:
                 self._record_forwarded_output(client_id, FILTER_Q5_USD_QUEUE)
             sent = True
         if CONFIGURATION == C_USD:
             if USD_ENABLE_Q1:
-                self.output_queues[FILTER_Q1_QUEUE].send(message)
+                self._publish_to_queue(FILTER_Q1_QUEUE, client_id, transaction)
                 with self.lock:
                     self._record_forwarded_output(client_id, FILTER_Q1_QUEUE)
                 sent = True
             if USD_ENABLE_Q2:
-                self.output_queues[SUM_Q2_QUEUE].send(message)
+                self._publish_to_queue(SUM_Q2_QUEUE, client_id, transaction)
                 with self.lock:
                     self._record_forwarded_output(client_id, SUM_Q2_QUEUE)
                 sent = True
             if USD_ENABLE_DATE:
-                self.output_queues[FILTER_DATE_QUEUE].send(message)
+                self._publish_to_queue(FILTER_DATE_QUEUE, client_id, transaction)
                 with self.lock:
                     self._record_forwarded_output(client_id, FILTER_DATE_QUEUE)
                 sent = True
         if CONFIGURATION == C_DATE:
             if DATE_ENABLE_Q3 and self._filter_transaction(transaction, start_date="2022-09-06", end_date="2022-09-15"):
-                self.output_queues[SUM_Q3_QUEUE].send(message)
+                self._publish_to_queue(SUM_Q3_QUEUE, client_id, transaction)
                 with self.lock:
                     self._record_forwarded_output(client_id, SUM_Q3_QUEUE)
                 sent = True
             if DATE_ENABLE_Q4 and self._filter_transaction(transaction, start_date="2022-09-01", end_date="2022-09-05"):
-                self.output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(message)
+                self._publish_to_queue(SCATTER_GATHER_MAPPER_QUEUE, client_id, transaction)
                 with self.lock:
                     self._record_forwarded_output(client_id, SCATTER_GATHER_MAPPER_QUEUE)
                 sent = True
@@ -521,6 +569,8 @@ class FilterWorker:
             msgs_sent = self.forwarded_by_client.get(client_id, 0)
             del self.pending_eof_by_client[client_id]
 
+        self._flush_batcher_for_client(client_id)
+
         logging.info(
             f"All {expected_total} expected messages processed for client {client_id} "
             f"in filter_{CONFIGURATION}, forwarding EOF (forwarded={msgs_sent})"
@@ -584,7 +634,7 @@ class FilterWorker:
             if self.is_leader:
                 logging.warning(f"Received FLUSH_ORDER control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am the leader, ignoring")
                 return
-            # Si se recibe una orden de flush, se limpian los recursos asociados a ese cliente y se responde con un mensaje de ack
+            self._flush_batcher_for_client(client_id)
             msgs_sent = 0
             with self.lock:
                 msgs_sent = self.forwarded_by_client.get(client_id, 0)
@@ -606,6 +656,7 @@ class FilterWorker:
 
             if len(self.flushed_acks_by_client[client_id]) == FILTER_AMOUNT - 1:
                 logging.info(f"Received all FLUSH_ACK control messages for client {client_id} in filter_{CONFIGURATION}, cleaning up client")
+                self._flush_batcher_for_client(client_id)
                 with self.lock:
                     msgs_sent = self.all_forwarded_by_client[client_id] + self.forwarded_by_client.get(client_id, 0)
                 self._forward_eof(client_id, msgs_sent)
