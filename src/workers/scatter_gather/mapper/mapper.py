@@ -3,6 +3,7 @@ import logging
 import threading
 
 from common import message_protocol
+from common.batch_buffer import BatchBuffer
 from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareQueueRabbitMQ,
     MessageMiddlewareExchangeRabbitMQ,
@@ -17,6 +18,8 @@ MOM_HOST = os.environ["MOM_HOST"]
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
 SG_LINKER_EXCHANGE = os.environ["SG_LINKER_EXCHANGE"]
 SG_LINKER_AMOUNT = int(os.environ["SG_LINKER_AMOUNT"])
+SG_MAPPER_BATCH_BYTES = int(os.environ.get("SG_MAPPER_BATCH_BYTES", str(1024 * 1024)))
+SG_MAPPER_BATCH_MAX_TX = int(os.environ.get("SG_MAPPER_BATCH_MAX_TX", "5000"))
 SG_MAPPER_AMOUNT = int(os.environ.get("SG_MAPPER_AMOUNT", "1"))
 SG_MAPPER_PREFIX = os.environ.get("SG_MAPPER_PREFIX", "sg_mapper")
 SG_MAPPER_CONTROL_EXCHANGE = os.environ.get(
@@ -42,6 +45,9 @@ class ScatterGatherMapper:
         self._tx_ser = message_protocol.internal.TransactionSerializer()
         self._proto = message_protocol.internal.InternalProtocol()
         self._control_serializer = ControlMessageSerializer()
+
+
+        self._batcher = BatchBuffer(SG_MAPPER_BATCH_BYTES, SG_MAPPER_BATCH_MAX_TX)
 
         self._lock = threading.Lock()
         self._processed_by_client = {}
@@ -101,32 +107,52 @@ class ScatterGatherMapper:
             )
         )
 
-    def _emit(
+    def _publish_edges(
+        self,
+        client_id: int,
+        partition: int,
+        tag: int,
+        batch_payload: bytes,
+        linkers=None,
+    ) -> None:
+        linkers = linkers or self._linkers
+        msg = self._proto.create_packet(
+            msg_type=MessageType.DATA,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            payload=bytes([tag]) + batch_payload,
+        )
+        linkers[partition].send(msg)
+
+    def _append_edge(
         self,
         client_id: int,
         tag: int,
         tx_bytes: bytes,
         partition: int,
         linkers=None,
-    ):
-        linkers = linkers or self._linkers
-        msg = self._proto.create_packet(
-            msg_type=MessageType.DATA,
-            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-            payload=bytes([tag]) + tx_bytes,
+    ) -> None:
+        batch_payload = self._batcher.append(
+            (client_id, partition, tag), tx_bytes
         )
-        linkers[partition].send(msg)
+        if batch_payload is not None:
+            self._publish_edges(client_id, partition, tag, batch_payload, linkers)
+
+    def _flush_client_buffers(self, client_id: int, linkers=None) -> None:
+        for (_, partition, tag), batch_payload in self._batcher.flush(
+            lambda k: k[0] == client_id
+        ):
+            self._publish_edges(client_id, partition, tag, batch_payload, linkers)
 
     def _forward_transaction(self, client_id: int, tx, linkers=None) -> int:
         payload = self._tx_ser.serialize(tx)
-        self._emit(
+        self._append_edge(
             client_id,
             EDGE_A_TO_M,
             payload,
             partition_for_key(tx.to_account, SG_LINKER_AMOUNT),
             linkers,
         )
-        self._emit(
+        self._append_edge(
             client_id,
             EDGE_M_TO_B,
             payload,
@@ -161,6 +187,7 @@ class ScatterGatherMapper:
             pending = self._pending_eof_by_client.get(client_id)
 
         if pending is not None:
+            self._flush_client_buffers(client_id)
             _, leader_id = pending
             self._report_to_leader(
                 client_id,
@@ -198,6 +225,10 @@ class ScatterGatherMapper:
                 if client_id in self._closed_by_client:
                     return
                 expected_total = self._forwarded_by_client.get(client_id, 0)
+            # Flush before cleanup so every buffered edge reaches the linker
+            # ahead of the EOF; cleanup then discards the now-empty buffers.
+            self._flush_client_buffers(client_id)
+            with self._lock:
                 self._cleanup_client_locked(client_id)
             self._forward_eof_to_linkers(client_id, expected_total)
             return
@@ -254,7 +285,7 @@ class ScatterGatherMapper:
         finally:
             response_queue.close()
 
-    def _handle_eof_broadcast(self, message: bytes, ack, nack) -> None:
+    def _handle_eof_broadcast(self, message: bytes, ack, nack, linkers=None) -> None:
         try:
             msg_type, client_id, payload = self._proto.unpack_packet(message)
             if msg_type != MessageType.EOF_RECEIVED:
@@ -276,12 +307,19 @@ class ScatterGatherMapper:
                 else:
                     processed_count = self._processed_by_client.get(client_id, 0)
                     forwarded_count = self._forwarded_by_client.get(client_id, 0)
+                    # Mark pending before flushing: any DATA the main thread is
+                    # still processing now sees the pending state and flushes its
+                    # own tail, so no buffered edge can slip past the EOF.
                     self._pending_eof_by_client[client_id] = (
                         expected_total,
                         leader_id,
                     )
 
             if not duplicate_eof:
+                # Flush the edges buffered before the EOF so they reach the
+                # linker ahead of it, published on this control thread's own
+                # linker channels.
+                self._flush_client_buffers(client_id, linkers)
                 self._report_to_leader(
                     client_id,
                     leader_id,
@@ -342,9 +380,18 @@ class ScatterGatherMapper:
             [SG_MAPPER_CONTROL_EXCHANGE],
         )
         self._control_consumer = control_consumer
+        # Dedicated linker channels: this thread publishes the EOF-time buffer
+        # flush, and pika channels are not shared across threads.
+        linkers = self._new_linker_outputs()
         try:
-            control_consumer.start_consuming(self._handle_eof_broadcast)
+            control_consumer.start_consuming(
+                lambda message, ack, nack: self._handle_eof_broadcast(
+                    message, ack, nack, linkers
+                )
+            )
         finally:
+            for linker in linkers:
+                linker.close()
             control_consumer.close()
 
     def _start_response_consumer(self) -> None:
@@ -366,6 +413,7 @@ class ScatterGatherMapper:
             response_consumer.close()
 
     def _cleanup_client_locked(self, client_id: int) -> None:
+        self._batcher.discard(lambda k: k[0] == client_id)
         self._processed_by_client.pop(client_id, None)
         self._forwarded_by_client.pop(client_id, None)
         self._pending_eof_by_client.pop(client_id, None)
