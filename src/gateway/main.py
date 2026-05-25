@@ -10,6 +10,7 @@ DEFAULT_SERVER_PORT = 5678
 DEFAULT_MOM_HOST = "rabbitmq"
 DEFAULT_FILE_INGESTOR_EXCHANGE = "file_ingestor_exchange"
 DEFAULT_FILE_INGESTOR_PARTITIONS = 1
+DEFAULT_FILE_SPLITTER_QUEUE_PREFIX = "file_splitter"
 DEFAULT_LOGGING_LEVEL = "INFO"
 MIN_TCP_PORT = 1
 MAX_TCP_PORT = 65535
@@ -62,6 +63,10 @@ def load_config() -> GatewayConfig:
             DEFAULT_FILE_INGESTOR_EXCHANGE,
         ),
         file_ingestor_partitions=file_ingestor_partitions,
+        file_splitter_queue_prefix=os.getenv(
+            "FILE_SPLITTER_QUEUE_PREFIX",
+            DEFAULT_FILE_SPLITTER_QUEUE_PREFIX,
+        ),
         logging_level=os.getenv("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
     )
 

@@ -260,12 +260,15 @@ class SumWorker:
         )
 
     def _handle_data_packet(self, client_id: int, payload: bytes) -> None:
-        transaction = self.transaction_serializer.deserialize(payload)
+        transactions = self.transaction_serializer.deserialize_batch(payload)
+        if not transactions:
+            return
 
         with self.lock:
-            self._process_transaction(client_id, transaction)
+            for transaction in transactions:
+                self._process_transaction(client_id, transaction)
             self.processed_by_client[client_id] = (
-                self.processed_by_client.get(client_id, 0) + 1
+                self.processed_by_client.get(client_id, 0) + len(transactions)
             )
             pending = self.pending_eof_by_client.get(client_id)
 
@@ -273,11 +276,13 @@ class SumWorker:
             return
 
         _, leader_id = pending
-        forwarded_count = self._forward_late_transaction(client_id, transaction)
+        forwarded_count = 0
+        for transaction in transactions:
+            forwarded_count += self._forward_late_transaction(client_id, transaction)
         self._report_to_leader(
             client_id,
             leader_id,
-            processed_count=1,
+            processed_count=len(transactions),
             forwarded_count=forwarded_count,
         )
 

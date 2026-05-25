@@ -205,6 +205,32 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
                 )
 
 
+def ensure_exchange_queue_bindings(
+    host: str,
+    exchange_name: str,
+    bindings: dict[str, str],
+    exchange_type: str = "direct",
+) -> None:
+    try:
+        with _RabbitMQBase(host) as rabbit:
+            rabbit._channel.exchange_declare(
+                exchange=exchange_name,
+                exchange_type=exchange_type,
+                durable=_DURABLE,
+            )
+            for queue_name, routing_key in bindings.items():
+                rabbit._channel.queue_declare(queue=queue_name, durable=_DURABLE)
+                rabbit._channel.queue_bind(
+                    queue=queue_name,
+                    exchange=exchange_name,
+                    routing_key=routing_key,
+                )
+    except _CONNECTION_ERRORS as e:
+        raise MessageMiddlewareDisconnectedError(e)
+    except Exception as e:
+        raise MessageMiddlewareMessageError(e)
+
+
 class MessageMiddlewareRpcClientRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcClient):
     def __init__(self, host, request_queue_name):
         self._request_queue = request_queue_name

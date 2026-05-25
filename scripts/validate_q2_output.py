@@ -7,12 +7,14 @@ que el nombre del banco corresponde al dataset de cuentas.
 import sys
 import csv
 import os
+from collections import Counter
 from pathlib import Path
 
 USD_CURRENCY = "US Dollar"
 DATASET_DIR = os.environ.get("Q2_DATASET_DIR", "data/datasets/client-1/LI-Mini")
 DATASET_TRANS = os.environ.get("Q2_DATASET_TRANS", "LI-Mini_Trans.csv")
 DATASET_ACCOUNTS = os.environ.get("Q2_DATASET_ACCOUNTS")
+Q2_OUTPUT_COLUMNS = ["From Bank", "Account", "Bank Name", "Amount Paid"]
 
 
 def _normalize_bank_id(value: str) -> str:
@@ -78,25 +80,34 @@ def validate_q2_results():
     print(f"✓ Dataset has {len(bank_names)} bank account mappings")
 
     # 3. Leer transacciones del dataset original
-    max_by_bank: dict[str, float] = {}
+    max_by_bank: dict[str, tuple[str, float]] = {}
     total_usd = 0
     try:
         with open(dataset_file, "r") as f:
-            reader = csv.DictReader(f)
+            reader = csv.reader(f)
+            header = next(reader)
+            columns = _transaction_columns(header)
             for row in reader:
-                currency = row["Payment Currency"].strip()
+                currency = row[columns["currency"]].strip()
                 if currency != USD_CURRENCY:
                     continue
                 total_usd += 1
-                bank_id = row["From Bank"].strip()
-                amount = float(row["Amount Paid"])
-                if bank_id not in max_by_bank or amount > max_by_bank[bank_id]:
-                    max_by_bank[bank_id] = amount
+                bank_id = row[columns["from_bank"]].strip()
+                amount = float(row[columns["amount"]])
+                if bank_id not in max_by_bank or amount > max_by_bank[bank_id][1]:
+                    max_by_bank[bank_id] = (
+                        row[columns["from_account"]].strip(),
+                        amount,
+                    )
     except Exception as e:
         print(f"ERROR reading dataset: {e}")
         return False
 
     print(f"✓ Dataset has {total_usd} USD transactions across {len(max_by_bank)} banks")
+    expected_rows = Counter()
+    for bank_id, (account, amount) in max_by_bank.items():
+        bank_name = bank_names.get(_normalize_bank_id(bank_id), "")
+        expected_rows[(bank_id, account, bank_name, f"{amount:.2f}")] += 1
 
     print(f"Found {len(output_files)} output file(s)")
 
@@ -105,6 +116,12 @@ def validate_q2_results():
         try:
             with open(output_file, "r") as f:
                 reader = csv.DictReader(f)
+                if reader.fieldnames != Q2_OUTPUT_COLUMNS:
+                    print(
+                        f"ERROR: invalid header {reader.fieldnames}, "
+                        f"expected {Q2_OUTPUT_COLUMNS}"
+                    )
+                    return False
                 output_rows = list(reader)
         except Exception as e:
             print(f"ERROR reading {output_file}: {e}")
@@ -117,16 +134,10 @@ def validate_q2_results():
             print("\nERROR: Output file is empty")
             return False
 
-        required_columns = {"bank_id", "from_account", "bank_name", "max_amount"}
-        missing_columns = required_columns - set(reader.fieldnames or [])
-        if missing_columns:
-            print(f"ERROR: Output missing required columns: {sorted(missing_columns)}")
-            return False
-
         # 4. Verificar que hay un registro por banco (sin duplicados)
         seen_banks: set[str] = set()
         for row in output_rows:
-            bank_id = row.get("bank_id", "").strip()
+            bank_id = row.get("From Bank", "").strip()
             if bank_id in seen_banks:
                 print(f"ERROR: Duplicate bank_id in output: '{bank_id}'")
                 return False
@@ -137,20 +148,22 @@ def validate_q2_results():
         # 5. Verificar que cada banco tiene el monto máximo correcto
         errors = 0
         missing_bank_names = 0
+        actual_rows = Counter()
         for row in output_rows:
-            bank_id = row.get("bank_id", "").strip()
+            bank_id = row.get("From Bank", "").strip()
             try:
-                reported_max = float(row.get("max_amount", ""))
+                reported_max = float(row.get("Amount Paid", ""))
             except ValueError:
-                print(f"ERROR: max_amount is not numeric for bank_id='{bank_id}': {row.get('max_amount')}")
+                print(f"ERROR: Amount Paid is not numeric for bank_id='{bank_id}': {row.get('Amount Paid')}")
                 return False
 
-            expected_max = max_by_bank.get(bank_id)
-            if expected_max is None:
+            expected = max_by_bank.get(bank_id)
+            if expected is None:
                 print(f"ERROR: bank_id '{bank_id}' not found in dataset")
                 errors += 1
                 continue
 
+            expected_account, expected_max = expected
             if abs(reported_max - expected_max) > 1e-6:
                 print(
                     f"ERROR: bank_id='{bank_id}' max_amount mismatch: "
@@ -158,8 +171,16 @@ def validate_q2_results():
                 )
                 errors += 1
 
+            reported_account = row.get("Account", "").strip()
+            if reported_account != expected_account:
+                print(
+                    f"ERROR: bank_id='{bank_id}' account mismatch: "
+                    f"got={reported_account!r}, expected={expected_account!r}"
+                )
+                errors += 1
+
             expected_bank_name = bank_names.get(_normalize_bank_id(bank_id))
-            reported_bank_name = row.get("bank_name", "").strip()
+            reported_bank_name = row.get("Bank Name", "").strip()
             if expected_bank_name is None:
                 missing_bank_names += 1
                 if reported_bank_name:
@@ -174,12 +195,33 @@ def validate_q2_results():
                     f"got={reported_bank_name!r}, expected={expected_bank_name!r}"
                 )
                 errors += 1
+            actual_rows[
+                (
+                    bank_id,
+                    reported_account,
+                    reported_bank_name,
+                    f"{reported_max:.2f}",
+                )
+            ] += 1
 
         if errors > 0:
             print(f"\nERROR: {errors} rows with incorrect Q2 values")
             return False
 
-        print("    ✓ All max amounts and mapped bank names match the dataset")
+        if actual_rows != expected_rows:
+            missing = expected_rows - actual_rows
+            unexpected = actual_rows - expected_rows
+            print(
+                f"ERROR: output rows differ from expected "
+                f"(missing={sum(missing.values())}, "
+                f"unexpected={sum(unexpected.values())})"
+            )
+            return False
+
+        print(
+            "    ✓ All rows match notebook schema and expected "
+            "max amounts/bank names"
+        )
         if missing_bank_names:
             print(
                 f"    ✓ {missing_bank_names} banks have no accounts mapping "
@@ -197,6 +239,23 @@ def validate_q2_results():
         print(f"    ✓ Output row count matches expected bank count ({len(max_by_bank)})")
 
     return True
+
+
+def _transaction_columns(header):
+    from_bank_idx = header.index("From Bank")
+    return {
+        "from_bank": from_bank_idx,
+        "from_account": _column_index_after(header, "Account", from_bank_idx),
+        "amount": header.index("Amount Paid"),
+        "currency": header.index("Payment Currency"),
+    }
+
+
+def _column_index_after(header, name, start_index):
+    for index in range(start_index + 1, len(header)):
+        if header[index] == name:
+            return index
+    raise ValueError(f"missing required column {name!r} after index {start_index}")
 
 
 if __name__ == "__main__":

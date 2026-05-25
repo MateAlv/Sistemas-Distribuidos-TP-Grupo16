@@ -46,6 +46,19 @@ class ScatterGatherRelationSerializer:
             to_account=_decode_fixed(to_account),
         )
 
+    @classmethod
+    def serialize_batch(cls, relations: list[ScatterGatherRelation]) -> bytes:
+        return b"".join(cls.serialize(relation) for relation in relations)
+
+    @classmethod
+    def deserialize_batch(cls, data: bytes) -> list[ScatterGatherRelation]:
+        if len(data) % cls.SIZE != 0:
+            raise ValueError(f"invalid scatter-gather relation batch size: {len(data)}")
+        return [
+            cls.deserialize(data[offset:offset + cls.SIZE])
+            for offset in range(0, len(data), cls.SIZE)
+        ]
+
 
 class ScatterGatherResultSerializer:
     ACCOUNT_SIZE = TransactionSerializer.ACCOUNT_SIZE

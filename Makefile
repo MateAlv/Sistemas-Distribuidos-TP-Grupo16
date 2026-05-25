@@ -134,7 +134,18 @@ stats:
 .PHONY: stats
 
 test:
-	$(MAKE) test-config
+	$(PYTHON) $(COMPOSE_SCRIPT) --config $(TEST_CONFIG_FILE) \
+		$(if $(TEST_DATASET),--dataset $(TEST_DATASET)) \
+		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
+		$(if $(Q2_SUM_WORKERS),--sum-q2-workers $(Q2_SUM_WORKERS)) \
+		$(if $(Q5_FORMAT_WORKERS),--filter-q5-format-workers $(Q5_FORMAT_WORKERS)) \
+		$(if $(Q5_USD_WORKERS),--filter-q5-usd-workers $(Q5_USD_WORKERS)) \
+		$(if $(SG_MAPPER_WORKERS),--sg-mapper-workers $(SG_MAPPER_WORKERS)) \
+		$(if $(SG_LINKER_WORKERS),--sg-linker-workers $(SG_LINKER_WORKERS)) \
+		$(if $(SG_DETECTOR_WORKERS),--sg-detector-workers $(SG_DETECTOR_WORKERS)) \
+		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
+		$(if $(CLIENTS),--clients $(CLIENTS)) \
+		--test-output $(TEST_COMPOSE_FILE) --skip-output
 	bash -lc 'set -euo pipefail; \
 		log_file="$$(mktemp -t $(TEST_PROJECT).XXXXXX.log)"; \
 		log_fifo="$$(mktemp -u -t $(TEST_PROJECT).XXXXXX.fifo)"; \
@@ -182,37 +193,52 @@ test:
 		echo "forward_pass_test_success"'
 .PHONY: test
 
+Q1_DATASET ?= LI-Mini
 test-q1:
-	bash -lc 'set -euo pipefail; \
-		cleanup() { docker compose -f docker-compose.test.yaml down --volumes --remove-orphans >/dev/null 2>&1; }; \
-		trap cleanup EXIT; \
+	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q1-test --dataset $(Q1_DATASET) \
+		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
+		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
+		$(if $(CLIENTS),--clients $(CLIENTS)) \
+		--test-output $(TEST_COMPOSE_FILE) --skip-output
+	@bash -lc 'set -euo pipefail; \
+		compose="docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE)"; \
+		cleanup() { $$compose down --volumes --remove-orphans >/dev/null 2>&1; }; \
+		if [ -z "$(KEEP_CONTAINERS)" ]; then \
+			trap cleanup EXIT; \
+		else \
+			echo "KEEP_CONTAINERS set — containers will remain after test"; \
+			echo "  logs:  $$compose logs -f <service>"; \
+			echo "  down:  $$compose down --volumes --remove-orphans"; \
+		fi; \
 		cleanup; \
 		mkdir -p data/output; \
-		echo "Starting Q1 flow test..."; \
-		docker compose -f docker-compose.test.yaml up --build --remove-orphans --detach; \
-		echo "Waiting for services to be ready..."; \
-		sleep 10; \
-		echo "Checking client logs for completion..."; \
-		timeout 120s sh -c '\''docker compose -f docker-compose.test.yaml logs --follow 2>&1 | grep -m1 "client_shutdown\|client_results_finished"'\''; \
-		sleep 5; \
-		echo "Validating Q1 output..."; \
-		python3 scripts/validate_q1_output.py && echo "✓ Q1 test PASSED" || echo "✗ Q1 test FAILED"; \
+		rm -f data/output/results_q*.csv; \
+		start_time=$$SECONDS; \
+		echo "Starting Q1 flow test (preset=q1-test, dataset=$(Q1_DATASET))..."; \
+		$$compose up --build --remove-orphans --detach; \
+		clients="$$($$compose config --services | grep "^client_" | tr "\n" " ")"; \
+		if [ -z "$$clients" ]; then echo "no client services found" >&2; exit 2; fi; \
+		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
+		elapsed=$$((SECONDS - start_time)); \
+		echo "Client finished in $${elapsed}s"; \
+		Q1_DATASET_DIR=data/datasets/client-1/$(Q1_DATASET) \
+		Q1_DATASET_TRANS=$(Q1_DATASET)_Trans.csv \
+			$(PYTHON) scripts/validate_q1_output.py \
+			&& echo "✓ Q1 test PASSED ($${elapsed}s)" \
+			|| { echo "✗ Q1 test FAILED ($${elapsed}s)"; exit 1; }; \
 		echo ""; \
-		echo "=== client_0 logs ==="; \
-		docker compose -f docker-compose.test.yaml logs client_0; \
-		echo "=== gateway logs ==="; \
-		docker compose -f docker-compose.test.yaml logs gateway; \
-		echo "=== filter_q1_0 logs ==="; \
-		docker compose -f docker-compose.test.yaml logs filter_q1_0'
+		echo "=== client_0 logs ==="; $$compose logs client_0'
 .PHONY: test-q1
 
 Q2_DATASET ?= LI-Mini
 Q2_SUM_WORKERS ?=
+CLIENTS ?=
 test-q2:
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q2-test --dataset $(Q2_DATASET) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
 		$(if $(Q2_SUM_WORKERS),--sum-q2-workers $(Q2_SUM_WORKERS)) \
 		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
+		$(if $(CLIENTS),--clients $(CLIENTS)) \
 		--test-output $(TEST_COMPOSE_FILE) --skip-output
 	@bash -lc 'set -euo pipefail; \
 		compose="docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE)"; \
@@ -255,6 +281,7 @@ test-q5:
 		$(if $(Q5_USD_WORKERS),--filter-q5-usd-workers $(Q5_USD_WORKERS)) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
 		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
+		$(if $(CLIENTS),--clients $(CLIENTS)) \
 		--test-output $(TEST_COMPOSE_FILE) --skip-output
 	@bash -lc 'set -euo pipefail; \
 		compose="docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE)"; \

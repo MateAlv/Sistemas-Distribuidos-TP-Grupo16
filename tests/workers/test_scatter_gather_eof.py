@@ -6,6 +6,7 @@ from common.domain.transaction import Transaction
 from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal.scatter_gather_serializer import (
+    ScatterGatherRelationSerializer,
     ScatterGatherResultSerializer,
 )
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
@@ -173,6 +174,89 @@ def test_mapper_reports_late_data_after_pending_eof(monkeypatch):
     ]
 
 
+def test_mapper_accepts_batched_transactions(monkeypatch):
+    module = _import_module(
+        monkeypatch,
+        "workers.scatter_gather.mapper.mapper",
+        {
+            "ID": "0",
+            "MOM_HOST": "rabbitmq",
+            "INPUT_QUEUE": "sg_mapper_queue",
+            "SG_LINKER_EXCHANGE": "sg_linker_exchange",
+            "SG_LINKER_AMOUNT": "1",
+            "SG_MAPPER_AMOUNT": "1",
+            "SG_MAPPER_PREFIX": "sg_mapper",
+        },
+    )
+    worker = module.ScatterGatherMapper()
+    client_id = 24
+    transactions = [
+        Transaction(
+            date="2022-09-02",
+            from_bank="bank-a",
+            from_account="A1",
+            to_bank="bank-m",
+            to_account="M1",
+            amount=10.0,
+            currency="US Dollar",
+            format="Wire",
+        ),
+        Transaction(
+            date="2022-09-03",
+            from_bank="bank-a",
+            from_account="A2",
+            to_bank="bank-m",
+            to_account="M2",
+            amount=20.0,
+            currency="US Dollar",
+            format="ACH",
+        ),
+    ]
+
+    worker._handle_data_packet(
+        client_id, TransactionSerializer.serialize_batch(transactions)
+    )
+
+    assert worker._processed_by_client[client_id] == 2
+    assert worker._forwarded_by_client[client_id] == 4
+    assert len(worker._linkers[0].sent) == 4
+
+
+def test_mapper_leader_report_can_use_thread_local_linkers(monkeypatch):
+    module = _import_module(
+        monkeypatch,
+        "workers.scatter_gather.mapper.mapper",
+        {
+            "ID": "0",
+            "MOM_HOST": "rabbitmq",
+            "INPUT_QUEUE": "sg_mapper_queue",
+            "SG_LINKER_EXCHANGE": "sg_linker_exchange",
+            "SG_LINKER_AMOUNT": "1",
+            "SG_MAPPER_AMOUNT": "2",
+            "SG_MAPPER_PREFIX": "sg_mapper",
+        },
+    )
+    worker = module.ScatterGatherMapper()
+    client_id = 25
+    thread_linkers = [FakeExchange()]
+    worker._leader_expected_by_client[client_id] = 1
+
+    report = worker._packet(
+        MessageType.PROCESSED_ANSWER,
+        client_id,
+        _control_payload(sender_id=1, expected_total=2, processed_count=1),
+    )
+    worker._handle_leader_report(
+        report,
+        ack=lambda: None,
+        nack=lambda: None,
+        linkers=thread_linkers,
+    )
+
+    assert worker._linkers[0].sent == []
+    assert len(thread_linkers[0].sent) == 1
+
+
 def test_linker_forwards_on_mapper_group_eof(monkeypatch):
     module = _import_module(
         monkeypatch,
@@ -188,6 +272,7 @@ def test_linker_forwards_on_mapper_group_eof(monkeypatch):
     worker = module.ScatterGatherLinker()
     client_id = 31
     worker._emitted_count_by_client[client_id] = 3
+    worker._emitted_count_by_partition[client_id][0] = 3
 
     worker._handle_eof(client_id, _control_payload(0, 0, 0))
 
@@ -201,6 +286,67 @@ def test_linker_forwards_on_mapper_group_eof(monkeypatch):
     assert control.sender_id == 0
     assert control.expected_total == 3
     assert client_id in worker._closed_by_client
+
+
+def test_linker_forwards_after_aggregated_mapper_group_eof(monkeypatch):
+    module = _import_module(
+        monkeypatch,
+        "workers.scatter_gather.linker.linker",
+        {
+            "ID": "0",
+            "MOM_HOST": "rabbitmq",
+            "SG_LINKER_EXCHANGE": "sg_linker_exchange",
+            "SG_DETECTOR_EXCHANGE": "sg_detector_exchange",
+            "SG_DETECTOR_AMOUNT": "1",
+        },
+    )
+    worker = module.ScatterGatherLinker()
+    client_id = 32
+    worker._emitted_count_by_client[client_id] = 3
+    worker._emitted_count_by_partition[client_id][0] = 3
+
+    worker._handle_eof(client_id, _control_payload(0, 0, 0))
+
+    assert len(worker._detectors[0].sent) == 1
+    assert client_id in worker._closed_by_client
+
+
+def test_linker_batches_relations_until_eof_flush(monkeypatch):
+    module = _import_module(
+        monkeypatch,
+        "workers.scatter_gather.linker.linker",
+        {
+            "ID": "0",
+            "MOM_HOST": "rabbitmq",
+            "SG_LINKER_EXCHANGE": "sg_linker_exchange",
+            "SG_DETECTOR_EXCHANGE": "sg_detector_exchange",
+            "SG_DETECTOR_AMOUNT": "1",
+            "SG_LINKER_BATCH_MAX_RELATIONS": "100",
+        },
+    )
+    worker = module.ScatterGatherLinker()
+    client_id = 33
+
+    worker._try_emit(client_id, "A1", "M", "B1")
+    worker._try_emit(client_id, "A2", "M", "B2")
+
+    assert worker._detectors[0].sent == []
+
+    worker._handle_eof(client_id, _control_payload(0, 0, 0))
+
+    assert len(worker._detectors[0].sent) == 2
+    data_type, _, data_payload = worker._proto.unpack_packet(
+        worker._detectors[0].sent[0]
+    )
+    eof_type, _, eof_payload = worker._proto.unpack_packet(
+        worker._detectors[0].sent[1]
+    )
+    relations = ScatterGatherRelationSerializer.deserialize_batch(data_payload)
+    control = ControlMessageSerializer.deserialize(eof_payload)
+    assert data_type == MessageType.DATA
+    assert eof_type == MessageType.EOF
+    assert len(relations) == 2
+    assert control.expected_total == 2
 
 
 def test_detector_waits_for_distinct_linker_eofs(monkeypatch):
@@ -285,18 +431,19 @@ def test_detector_leader_forwards_gateway_eof_after_detector_reports(monkeypatch
             "SG_DETECTOR_EXCHANGE": "sg_detector_exchange",
             "GATEWAY_Q4_QUEUE": "gateway_q4_results_queue",
             "SG_LINKER_AMOUNT": "1",
-            "SG_DETECTOR_AMOUNT": "2",
+            "SG_DETECTOR_AMOUNT": "3",
             "SG_DETECTOR_PREFIX": "sg_detector",
         },
     )
     worker = module.ScatterGatherDetector()
     client_id = 43
     worker._leader_expected_by_client[client_id] = 3
+    worker._leader_emitted_by_client[client_id] = 1
 
     first_report = worker._packet(
         MessageType.PROCESSED_ANSWER,
         client_id,
-        _control_payload(sender_id=0, expected_total=1, processed_count=1),
+        _control_payload(sender_id=1, expected_total=1, processed_count=1),
     )
     worker._handle_leader_report(
         first_report,
@@ -309,7 +456,7 @@ def test_detector_leader_forwards_gateway_eof_after_detector_reports(monkeypatch
     second_report = worker._packet(
         MessageType.PROCESSED_ANSWER,
         client_id,
-        _control_payload(sender_id=1, expected_total=1, processed_count=2),
+        _control_payload(sender_id=2, expected_total=1, processed_count=2),
     )
     worker._handle_leader_report(
         second_report,
@@ -325,7 +472,7 @@ def test_detector_leader_forwards_gateway_eof_after_detector_reports(monkeypatch
     assert msg_type == MessageType.EOF
     assert received_client_id == client_id
     assert control.sender_id == 0
-    assert control.expected_total == 2
+    assert control.expected_total == 3
     assert client_id in worker._closed_by_client
 
 
@@ -363,21 +510,19 @@ def test_detector_reports_late_relations_after_pending_eof(monkeypatch):
         nack=lambda: None,
     )
 
-    assert reports == [
-        (
-            (client_id, 0),
-            {"processed_count": 0, "emitted_count": 0},
-        )
-    ]
+    assert reports == []
 
     for index in range(1, 6):
         worker._add_relation(client_id, "A", f"M{index}", "B")
 
-    assert len(reports) == 6
-    assert reports[-1] == (
-        (client_id, 0),
-        {"processed_count": 1, "emitted_count": 1},
-    )
+    worker._handle_eof(client_id, _control_payload(0, 5, 0))
+
+    assert reports == [
+        (
+            (client_id, 0),
+            {"processed_count": 5, "emitted_count": 1},
+        )
+    ]
     assert len(worker._output.sent) == 1
     msg_type, received_client_id, payload = worker._proto.unpack_packet(
         worker._output.sent[0]
@@ -387,3 +532,38 @@ def test_detector_reports_late_relations_after_pending_eof(monkeypatch):
     assert received_client_id == client_id
     assert result.from_account == "A"
     assert result.to_account == "B"
+
+
+def test_detector_leader_report_can_use_thread_local_gateway_output(monkeypatch):
+    module = _import_module(
+        monkeypatch,
+        "workers.scatter_gather.detector.detector",
+        {
+            "ID": "0",
+            "MOM_HOST": "rabbitmq",
+            "SG_DETECTOR_EXCHANGE": "sg_detector_exchange",
+            "GATEWAY_Q4_QUEUE": "gateway_q4_results_queue",
+            "SG_LINKER_AMOUNT": "1",
+            "SG_DETECTOR_AMOUNT": "2",
+            "SG_DETECTOR_PREFIX": "sg_detector",
+        },
+    )
+    worker = module.ScatterGatherDetector()
+    client_id = 49
+    thread_output = FakeQueue()
+    worker._leader_expected_by_client[client_id] = 1
+
+    report = worker._packet(
+        MessageType.PROCESSED_ANSWER,
+        client_id,
+        _control_payload(sender_id=1, expected_total=3, processed_count=1),
+    )
+    worker._handle_leader_report(
+        report,
+        ack=lambda: None,
+        nack=lambda: None,
+        output=thread_output,
+    )
+
+    assert worker._output.sent == []
+    assert len(thread_output.sent) == 1
