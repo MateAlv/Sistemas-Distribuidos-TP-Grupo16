@@ -134,8 +134,10 @@ class FileIngestor:
         batch = self._line_batch_serializer.deserialize(payload)
         transactions = LineBatchParser.parse(batch)
 
-        for transaction in transactions:
-            self._send_transaction(self._transaction_sender(), client_id, transaction)
+        if transactions:
+            self._send_transaction_batch(
+                self._transaction_sender(), client_id, transactions
+            )
 
         forwarded = len(transactions)
         with self._lock:
@@ -376,6 +378,20 @@ class FileIngestor:
                 MessageType.DATA,
                 client_id,
                 self._transaction_serializer.serialize(transaction),
+            )
+        )
+
+    def _send_transaction_batch(
+        self,
+        sender: MessageMiddlewareExchangeRabbitMQ,
+        client_id: int,
+        transactions: list[Transaction],
+    ) -> None:
+        sender.send(
+            self._packet(
+                MessageType.DATA,
+                client_id,
+                self._transaction_serializer.serialize_batch(transactions),
             )
         )
 

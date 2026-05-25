@@ -225,11 +225,15 @@ class FilterQ5UsdWorker:
 
     def _process_data(self, client_id: int, payload: bytes):
         self._load_rates()
-        transaction = self.transaction_serializer.deserialize(payload)
+        # El payload puede traer 1 o N transactions concatenadas.
+        transactions = self.transaction_serializer.deserialize_batch(payload)
+        if not transactions:
+            return
 
-        forwarded_delta = 0
-
-        if self._in_date_range(transaction.date):
+        forwarded_in_batch = 0
+        for transaction in transactions:
+            if not self._in_date_range(transaction.date):
+                continue
             try:
                 amount_usd = self._convert_to_usd(
                     transaction.amount,
@@ -238,33 +242,37 @@ class FilterQ5UsdWorker:
                 )
             except ValueError as e:
                 logging.warning("filter_q5_usd_conversion_error | error=%s", e)
-                amount_usd = None
+                continue
+            if amount_usd >= 1.0:
+                continue
 
-            if amount_usd is not None and amount_usd < 1.0:
-                self._forward_transaction(payload, client_id)
-                forwarded_delta = 1
+            # Forward individual: el aggregator espera 1 transaction por DATA.
+            self._forward_transaction(
+                self.transaction_serializer.serialize(transaction), client_id
+            )
+            forwarded_in_batch += 1
 
+        processed_delta = len(transactions)
         with self.lock:
             self.processed_by_client[client_id] = (
-                self.processed_by_client.get(client_id, 0) + 1
+                self.processed_by_client.get(client_id, 0) + processed_delta
             )
-            if forwarded_delta:
+            if forwarded_in_batch:
                 self.forwarded_by_client[client_id] = (
-                    self.forwarded_by_client.get(client_id, 0) + forwarded_delta
+                    self.forwarded_by_client.get(client_id, 0) + forwarded_in_batch
                 )
             pending = self.pending_eof_by_client.get(client_id)
 
         if pending is None:
             return
 
-        # Late DATA: ya vimos el EOF, reportamos el delta al líder para que
-        # actualice sus contadores agregados.
+        # Late DATA: ya vimos el EOF, reportamos el delta agregado al líder.
         _, leader_id = pending
         self._report_to_leader(
             client_id,
             leader_id,
-            processed_count=1,
-            forwarded_count=forwarded_delta,
+            processed_count=processed_delta,
+            forwarded_count=forwarded_in_batch,
         )
 
     def _handle_upstream_eof(self, client_id: int, payload: bytes):

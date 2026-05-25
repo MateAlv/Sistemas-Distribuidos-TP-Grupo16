@@ -73,21 +73,27 @@ def test_file_ingestor_emits_transactions_from_line_batch():
 
     assert calls.acks == 1
     assert calls.nacks == 0
-    assert len(sender.messages) == 2
+    # Las 2 transactions del LineBatch viajan en un único publish con el
+    # payload serializado como batch (serialize_batch).
+    assert len(sender.messages) == 1
 
     msg_type, client_id, payload = InternalProtocol.unpack_packet(sender.messages[0])
-    transaction = TransactionSerializer.deserialize(payload)
+    txs = TransactionSerializer.deserialize_batch(payload)
 
     assert msg_type == MessageType.DATA
     assert client_id == 9
-    assert transaction.date == "2022/09/01 00:08"
-    assert transaction.from_bank == "1"
-    assert transaction.from_account == "abc"
-    assert transaction.to_bank == "2"
-    assert transaction.to_account == "def"
-    assert transaction.amount == 12.5
-    assert transaction.currency == "US Dollar"
-    assert transaction.format == "Wire"
+    assert len(txs) == 2
+    assert txs[0].date == "2022/09/01 00:08"
+    assert txs[0].from_bank == "1"
+    assert txs[0].from_account == "abc"
+    assert txs[0].to_bank == "2"
+    assert txs[0].to_account == "def"
+    assert txs[0].amount == 12.5
+    assert txs[0].currency == "US Dollar"
+    assert txs[0].format == "Wire"
+    assert txs[1].date == "2022/09/01 00:09"
+    assert txs[1].amount == 20.0
+    assert txs[1].format == "ACH"
 
 
 def test_file_ingestor_broadcasts_eof_on_upstream_eof():
