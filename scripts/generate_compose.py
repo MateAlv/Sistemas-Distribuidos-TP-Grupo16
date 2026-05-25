@@ -71,6 +71,7 @@ def main() -> int:
     else:
         config_path = resolve_path(args.config)
         config = load_config(config_path)
+        apply_cli_overrides(config, args, config_path)
         config_label = relative(config_path)
 
     output_file = resolve_path(
@@ -100,12 +101,12 @@ def parse_args():
     parser.add_argument("--test-output", help="Path for docker-compose.test.yaml.")
     parser.add_argument("--preset", choices=("q1-test", "q2-test", "q5-test"), help="Use a built-in compose config preset.")
     parser.add_argument("--dataset", default="LI-Mini", help="Dataset name for presets that need one.")
-    parser.add_argument("--filter-usd-workers", type=int, default=None, help="Override filter_usd worker count (preset only).")
-    parser.add_argument("--sum-q2-workers", type=int, default=None, help="Override sum_q2 worker count (preset only).")
-    parser.add_argument("--filter-q5-format-workers", type=int, default=None, help="Override filter_q5_format worker count (preset only).")
-    parser.add_argument("--filter-q5-usd-workers", type=int, default=None, help="Override filter_q5_usd worker count (preset only).")
-    parser.add_argument("--prefetch", type=int, default=None, help="PREFETCH_COUNT for Q2 filter/sum services (preset only).")
-    parser.add_argument("--clients", type=int, default=1, help="Number of client containers to spawn (preset only). Each gets a distinct client_id sharing the same dataset.")
+    parser.add_argument("--filter-usd-workers", type=int, default=None, help="Override filter_usd worker count.")
+    parser.add_argument("--sum-q2-workers", type=int, default=None, help="Override sum_q2 worker count.")
+    parser.add_argument("--filter-q5-format-workers", type=int, default=None, help="Override filter_q5_format worker count.")
+    parser.add_argument("--filter-q5-usd-workers", type=int, default=None, help="Override filter_q5_usd worker count.")
+    parser.add_argument("--prefetch", type=int, default=None, help="PREFETCH_COUNT for filter/sum services.")
+    parser.add_argument("--clients", type=int, default=None, help="Number of client containers to spawn. Each gets a distinct client_id sharing the first configured dataset.")
     parser.add_argument("--skip-output", action="store_true", help="Do not write docker-compose.yaml.")
     parser.add_argument("--skip-test-output", action="store_true", help="Do not write docker-compose.test.yaml.")
     parser.set_defaults(skip_output=False, skip_test_output=False)
@@ -123,10 +124,11 @@ def preset_config(
     filter_q5_format_workers: int | None = None,
     prefetch: int | None = None,
     filter_q5_usd_workers: int | None = None,
-    clients: int = 1,
+    clients: int | None = None,
 ) -> dict:
     if name not in ("q1-test", "q2-test", "q5-test"):
         raise ValueError(f"unknown preset: {name}")
+    clients = clients or 1
     if clients < 1:
         raise ValueError("clients must be >= 1")
 
@@ -190,6 +192,38 @@ def preset_config(
     }
     validate_config(config, Path(f"preset:{name}"))
     return config
+
+
+def apply_cli_overrides(config: dict, args, path: Path) -> None:
+    workers = config.setdefault("workers", {})
+    filters = workers.setdefault("filters", {})
+    sums = workers.setdefault("sums", {})
+    settings = config.setdefault("settings", {})
+
+    if args.filter_usd_workers is not None:
+        filters["usd"] = args.filter_usd_workers
+    if args.sum_q2_workers is not None:
+        sums["q2"] = args.sum_q2_workers
+    if args.filter_q5_format_workers is not None:
+        filters["q5_format"] = args.filter_q5_format_workers
+    if args.filter_q5_usd_workers is not None:
+        filters["q5_usd"] = args.filter_q5_usd_workers
+    if args.prefetch is not None:
+        settings["filter_prefetch_count"] = args.prefetch
+    if args.clients is not None:
+        if args.clients < 1:
+            raise ValueError("clients must be >= 1")
+        accounts = config.get("client_accounts", [])
+        if not accounts:
+            raise ValueError(f"{path}: client_accounts must be a non-empty list")
+        template = dict(accounts[0])
+        config["client_accounts"] = [
+            {**template, "client_id": client_id}
+            for client_id in range(args.clients)
+        ]
+        config["clients"] = args.clients
+
+    validate_config(config, path)
 
 
 def load_config(path: Path) -> dict:

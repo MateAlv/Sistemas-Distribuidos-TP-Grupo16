@@ -134,7 +134,14 @@ stats:
 .PHONY: stats
 
 test:
-	$(MAKE) test-config
+	$(PYTHON) $(COMPOSE_SCRIPT) --config $(TEST_CONFIG_FILE) \
+		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
+		$(if $(Q2_SUM_WORKERS),--sum-q2-workers $(Q2_SUM_WORKERS)) \
+		$(if $(Q5_FORMAT_WORKERS),--filter-q5-format-workers $(Q5_FORMAT_WORKERS)) \
+		$(if $(Q5_USD_WORKERS),--filter-q5-usd-workers $(Q5_USD_WORKERS)) \
+		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
+		$(if $(CLIENTS),--clients $(CLIENTS)) \
+		--test-output $(TEST_COMPOSE_FILE) --skip-output
 	bash -lc 'set -euo pipefail; \
 		log_file="$$(mktemp -t $(TEST_PROJECT).XXXXXX.log)"; \
 		log_fifo="$$(mktemp -u -t $(TEST_PROJECT).XXXXXX.fifo)"; \
