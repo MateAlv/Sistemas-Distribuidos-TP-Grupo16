@@ -241,12 +241,7 @@ test-q2:
 			&& echo "✓ Q2 test PASSED ($${elapsed}s)" \
 			|| { echo "✗ Q2 test FAILED ($${elapsed}s)"; exit 1; }; \
 		echo ""; \
-		echo "=== client_0 logs ==="; $$compose logs client_0; \
-		echo "=== gateway logs ==="; $$compose logs gateway; \
-		echo "=== sum_q2 logs ==="; $$compose logs $$($$compose config --services | grep "^sum_q2_"); \
-		echo "=== aggregation_q2_0 logs ==="; $$compose logs aggregation_q2_0; \
-		echo "=== join_q2 logs ==="; $$compose logs join_q2; \
-		echo "=== q2_bank_name_joiner logs ==="; $$compose logs q2_bank_name_joiner'
+		echo "=== client_0 logs ==="; $$compose logs client_0'
 .PHONY: test-q2
 
 Q5_DATASET ?= LI-Mini
@@ -288,12 +283,7 @@ test-q5:
 			&& echo "✓ Q5 test PASSED ($${elapsed}s)" \
 			|| { echo "✗ Q5 test FAILED ($${elapsed}s)"; exit 1; }; \
 		echo ""; \
-		echo "=== client_0 logs ==="; $$compose logs client_0; \
-		echo "=== gateway logs ==="; $$compose logs gateway; \
-		echo "=== filter_q5_format_0 logs ==="; $$compose logs filter_q5_format_0; \
-		echo "=== filter_q5_usd_0 logs ==="; $$compose logs filter_q5_usd_0; \
-		echo "=== aggregation_q5_0 logs ==="; $$compose logs aggregation_q5_0; \
-		echo "=== join_q5 logs ==="; $$compose logs join_q5'
+		echo "=== client_0 logs ==="; $$compose logs client_0'
 .PHONY: test-q5
 
 
