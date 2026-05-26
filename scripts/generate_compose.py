@@ -55,6 +55,13 @@ SG_MAPPER_QUEUE = "scatter_gather_mapper_queue"
 SG_LINKER_EXCHANGE = "sg_linker_exchange"
 SG_DETECTOR_EXCHANGE = "sg_detector_exchange"
 
+# Q3 sharding: exchanges direct + routing key por shard de barrier.
+# Cada barrier ID consume su queue bindeada al routing key "{prefix}_{ID}".
+Q3_AVERAGES_EXCHANGE = "q3_averages_exchange"
+Q3_CANDIDATES_EXCHANGE = "q3_candidates_exchange"
+Q3_AVERAGES_ROUTING_PREFIX = "q3_averages"
+Q3_CANDIDATES_ROUTING_PREFIX = "q3_candidates"
+
 
 def main() -> int:
     args = parse_args()
@@ -71,6 +78,7 @@ def main() -> int:
             args.sg_linker_workers,
             args.sg_detector_workers,
             clients=args.clients,
+            q3_barrier_workers=args.q3_barrier_workers,
         )
         config_label = f"preset:{args.preset}"
     else:
@@ -113,6 +121,7 @@ def parse_args():
     parser.add_argument("--sg-mapper-workers", type=int, default=None, help="Override scatter-gather mapper worker count.")
     parser.add_argument("--sg-linker-workers", type=int, default=None, help="Override scatter-gather linker worker count.")
     parser.add_argument("--sg-detector-workers", type=int, default=None, help="Override scatter-gather detector worker count.")
+    parser.add_argument("--q3-barrier-workers", type=int, default=None, help="Override q3_barrier worker count (sharded by client_id).")
     parser.add_argument("--prefetch", type=int, default=None, help="PREFETCH_COUNT for filter/sum services.")
     parser.add_argument("--clients", type=int, default=None, help="Number of client containers to spawn. Each gets a distinct client_id sharing the first configured dataset.")
     parser.add_argument("--skip-output", action="store_true", help="Do not write docker-compose.yaml.")
@@ -136,6 +145,7 @@ def preset_config(
     sg_linker_workers: int | None = None,
     sg_detector_workers: int | None = None,
     clients: int | None = None,
+    q3_barrier_workers: int | None = None,
 ) -> dict:
     if name not in ("q1-test", "q2-test", "q3-test", "q5-test"):
         raise ValueError(f"unknown preset: {name}")
@@ -191,6 +201,9 @@ def preset_config(
                 "q3": 1,
                 "q5": 1,
             },
+            "q3_barrier": (
+                q3_barrier_workers if q3_barrier_workers is not None else 1
+            ),
             "scatter_gather": {
                 "mappers": sg_mapper_workers if sg_mapper_workers is not None else 1,
                 "linkers": sg_linker_workers if sg_linker_workers is not None else 1,
@@ -226,6 +239,8 @@ def apply_cli_overrides(config: dict, args, path: Path) -> None:
         scatter_gather["linkers"] = args.sg_linker_workers
     if args.sg_detector_workers is not None:
         scatter_gather["detectors"] = args.sg_detector_workers
+    if args.q3_barrier_workers is not None:
+        workers["q3_barrier"] = args.q3_barrier_workers
     if args.prefetch is not None:
         settings["filter_prefetch_count"] = args.prefetch
     if args.clients is not None:
@@ -362,6 +377,7 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
         "sg_mapper": int(get_nested(workers, "scatter_gather.mappers", 1)),
         "sg_linker": int(get_nested(workers, "scatter_gather.linkers", 1)),
         "sg_detector": int(get_nested(workers, "scatter_gather.detectors", 1)),
+        "q3_barrier": int(workers.get("q3_barrier", 1)),
     }
     min_intermediaries = int(get_nested(workers, "scatter_gather.min_intermediaries", 5))
 
@@ -399,6 +415,7 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 settings=settings,
                 transaction_exchange=TRANSACTION_EXCHANGE if configuration == "USD" else None,
                 enabled_queries=enabled_queries,
+                q3_barrier_amount=counts["q3_barrier"],
             )
 
     if q5_enabled:
@@ -411,6 +428,7 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 settings=settings,
                 transaction_exchange=TRANSACTION_EXCHANGE,
                 enabled_queries=enabled_queries,
+                q3_barrier_amount=counts["q3_barrier"],
             )
 
         services["rates_service"] = rates_service()
@@ -498,12 +516,17 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
             aggregation_prefix=AGGREGATION_Q3_PREFIX,
             sum_amount=counts["sum_q3"],
             sum_prefix=SUM_Q3_PREFIX,
+            q3_barrier_amount=counts["q3_barrier"],
         )
-        services["q3_barrier"] = q3_barrier_service(
-            averages_queue=JOIN_Q3_RESULTS_QUEUE,
-            candidates_queue=Q3_CANDIDATES_QUEUE,
-            output_queue=GATEWAY_Q3_QUEUE,
-        )
+        barrier_amount = counts["q3_barrier"]
+        for index in range(barrier_amount):
+            services[f"q3_barrier_{index}"] = q3_barrier_service(
+                index=index,
+                barrier_amount=barrier_amount,
+                averages_queue=JOIN_Q3_RESULTS_QUEUE,
+                candidates_queue=Q3_CANDIDATES_QUEUE,
+                output_queue=GATEWAY_Q3_QUEUE,
+            )
 
     if q5_enabled:
         for index in range(counts["aggregation_q5"]):
@@ -682,6 +705,7 @@ def filter_service(
     settings: dict,
     transaction_exchange: str | None = None,
     enabled_queries: set[str] | None = None,
+    q3_barrier_amount: int = 1,
 ) -> dict:
     enabled_queries = enabled_queries or {"q1", "q2", "q3", "q4", "q5"}
     environment = [
@@ -698,6 +722,7 @@ def filter_service(
         f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
         f"MOM_HOST={MOM_HOST}",
         "PYTHONUNBUFFERED=1",
+        f"Q3_BARRIER_AMOUNT={q3_barrier_amount}",
         f"Q3_CANDIDATES_QUEUE={Q3_CANDIDATES_QUEUE}",
         f"SCATTER_GATHER_MAPPER_QUEUE={SG_MAPPER_QUEUE}",
         f"SUM_PREFIX={SUM_Q3_PREFIX}",
@@ -709,6 +734,13 @@ def filter_service(
         f"DATE_ENABLE_Q3={int('q3' in enabled_queries)}",
         f"DATE_ENABLE_Q4={int('q4' in enabled_queries)}",
     ]
+    # Sharded mode: el filter_date publica candidates al exchange con routing
+    # key por client_id en lugar de la queue compartida.
+    if q3_barrier_amount > 1:
+        environment.extend([
+            f"Q3_CANDIDATES_EXCHANGE={Q3_CANDIDATES_EXCHANGE}",
+            f"Q3_CANDIDATES_ROUTING_PREFIX={Q3_CANDIDATES_ROUTING_PREFIX}",
+        ])
     if transaction_exchange:
         environment.append(f"TRANSACTION_EXCHANGE={transaction_exchange}")
     prefetch = settings.get("filter_prefetch_count")
@@ -822,42 +854,64 @@ def joiner_service(
     aggregation_prefix: str,
     sum_amount: int,
     sum_prefix: str,
+    q3_barrier_amount: int = 1,
 ) -> dict:
+    environment = [
+        f"AGGREGATION_AMOUNT={aggregation_amount}",
+        f"AGGREGATION_PREFIX={aggregation_prefix}",
+        f"CONFIGURATION={configuration}",
+        "ID=0",
+        f"INPUT_QUEUE={input_queue}",
+        f"MOM_HOST={MOM_HOST}",
+        f"OUTPUT_QUEUE={output_queue}",
+        "PYTHONUNBUFFERED=1",
+        f"SUM_AMOUNT={sum_amount}",
+        f"SUM_PREFIX={sum_prefix}",
+    ]
+    # Sharded Q3: el joiner enruta averages por client_id al barrier shard.
+    if configuration == "Q3" and q3_barrier_amount > 1:
+        environment.extend([
+            f"Q3_BARRIER_AMOUNT={q3_barrier_amount}",
+            f"Q3_AVERAGES_EXCHANGE={Q3_AVERAGES_EXCHANGE}",
+            f"Q3_AVERAGES_ROUTING_PREFIX={Q3_AVERAGES_ROUTING_PREFIX}",
+        ])
     return base_service(
         "workers/joiner/Dockerfile",
         depends_on=depends_on_rabbitmq(),
-        environment=[
-            f"AGGREGATION_AMOUNT={aggregation_amount}",
-            f"AGGREGATION_PREFIX={aggregation_prefix}",
-            f"CONFIGURATION={configuration}",
-            "ID=0",
-            f"INPUT_QUEUE={input_queue}",
-            f"MOM_HOST={MOM_HOST}",
-            f"OUTPUT_QUEUE={output_queue}",
-            "PYTHONUNBUFFERED=1",
-            f"SUM_AMOUNT={sum_amount}",
-            f"SUM_PREFIX={sum_prefix}",
-        ],
+        environment=environment,
     )
 
 
 def q3_barrier_service(
+    index: int,
+    barrier_amount: int,
     averages_queue: str,
     candidates_queue: str,
     output_queue: str,
 ) -> dict:
+    environment = [
+        f"ID={index}",
+        f"GATEWAY_Q3_QUEUE={output_queue}",
+        f"MOM_HOST={MOM_HOST}",
+        "PYTHONUNBUFFERED=1",
+        f"Q3_AVERAGES_QUEUE={averages_queue}",
+        f"Q3_CANDIDATES_QUEUE={candidates_queue}",
+        f"Q3_BARRIER_AMOUNT={barrier_amount}",
+        "Q3_THRESHOLD_DIVISOR=100",
+    ]
+    # Sharded mode: exponer los exchanges y prefijos de routing key. El barrier
+    # creará su queue bindeada al routing key "{prefix}_{ID}".
+    if barrier_amount > 1:
+        environment.extend([
+            f"Q3_AVERAGES_EXCHANGE={Q3_AVERAGES_EXCHANGE}",
+            f"Q3_CANDIDATES_EXCHANGE={Q3_CANDIDATES_EXCHANGE}",
+            f"Q3_AVERAGES_ROUTING_PREFIX={Q3_AVERAGES_ROUTING_PREFIX}",
+            f"Q3_CANDIDATES_ROUTING_PREFIX={Q3_CANDIDATES_ROUTING_PREFIX}",
+        ])
     return base_service(
         "workers/q3_barrier/Dockerfile",
         depends_on=depends_on_rabbitmq(),
-        environment=[
-            "ID=0",
-            f"GATEWAY_Q3_QUEUE={output_queue}",
-            f"MOM_HOST={MOM_HOST}",
-            "PYTHONUNBUFFERED=1",
-            f"Q3_AVERAGES_QUEUE={averages_queue}",
-            f"Q3_CANDIDATES_QUEUE={candidates_queue}",
-            "Q3_THRESHOLD_DIVISOR=100",
-        ],
+        environment=environment,
     )
 
 

@@ -143,6 +143,7 @@ test:
 		$(if $(SG_MAPPER_WORKERS),--sg-mapper-workers $(SG_MAPPER_WORKERS)) \
 		$(if $(SG_LINKER_WORKERS),--sg-linker-workers $(SG_LINKER_WORKERS)) \
 		$(if $(SG_DETECTOR_WORKERS),--sg-detector-workers $(SG_DETECTOR_WORKERS)) \
+		$(if $(Q3_BARRIER_WORKERS),--q3-barrier-workers $(Q3_BARRIER_WORKERS)) \
 		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
 		$(if $(CLIENTS),--clients $(CLIENTS)) \
 		--test-output $(TEST_COMPOSE_FILE) --skip-output
@@ -274,6 +275,7 @@ Q3_DATASET ?= LI-Mini
 test-q3:
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q3-test --dataset $(Q3_DATASET) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
+		$(if $(Q3_BARRIER_WORKERS),--q3-barrier-workers $(Q3_BARRIER_WORKERS)) \
 		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
 		$(if $(CLIENTS),--clients $(CLIENTS)) \
 		--test-output $(TEST_COMPOSE_FILE) --skip-output

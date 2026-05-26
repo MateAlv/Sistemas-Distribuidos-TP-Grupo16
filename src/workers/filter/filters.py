@@ -35,6 +35,15 @@ FILTER_Q3_QUEUE = os.environ["FILTER_Q3_QUEUE"]
 SCATTER_GATHER_MAPPER_QUEUE = os.environ["SCATTER_GATHER_MAPPER_QUEUE"]
 FILTER_Q5_USD_QUEUE = os.environ["FILTER_Q5_USD_QUEUE"]
 Q3_CANDIDATES_QUEUE = os.getenv("Q3_CANDIDATES_QUEUE", FILTER_Q3_QUEUE)
+# Sharding opcional de candidatos Q3 por client_id. Si Q3_CANDIDATES_EXCHANGE
+# y Q3_BARRIER_AMOUNT > 1 están seteados, el filter publica a un exchange con
+# routing key "{Q3_CANDIDATES_ROUTING_PREFIX}_{client_id % Q3_BARRIER_AMOUNT}"
+# para distribuir candidatos entre N q3_barrier shards.
+Q3_CANDIDATES_EXCHANGE = os.getenv("Q3_CANDIDATES_EXCHANGE")
+Q3_CANDIDATES_ROUTING_PREFIX = os.getenv(
+    "Q3_CANDIDATES_ROUTING_PREFIX", "q3_candidates"
+)
+Q3_BARRIER_AMOUNT = int(os.getenv("Q3_BARRIER_AMOUNT", "1"))
 # Cola de salida para el sum de Q3. SUM_PREFIX se conserva para compatibilidad
 # con configuraciones anteriores y para los nombres de control de Sum.
 SUM_PREFIX = os.environ["SUM_PREFIX"]
@@ -166,9 +175,25 @@ class FilterWorker:
                 output_queues[SUM_Q3_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
                     MOM_HOST, SUM_Q3_QUEUE
                 )
-                output_queues[Q3_CANDIDATES_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                    MOM_HOST, Q3_CANDIDATES_QUEUE
-                )
+                # Q3 candidates: si hay sharding configurado, publish via
+                # ShardedByClientPublisher (transparente al resto del código).
+                # La key del dict se mantiene en Q3_CANDIDATES_QUEUE por
+                # compatibilidad con _publish_to_queue/_forward_eof.
+                if Q3_CANDIDATES_EXCHANGE and Q3_BARRIER_AMOUNT > 1:
+                    output_queues[Q3_CANDIDATES_QUEUE] = (
+                        middleware.ShardedByClientPublisher(
+                            MOM_HOST,
+                            Q3_CANDIDATES_EXCHANGE,
+                            Q3_CANDIDATES_ROUTING_PREFIX,
+                            Q3_BARRIER_AMOUNT,
+                        )
+                    )
+                else:
+                    output_queues[Q3_CANDIDATES_QUEUE] = (
+                        middleware.MessageMiddlewareQueueRabbitMQ(
+                            MOM_HOST, Q3_CANDIDATES_QUEUE
+                        )
+                    )
         return output_queues
 
     def _new_control_output(self):

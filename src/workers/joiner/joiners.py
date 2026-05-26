@@ -22,7 +22,14 @@ CONFIGURATION = os.environ["CONFIGURATION"]
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
 OUTPUT_QUEUE = os.environ["OUTPUT_QUEUE"]
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
-MAX_CLIENTS = 500  
+MAX_CLIENTS = 500
+
+# Sharding opcional del output Q3 por client_id (para soportar N q3_barrier)
+Q3_AVERAGES_EXCHANGE = os.getenv("Q3_AVERAGES_EXCHANGE")
+Q3_AVERAGES_ROUTING_PREFIX = os.getenv(
+    "Q3_AVERAGES_ROUTING_PREFIX", "q3_averages"
+)
+Q3_BARRIER_AMOUNT = int(os.getenv("Q3_BARRIER_AMOUNT", "1"))
 
 
 
@@ -101,6 +108,17 @@ class JoinerWorker:
         )
 
     def _build_output(self, configuration: str):
+        if (
+            configuration == C_Q3
+            and Q3_AVERAGES_EXCHANGE
+            and Q3_BARRIER_AMOUNT > 1
+        ):
+            return middleware.ShardedByClientPublisher(
+                MOM_HOST,
+                Q3_AVERAGES_EXCHANGE,
+                Q3_AVERAGES_ROUTING_PREFIX,
+                Q3_BARRIER_AMOUNT,
+            )
         return middleware.MessageMiddlewareQueueRabbitMQ(MOM_HOST, OUTPUT_QUEUE)
 
     def _process_message(self, message: bytes) -> None:
