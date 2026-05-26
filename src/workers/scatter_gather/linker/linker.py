@@ -44,10 +44,11 @@ class ScatterGatherLinker:
         self._proto = message_protocol.internal.InternalProtocol()
         self._control_serializer = ControlMessageSerializer()
 
-        # per-client state: client_id -> { M -> set(A) / set(B) / set((A,B)) }
+        # per-client join state: client_id -> { M -> set of neighbour accounts }.
+        # These two sets are also our dedup: a repeated edge re-adds an account
+        # that is already present, so it is a no-op and emits nothing again.
         self._incoming = defaultdict(lambda: defaultdict(set))  # [client][M] = {A}
         self._outgoing = defaultdict(lambda: defaultdict(set))  # [client][M] = {B}
-        self._emitted  = defaultdict(lambda: defaultdict(set))  # [client][M] = {(A,B)}
         self._emitted_count_by_client = defaultdict(int)
         self._emitted_count_by_partition = defaultdict(lambda: defaultdict(int))
         # Coalesces emitted relations into batches keyed by (client_id, detector
@@ -100,21 +101,23 @@ class ScatterGatherLinker:
             nack()
 
     def _add_incoming(self, client_id: int, m: str, a: str):
+        # Only a *new* A produces relations: pair it with every B already known
+        # for this M. A repeated A is skipped, so each (A, M, B) is emitted once.
         if a not in self._incoming[client_id][m]:
             self._incoming[client_id][m].add(a)
-        for b in self._outgoing[client_id][m]:
-            self._try_emit(client_id, a, m, b)
+            for b in self._outgoing[client_id][m]:
+                self._emit_relation(client_id, a, m, b)
 
     def _add_outgoing(self, client_id: int, m: str, b: str):
+        # Symmetric: a new B pairs with every A already known for this M.
         if b not in self._outgoing[client_id][m]:
             self._outgoing[client_id][m].add(b)
-        for a in self._incoming[client_id][m]:
-            self._try_emit(client_id, a, m, b)
+            for a in self._incoming[client_id][m]:
+                self._emit_relation(client_id, a, m, b)
 
-    def _try_emit(self, client_id: int, a: str, m: str, b: str):
-        if (a, b) in self._emitted[client_id][m]:
-            return
-
+    def _emit_relation(self, client_id: int, a: str, m: str, b: str):
+        # Callers guarantee (A, M, B) is fresh (see the guards above), so there
+        # is no dedup here: every call is a distinct relation.
         partition = partition_for_pair(a, b, SG_DETECTOR_AMOUNT)
         relation = ScatterGatherRelation(
             from_account=a,
@@ -122,7 +125,6 @@ class ScatterGatherLinker:
             to_account=b,
         )
         self._append_relation(client_id, partition, relation)
-        self._emitted[client_id][m].add((a, b))
         self._emitted_count_by_client[client_id] += 1
         self._emitted_count_by_partition[client_id][partition] += 1
         logging.debug("linker_%s emitted (%s, %s, %s)", ID, a, m, b)
@@ -184,7 +186,6 @@ class ScatterGatherLinker:
 
         self._incoming.pop(client_id, None)
         self._outgoing.pop(client_id, None)
-        self._emitted.pop(client_id, None)
         self._emitted_count_by_client.pop(client_id, None)
         self._emitted_count_by_partition.pop(client_id, None)
         self._batcher.discard(lambda k: k[0] == client_id)

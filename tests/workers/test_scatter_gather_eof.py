@@ -328,6 +328,47 @@ def test_linker_forwards_after_aggregated_mapper_group_eof(monkeypatch):
     assert client_id in worker._closed_by_client
 
 
+def test_linker_emits_each_relation_once_and_dedups_repeated_edges(monkeypatch):
+    module = _import_module(
+        monkeypatch,
+        "workers.scatter_gather.linker.linker",
+        {
+            "ID": "0",
+            "MOM_HOST": "rabbitmq",
+            "SG_LINKER_EXCHANGE": "sg_linker_exchange",
+            "SG_DETECTOR_EXCHANGE": "sg_detector_exchange",
+            "SG_DETECTOR_AMOUNT": "1",
+        },
+    )
+    worker = module.ScatterGatherLinker()
+    client_id = 34
+
+    # A -> M and M -> B form one relation (A, M, B).
+    worker._add_incoming(client_id, m="M", a="A")
+    worker._add_outgoing(client_id, m="M", b="B")
+    assert worker._emitted_count_by_client[client_id] == 1
+
+    # Repeated edges (same accounts, e.g. another transaction or a redelivery)
+    # add nothing new to the neighbour sets, so nothing is emitted again.
+    worker._add_incoming(client_id, m="M", a="A")
+    worker._add_outgoing(client_id, m="M", b="B")
+    assert worker._emitted_count_by_client[client_id] == 1
+
+    # A second distinct A pairs only with the existing B: exactly one new
+    # relation (A2, M, B), never a duplicate of (A, M, B).
+    worker._add_incoming(client_id, m="M", a="A2")
+    assert worker._emitted_count_by_client[client_id] == 2
+
+    worker._handle_eof(client_id, _control_payload(0, 0, 0))
+    data_type, _, data_payload = worker._proto.unpack_packet(
+        worker._detectors[0].sent[0]
+    )
+    relations = ScatterGatherRelationSerializer.deserialize_batch(data_payload)
+    assert data_type == MessageType.DATA
+    pairs = {(r.from_account, r.to_account) for r in relations}
+    assert pairs == {("A", "B"), ("A2", "B")}
+
+
 def test_linker_batches_relations_until_eof_flush(monkeypatch):
     module = _import_module(
         monkeypatch,
@@ -344,8 +385,8 @@ def test_linker_batches_relations_until_eof_flush(monkeypatch):
     worker = module.ScatterGatherLinker()
     client_id = 33
 
-    worker._try_emit(client_id, "A1", "M", "B1")
-    worker._try_emit(client_id, "A2", "M", "B2")
+    worker._emit_relation(client_id, "A1", "M", "B1")
+    worker._emit_relation(client_id, "A2", "M", "B2")
 
     assert worker._detectors[0].sent == []
 
