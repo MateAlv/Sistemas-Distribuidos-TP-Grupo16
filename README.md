@@ -1,135 +1,327 @@
-# Sistemas Distribuidos TP Grupo 16
+# Money Laundering Analysis - Grupo 16
 
-Trabajo Práctico "Money Laundering Analysis" de la materia Sistemas Distribuidos I, FIUBA.
+Sistema distribuido para procesar datasets de transacciones bancarias y detectar patrones asociados a lavado de dinero. El sistema usa Python, Docker Compose y RabbitMQ como MOM, con workers escalables y soporte multicliente.
 
-## Datos de la materia
+Enunciado: [docs/enunciado.md](docs/enunciado.md).
 
-- Materia: Sistemas Distribuidos I
-- Código: 75.74
-- Trabajo práctico: Money Laundering Analysis
-- Instancia: TP Diseño
-- Curso: Sistemas Distribuidos (75.74)
+## Requisitos
 
-## Consigna
+- Docker y Docker Compose.
+- Python 3.12 o compatible.
+- Los datasets montados bajo `data/datasets/client-1/<DATASET>/`.
+- Opcional: entorno virtual en `venv/`. El Makefile usa `venv/bin/python` si existe, o `python3` en caso contrario.
 
-El blanqueo de capital o lavado de activos consiste en cambiar bienes o dinero obtenidos mediante actos ilícitos por dinero legítimo. Dentro de la red digital de pagos existen una serie de estrategias comunes para ocultar, disimular u ofuscar los circuitos de transferencia. Entre ellas se encuentran [1]:
+La estructura esperada para un dataset es:
 
-- Fan-out: Transferencias pequeñas hacia múltiples cuentas desde una cuenta principal.
-- Fan-in: Transferencias pequeñas desde múltiples cuentas hacia una cuenta principal.
-- Scatter-Gather: Fan-out desde una cuenta seguido de Fan-in hacia otra.
-- Bipartito: Múltiples transferencias, en donde origen y destino pertenecen a conjuntos distintos. El agregado de transacciones forma un grafo bipartito.
-- Stack: Transferir pequeñas cantidades a lo largo del tiempo hacia otra cuenta.
+```text
+data/datasets/client-1/LI-Mini/LI-Mini_Trans.csv
+data/datasets/client-1/LI-Mini/LI-Mini_accounts.csv
+```
 
-## Requerimientos Funcionales
+Para multicliente no hace falta replicar físicamente el dataset: los presets generan varios clientes apuntando al dataset base de `client-1`, cada uno con un `client_id` distinto.
 
-Se solicita un sistema distribuido que analice el extracto de transacciones realizadas entre cuentas bancarias en busca de anomalías.
+## Comandos principales
 
-Se debe obtener:
+Generar `docker-compose.yaml` desde la configuración principal:
 
-1. Cuenta de origen, cuenta de destino y monto para transacciones USD menores a 50.
-2. Nombre de banco, cuenta de origen y monto de la max. transacción USD de cada banco.
-3. Cuenta de origen y monto de transacciones USD en el período [2022-09-06, 2022-09-15] con monto menor a 1 centésimo del promedio encontrado para el mismo formato de pago en el período [2022-09-01, 2022-09-05].
-4. Cuentas que cumplan con el patrón scatter-gather con una sola cuenta de separación, para cuentas que hayan realizado y cuya cuenta de origen haya realizado transferencias USD hacia entre 5 cuentas distintas dentro del período [2022-09-01, 2022-09-05].
-5. Cantidad de transacciones del período [2022-09-01, 2022-09-05] con formato de pago "Wire" o "ACH" cuyo monto convertido a USD sea menor a 1.
+```bash
+make config
+```
 
-## Requerimientos No Funcionales
+Levantar el sistema completo definido en `config/main-config.yaml`:
 
-- El sistema debe estar optimizado para entornos multicomputadoras.
-- Se debe soportar el incremento de los elementos de cómputo para escalar los volúmenes de información a procesar.
-- Se requiere del desarrollo de un Middleware para abstraer la comunicación basada en grupos.
-- Se debe soportar una única ejecución del procesamiento y proveer graceful quit frente a señales SIGTERM.
+```bash
+make up
+```
 
-## Datasets, notebook patrón y librerías
+Frenar y limpiar containers/redes del compose principal y de tests:
 
-- Para construir una simulación realista, se trabajará sobre el siguiente dataset: <https://www.kaggle.com/datasets/ealtman2019/ibm-transactions-for-anti-money-laundering-aml/data>.
-- La conversión a USD requiere un valor de cotización diaria Además de un csv que conviertan desde las distintas divisas hacia una de referencia. (<https://api.frankfurter.app>)
-- Se usarán los valores del siguiente notebook como resultados patrón:
-  - <https://www.kaggle.com/code/pablodroca/money-laundering-analysis>
+```bash
+make down
+```
 
-## Normas de Trabajo
+Forzar una limpieza más agresiva:
 
-Se espera del alumno:
+```bash
+make hard-down
+```
 
-- Empleo del tiempo de consultas en clase para resolver dudas y clarificar el negocio del sistema a construir previo a su diseño.
-- Exposición y verificación en clase de la arquitectura propuesta antes de iniciar su implementación.
-- Empleo del grupo de correos para realizar consultas que no pudieran ser resueltas en clase.
-- Consideración de prácticas distribuidas según lo estudiado en clase para elaborar una arquitectura flexible, escalable y robusta.
-- Aprobación del cuerpo docente para el uso de cualquier librería.
-- Demo del sistema en funcionamiento previamente ensayada.
+Limpiar outputs y datasets temporales por cliente:
 
-## Condiciones de Aprobación
+```bash
+make clean-state
+```
 
-### General
+Ver logs formateados:
 
-Criterios aplicables tanto a trabajos prácticos individuales, como grupales.
+```bash
+make logs
+```
 
-Los criterios de desaprobación pueden ser aplicados retroactivamente.
+Ejecutar tests unitarios dentro de Docker:
 
-Los criterios de observación o quita de puntos dependen del contexto, gravedad, cantidad de ocurrencias, entre otros factores.
+```bash
+make test-unit
+```
 
-Los criterios referidos a código no rigen para el Hito 1 del trabajo grupal o la presentación del paper.
+## Correr queries individuales
 
-#### Implica desaprobación
+Cada target genera un `docker-compose.test.yaml` con un preset mínimo para esa query, levanta los containers, espera a los clientes y valida los archivos de salida contra el dataset indicado.
 
-- No entregar.
-- No asistir a una instancia de defensa o exposición.
-- No emplear alguno de los lenguajes canónicos para la materia: Golang y Python.
-- No cumplir con los puntos solicitados en el enunciado.
-- Copiar código de terceros o generarlo mediante herramientas como LLMs.
+Q1:
 
-#### Implica observación o quita de puntos
+```bash
+make test-q1
+Q1_DATASET=LI-Small CLIENTS=3 USD_WORKERS=4 PREFETCH_COUNT=50 make test-q1
+```
 
-- No cumplir con las buenas prácticas de codificación.
-- No modularizar y/o presentar gran cantidad de código repetido, ej. no encapsular la lógica común en clases, módulos o paquetes common o utils.
-- Hardcodear valores, en lugar de utilizar archivos de config o al menos de constantes.
-- Abusar de funciones largas. Depende del lenguaje de programación, ej. más de 100 líneas es un “code smell” en Python.
-- No incluir comentarios de ayuda en código de alta complejidad.
-- Emplear más de un coding standard.
-- No implementar “graceful shutdowns” en los procesos, salvo en el trabajo individual de Middleware.
-- No redactar un README mínimo que indique cómo levantar y correr el sistema.
-- No proveer todos los archivos para poder ejecutar la entrega.
-- Omitir la protección de secciones críticas mediante mecanismos de sincronización (ej mutex, locks).
-- Omitir el chequeo de cant. de bytes leídos/escritos en FDs (sockets, archivos).
-- Omitir el cierre de FDs (sockets, archivos).
+Q2:
 
-### TP Grupal
+```bash
+make test-q2
+Q2_DATASET=LI-Small CLIENTS=3 USD_WORKERS=4 Q2_SUM_WORKERS=2 PREFETCH_COUNT=50 make test-q2
+```
 
-Los miembros del grupo responden de forma solidaria respecto a la calidad del trabajo entregado. Se espera que cualquier discrepancia o falencia en la organización del trabajo se resuelva internamente y se acuda a la cátedra solo en casos críticos y con un márgen de tiempo pertinente hasta la entrega del siguiente hito.
+Q3:
 
-La desaprobación de un hito, cuando se ha realizado una entrega y ésta cumple con una porción sustancial del enunciado, no lleva a recursar la materia, pero si conlleva la responsabilidad de corregir los errores para el siguiente hito.
+```bash
+make test-q3
+Q3_DATASET=LI-Small CLIENTS=3 USD_WORKERS=4 Q3_BARRIER_WORKERS=3 PREFETCH_COUNT=50 make test-q3
+```
 
-### TP-Escalabilidad: Hito 2
+Q4:
 
-#### Implica desaprobación
+Q4 no tiene un target específico `test-q4`; se ejecuta dentro del flujo general con `make test`, `make up` o escenarios. Para enfocarse en Q4, escalar los workers scatter-gather y dejar containers vivos para mirar RabbitMQ:
 
-- No desplegar el sistema con múltiples containers usando docker-compose.
-- No utilizar un framework MOM (Rabbit, Kafka, ZMQ) para comunicar mensajes entre containers. El uso de un framework distinto a RabbitMQ debe ser pactado con el corrector asignado.
-- No utilizar un middleware para ocultar la complejidad de comunicación y grupos de procesos, quedando expuesta la lógica de conectividad en el código del negocio.
-- No sincronizar correctamente la recepción de mensajes en los controllers que tienen dependencias, ej: joiners, groupers, sorters, etc.
-- No implementar un sistema en donde al menos el 50% de los tipos de controllers pueda escalar.
-- No realizar streaming de los registros del cliente hacia la fuente del sistema distribuido o no realizar el streaming de los registros del sumidero del sistema hacia el cliente.
-- Utilizar sleeps para sincronizar o spin locks para poolear.
-- No automatizar la comparación de los archivos de salida con los de una ejecución serial para validar el sistema.
+```bash
+KEEP_CONTAINERS=1 TEST_DATASET=LI-Mini CLIENTS=3 \
+USD_WORKERS=4 SG_MAPPER_WORKERS=2 SG_LINKER_WORKERS=2 SG_DETECTOR_WORKERS=2 \
+PREFETCH_COUNT=50 make test
+```
 
-#### Implica observación o quita de puntos
+Q5:
 
-- Propagar innecesariamente columnas en etapas donde ya no son necesarias.
-- No haber realizado un diseño organizado que permita una lógica de negocio simple (orientada a procesar registros de string, tuplas o DTOs) y desacoplada de la comunicación.
-- Presentar código repetido en donde claramente se podría haber reutilizado.
-- Abusar de la affinity con ciertos procesos para implementar la funcionalidad.
+```bash
+make test-q5
+Q5_DATASET=LI-Small CLIENTS=5 USD_WORKERS=4 Q5_FORMAT_WORKERS=4 Q5_USD_WORKERS=4 PREFETCH_COUNT=50 make test-q5
+```
 
-### TP-Tolerancia: Hito 3
+Si se quiere dejar el entorno vivo para inspeccionar RabbitMQ o logs después del test:
 
-#### Implica desaprobación
+```bash
+KEEP_CONTAINERS=1 CLIENTS=3 Q5_DATASET=LI-Small USD_WORKERS=4 Q5_FORMAT_WORKERS=4 Q5_USD_WORKERS=4 PREFETCH_COUNT=50 make test-q5
+```
 
-- Entregar un sistema que no sea tolerante a fallos que puedan ocurrir por la caída de procesos.
-- No incluir al menos el escenario “Chaos Monkey” para poner a prueba la tolerancia a fallos del sistema.
-- No automatizar los escenarios de prueba o al menos el escenario “Chaos Monkey”.
-- Utilizar bibliotecas externas para el consenso, la tolerancia a fallos o el protocolo de recuperación.
-- Utilizar docker-in-docker para recabar información y tomar decisiones. Solo se admite su uso para reiniciar un contenedor o re-instanciar una imágen.
-- No implementar un mecanismo para eliminar archivos y liberar recursos para consultas resueltas o fallidas.
+Para bajarlo luego:
 
-#### Implica observación o quita de puntos
+```bash
+docker compose -p distribuidos-test -f docker-compose.test.yaml down --volumes --remove-orphans
+```
 
-- No garantizar la entrega “exactly once” de mensajes al cliente.
-- Abusar de la affinity con ciertos procesos para implementar el control del sistema sin mitigar su impacto en el procesamiento de datos.
+o tambien
+
+```bash
+make down
+```
+
+## Correr todas las queries
+
+El target general `make test` usa `config/test-config.yaml` y valida el flujo completo por smoke checks de logs y finalización de clientes.
+
+```bash
+make test
+```
+
+Con dataset y escalado:
+
+```bash
+TEST_DATASET=LI-Mini CLIENTS=3 USD_WORKERS=4 Q5_FORMAT_WORKERS=4 Q5_USD_WORKERS=4 PREFETCH_COUNT=50 make test
+```
+
+Ejemplo más exigente:
+
+```bash
+CLIENTS=3 USD_WORKERS=4 Q5_FORMAT_WORKERS=4 Q5_USD_WORKERS=4 \
+SG_MAPPER_WORKERS=2 SG_LINKER_WORKERS=2 SG_DETECTOR_WORKERS=2 \
+Q3_BARRIER_WORKERS=3 PREFETCH_COUNT=50 \
+TEST_CLIENT_WAIT_TIMEOUT=3600s TEST_SMOKE_DEADLINE_SECONDS=3600 \
+make test
+```
+
+Por default, `TEST_DATASET` depende de la configuración de `config/test-config.yaml`. Para forzarlo:
+
+```bash
+TEST_DATASET=LI-Small make test
+```
+
+## Variables útiles
+
+Variables de dataset:
+
+| Variable | Uso |
+|---|---|
+| `TEST_DATASET` | Dataset para `make test`. |
+| `Q1_DATASET` | Dataset para `make test-q1`. |
+| `Q2_DATASET` | Dataset para `make test-q2`. |
+| `Q3_DATASET` | Dataset para `make test-q3`. |
+| `Q5_DATASET` | Dataset para `make test-q5`. |
+
+Variables de concurrencia y escalado:
+
+| Variable | Uso |
+|---|---|
+| `CLIENTS` | Cantidad de clientes simultáneos. |
+| `USD_WORKERS` | Réplicas de `filter_usd`. |
+| `Q2_SUM_WORKERS` | Réplicas de `sum_q2`. |
+| `Q3_BARRIER_WORKERS` | Réplicas de `q3_barrier`, particionadas por `client_id`. |
+| `Q5_FORMAT_WORKERS` | Réplicas de `filter_q5_format`. |
+| `Q5_USD_WORKERS` | Réplicas de `filter_q5_usd`. |
+| `SG_MAPPER_WORKERS` | Réplicas de mapper para Q4. |
+| `SG_LINKER_WORKERS` | Réplicas de linker para Q4. |
+| `SG_DETECTOR_WORKERS` | Réplicas de detector para Q4. |
+| `PREFETCH_COUNT` | Prefetch de RabbitMQ en workers que lo soportan. |
+
+Variables de ejecución:
+
+| Variable | Uso |
+|---|---|
+| `KEEP_CONTAINERS=1` | Mantiene containers luego de un test específico. |
+| `TEST_CLIENT_WAIT_TIMEOUT` | Timeout para esperar clientes en tests. Ej: `3600s`. |
+| `TEST_SMOKE_DEADLINE_SECONDS` | Deadline de smoke checks en `make test`. |
+| `LOG_COLOR=never` | Desactiva color en logs formateados. |
+| `LOG_ARGS` | Argumentos extra para `docker compose logs`. |
+
+## Outputs
+
+Los resultados se escriben en `data/output/`:
+
+```text
+data/output/results_q1_<client_id>.csv
+data/output/results_q2_<client_id>.csv
+data/output/results_q3_<client_id>.csv
+data/output/results_q4_<client_id>.csv
+data/output/results_q5_<client_id>.csv
+```
+
+Cada test específico ejecuta su validador correspondiente:
+
+```bash
+Q1_DATASET_DIR=data/datasets/client-1/LI-Mini Q1_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q1_output.py
+Q2_DATASET_DIR=data/datasets/client-1/LI-Mini Q2_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q2_output.py
+Q3_DATASET_DIR=data/datasets/client-1/LI-Mini Q3_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q3_output.py
+Q5_DATASET_DIR=data/datasets/client-1/LI-Mini Q5_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q5_output.py
+```
+
+## RabbitMQ
+
+Abrir la pantalla de colas:
+
+```bash
+make rabbit-screen
+```
+
+Credenciales:
+
+```text
+guest / guest
+```
+
+URL por default:
+
+```text
+http://localhost:15672/#/queues
+```
+
+Para inspeccionar desde consola durante un test con `KEEP_CONTAINERS=1`:
+
+```bash
+docker compose -p distribuidos-test -f docker-compose.test.yaml logs -f rabbitmq
+docker compose -p distribuidos-test -f docker-compose.test.yaml logs -f gateway
+docker compose -p distribuidos-test -f docker-compose.test.yaml logs -f q3_barrier_0
+```
+
+Al mirar RabbitMQ, las columnas más útiles son:
+
+| Métrica | Lectura |
+|---|---|
+| `Ready` | Mensajes encolados esperando consumidor. Si crece sostenidamente, hay bottleneck aguas abajo. |
+| `Unacked` | Mensajes entregados pero todavía no confirmados. Si queda alto, revisar prefetch, CPU o errores del consumer. |
+| `incoming` | Tasa de publicación hacia la cola. |
+| `deliver / get` | Tasa de consumo desde la cola. |
+| `ack` | Tasa de confirmación. Debe acompañar a `deliver / get` en flujos sanos. |
+
+## Performance
+
+Ver consumo de CPU y memoria por container:
+
+```bash
+make stats
+```
+
+O directamente:
+
+```bash
+docker stats
+```
+
+Patrones prácticos para diagnosticar cuellos:
+
+- Si `Ready` sube y `deliver / get` es bajo, el consumer de esa cola no da abasto.
+- Si `incoming` es muy alto por mensajes chicos, conviene revisar batching del hop anterior.
+- Si RabbitMQ marca alarma de memoria, bajar fan-out de mensajes individuales, aumentar batching o reducir concurrencia.
+- Si hay mucho `Unacked`, revisar `PREFETCH_COUNT`, tiempo de procesamiento y si el worker está bloqueado publicando hacia otra cola.
+- Si el cliente no termina aunque una query produjo output, revisar EOFs pendientes en gateway para todas las queries activas.
+
+Comando típico para una corrida de performance con containers vivos:
+
+```bash
+KEEP_CONTAINERS=1 CLIENTS=3 TEST_DATASET=LI-Small USD_WORKERS=4 \
+Q5_FORMAT_WORKERS=4 Q5_USD_WORKERS=4 \
+SG_MAPPER_WORKERS=2 SG_LINKER_WORKERS=2 SG_DETECTOR_WORKERS=2 \
+Q3_BARRIER_WORKERS=3 PREFETCH_COUNT=50 \
+TEST_CLIENT_WAIT_TIMEOUT=3600s TEST_SMOKE_DEADLINE_SECONDS=3600 \
+make test
+```
+
+## Escenarios
+
+El proyecto permite generar compose desde escenarios:
+
+```bash
+make scenario 1
+make scenario config/scenarios/4.yaml
+```
+
+También existe un selector interactivo:
+
+```bash
+make switch
+```
+
+## Troubleshooting
+
+Si un test queda con containers vivos:
+
+```bash
+docker compose -p distribuidos-test -f docker-compose.test.yaml down --volumes --remove-orphans
+```
+
+Si hay containers o redes colgadas:
+
+```bash
+make hard-down
+```
+
+Si se quiere arrancar sin outputs anteriores:
+
+```bash
+make clean-state
+```
+
+Si Docker muestra resultados viejos o servicios inesperados, regenerar compose y levantar de cero:
+
+```bash
+make down
+make config
+make up
+```

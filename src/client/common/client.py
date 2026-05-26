@@ -196,13 +196,21 @@ class Client:
 
         q1_file = os.path.join(output_dir, f"results_q1_{config.client_id}.csv")
         q2_file = os.path.join(output_dir, f"results_q2_{config.client_id}.csv")
+        q3_file = os.path.join(output_dir, f"results_q3_{config.client_id}.csv")
         q4_file = os.path.join(output_dir, f"results_q4_{config.client_id}.csv")
         q5_file = os.path.join(output_dir, f"results_q5_{config.client_id}.csv")
 
-        counts: dict[str, int] = {"q1": 0, "q2": 0, "q4": 0, "q5": 0}
-        with open(q1_file, "w") as f1, open(q2_file, "w") as f2, open(q4_file, "w") as f4, open(q5_file, "w") as f5:
+        counts: dict[str, int] = {"q1": 0, "q2": 0, "q3": 0, "q4": 0, "q5": 0}
+        with (
+            open(q1_file, "w") as f1,
+            open(q2_file, "w") as f2,
+            open(q3_file, "w") as f3,
+            open(q4_file, "w") as f4,
+            open(q5_file, "w") as f5,
+        ):
             f1.write("From Bank,Account,To Bank,Account.1,Amount Paid\n")
             f2.write("From Bank,Account,Bank Name,Amount Paid\n")
+            f3.write("From Bank,Account,Amount Paid\n")
             f4.write("from_account,to_account\n")
             f5.write("count\n")
 
@@ -215,6 +223,15 @@ class Client:
                         logging.info(
                             "client_result_line | query=q2 | client_id=%s | line_number=%s | data=%s",
                             config.client_id, counts["q2"], data,
+                        )
+                elif line.startswith("Q3|"):
+                    data = line[3:]
+                    counts["q3"] += 1
+                    f3.write(data + "\n")
+                    if counts["q3"] <= MAX_LOGGED_RESULT_LINES:
+                        logging.info(
+                            "client_result_line | query=q3 | client_id=%s | line_number=%s | data=%s",
+                            config.client_id, counts["q3"], data,
                         )
                 elif line.startswith("Q4|"):
                     data = line[3:]
@@ -244,8 +261,9 @@ class Client:
                         )
 
         logging.info(
-            "client_results_finished | client_id=%s | q1_lines=%s | q2_lines=%s | q4_lines=%s | q5_lines=%s | q1_file=%s | q2_file=%s | q4_file=%s | q5_file=%s",
-            config.client_id, counts["q1"], counts["q2"], counts["q4"], counts["q5"], q1_file, q2_file, q4_file, q5_file,
+            "client_results_finished | client_id=%s | q1_lines=%s | q2_lines=%s | q3_lines=%s | q4_lines=%s | q5_lines=%s | q1_file=%s | q2_file=%s | q3_file=%s | q4_file=%s | q5_file=%s",
+            config.client_id, counts["q1"], counts["q2"], counts["q3"], counts["q4"], counts["q5"],
+            q1_file, q2_file, q3_file, q4_file, q5_file,
         )
 
     def require_config(self) -> ClientConfig:

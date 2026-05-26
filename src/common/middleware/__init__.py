@@ -4,3 +4,4 @@ from .middleware_rabbitmq import (
     MessageMiddlewareRpcClientRabbitMQ,
     MessageMiddlewareRpcServerRabbitMQ,
 )
+from .sharded_publisher import ShardedByClientPublisher

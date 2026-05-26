@@ -143,6 +143,7 @@ test:
 		$(if $(SG_MAPPER_WORKERS),--sg-mapper-workers $(SG_MAPPER_WORKERS)) \
 		$(if $(SG_LINKER_WORKERS),--sg-linker-workers $(SG_LINKER_WORKERS)) \
 		$(if $(SG_DETECTOR_WORKERS),--sg-detector-workers $(SG_DETECTOR_WORKERS)) \
+		$(if $(Q3_BARRIER_WORKERS),--q3-barrier-workers $(Q3_BARRIER_WORKERS)) \
 		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
 		$(if $(CLIENTS),--clients $(CLIENTS)) \
 		--test-output $(TEST_COMPOSE_FILE) --skip-output
@@ -273,6 +274,44 @@ test-q2:
 		echo ""; \
 		echo "=== client_0 logs ==="; $$compose logs client_0'
 .PHONY: test-q2
+
+Q3_DATASET ?= LI-Mini
+test-q3:
+	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q3-test --dataset $(Q3_DATASET) \
+		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
+		$(if $(Q3_BARRIER_WORKERS),--q3-barrier-workers $(Q3_BARRIER_WORKERS)) \
+		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
+		$(if $(CLIENTS),--clients $(CLIENTS)) \
+		--test-output $(TEST_COMPOSE_FILE) --skip-output
+	@bash -lc 'set -euo pipefail; \
+		compose="docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE)"; \
+		cleanup() { $$compose down --volumes --remove-orphans >/dev/null 2>&1; }; \
+		if [ -z "$(KEEP_CONTAINERS)" ]; then \
+			trap cleanup EXIT; \
+		else \
+			echo "KEEP_CONTAINERS set — containers will remain after test"; \
+			echo "  logs:  $$compose logs -f <service>"; \
+			echo "  down:  $$compose down --volumes --remove-orphans"; \
+		fi; \
+		cleanup; \
+		mkdir -p data/output; \
+		rm -f data/output/results_q*.csv; \
+		start_time=$$SECONDS; \
+		echo "Starting Q3 flow test (preset=q3-test, dataset=$(Q3_DATASET))..."; \
+		$$compose up --build --remove-orphans --detach; \
+		clients="$$($$compose config --services | grep "^client_" | tr "\n" " ")"; \
+		if [ -z "$$clients" ]; then echo "no client services found" >&2; exit 2; fi; \
+		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
+		elapsed=$$((SECONDS - start_time)); \
+		echo "Client finished in $${elapsed}s"; \
+		Q3_DATASET_DIR=data/datasets/client-1/$(Q3_DATASET) \
+		Q3_DATASET_TRANS=$(Q3_DATASET)_Trans.csv \
+			$(PYTHON) scripts/validate_q3_output.py \
+			&& echo "✓ Q3 test PASSED ($${elapsed}s)" \
+			|| { echo "✗ Q3 test FAILED ($${elapsed}s)"; exit 1; }; \
+		echo ""; \
+		echo "=== client_0 logs ==="; $$compose logs client_0'
+.PHONY: test-q3
 
 Q5_DATASET ?= LI-Mini
 Q5_FORMAT_WORKERS ?=

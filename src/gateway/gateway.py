@@ -21,10 +21,7 @@ from common.middleware.middleware_rabbitmq import (
 )
 from common.message_protocol.internal import InternalProtocol, TransactionSerializer
 from common.message_protocol.internal.common import MessageType
-from common.message_protocol.internal.partial_result_serializer import (
-    Q2BankMaxPartialSerializer,
-    Q2BankMaxResultSerializer,
-)
+from common.message_protocol.internal.partial_result_serializer import Q2BankMaxResultSerializer
 from common.message_protocol.internal.scatter_gather_serializer import ScatterGatherResultSerializer
 from common.message_protocol.internal.aggregation_serializer import AggregationSerializer
 
@@ -65,20 +62,24 @@ class Gateway:
             else None
         )
         q2_queue = os.environ.get("GATEWAY_Q2_QUEUE")
+        q3_queue = os.environ.get("GATEWAY_Q3_QUEUE")
         q4_queue = os.environ.get("GATEWAY_Q4_QUEUE")
         q5_queue = os.environ.get("GATEWAY_Q5_QUEUE")
         self._q2_queue_name = q2_queue
+        self._q3_queue_name = q3_queue
         self._q4_queue_name = q4_queue
         self._q5_queue_name = q5_queue
         self._num_result_queues = (
             int(bool(self._q1_queue_name))
             + int(bool(q2_queue))
+            + int(bool(self._q3_queue_name))
             + int(bool(q4_queue))
             + int(bool(q5_queue))
         )
 
         self._q1_consumer = None
         self._q2_consumer = None
+        self._q3_consumer = None
         self._q4_consumer = None
         self._q5_consumer = None
 
@@ -91,7 +92,7 @@ class Gateway:
             )
             threading.Thread(
                 target=self._run_result_consumer,
-                args=(self._q1_consumer, self._q1_csv, ""),
+                args=(self._q1_consumer, self._q1_csv_lines, ""),
                 daemon=True,
             ).start()
 
@@ -101,7 +102,17 @@ class Gateway:
             )
             threading.Thread(
                 target=self._run_result_consumer,
-                args=(self._q2_consumer, self._q2_csv, "Q2|"),
+                args=(self._q2_consumer, self._q2_csv_lines, "Q2|"),
+                daemon=True,
+            ).start()
+
+        if self._q3_queue_name:
+            self._q3_consumer = MessageMiddlewareQueueRabbitMQ(
+                self._config.mom_host, self._q3_queue_name
+            )
+            threading.Thread(
+                target=self._run_result_consumer,
+                args=(self._q3_consumer, self._q3_csv_lines, "Q3|"),
                 daemon=True,
             ).start()
 
@@ -111,7 +122,7 @@ class Gateway:
             )
             threading.Thread(
                 target=self._run_result_consumer,
-                args=(self._q4_consumer, self._q4_csv, "Q4|"),
+                args=(self._q4_consumer, self._q4_csv_lines, "Q4|"),
                 daemon=True,
             ).start()
 
@@ -121,7 +132,7 @@ class Gateway:
             )
             threading.Thread(
                 target=self._run_result_consumer,
-                args=(self._q5_consumer, self._q5_csv, "Q5|"),
+                args=(self._q5_consumer, self._q5_csv_lines, "Q5|"),
                 daemon=True,
             ).start()
 
@@ -153,7 +164,7 @@ class Gateway:
 
     def stop(self) -> None:
         self._stopped = True
-        for consumer in (self._q1_consumer, self._q2_consumer, self._q4_consumer, self._q5_consumer):
+        for consumer in (self._q1_consumer, self._q2_consumer, self._q3_consumer, self._q4_consumer, self._q5_consumer):
             if consumer is not None:
                 try:
                     consumer.stop_consuming()
@@ -328,7 +339,7 @@ class Gateway:
                         logging.info("gateway_client_closed | client_id=%s", session.client_id)
                         return  
 
-    def _run_result_consumer(self, consumer, payload_to_csv, prefix: str) -> None:
+    def _run_result_consumer(self, consumer, payload_to_csv_lines, prefix: str) -> None:
         internal_serializer = InternalProtocol()
 
         def callback(message, ack, nack):
@@ -349,8 +360,8 @@ class Gateway:
                         should_close = False
 
                 if msg_type == MessageType.DATA:
-                    csv_line = payload_to_csv(payload)
-                    client_queue.put(prefix + csv_line + "\n")
+                    for csv_line in payload_to_csv_lines(payload):
+                        client_queue.put(prefix + csv_line + "\n")
                 elif msg_type == MessageType.EOF:
                     if should_close:
                         client_queue.put(None)
@@ -387,12 +398,20 @@ class Gateway:
         )
 
     @staticmethod
+    def _q1_csv_lines(payload: bytes):
+        yield Gateway._q1_csv(payload)
+
+    @staticmethod
     def _q1_csv(payload: bytes) -> str:
         tx = TransactionSerializer().deserialize(payload)
         return (
             f"{tx.from_bank},{tx.from_account},"
             f"{tx.to_bank},{tx.to_account},{tx.amount:.2f}"
         )
+
+    @staticmethod
+    def _q2_csv_lines(payload: bytes):
+        yield Gateway._q2_csv(payload)
 
     @staticmethod
     def _q2_csv(payload: bytes) -> str:
@@ -403,9 +422,22 @@ class Gateway:
         )
 
     @staticmethod
+    def _q3_csv_lines(payload: bytes):
+        for tx in TransactionSerializer().deserialize_batch(payload):
+            yield f"{tx.from_bank},{tx.from_account},{tx.amount:.2f}"
+
+    @staticmethod
+    def _q4_csv_lines(payload: bytes):
+        yield Gateway._q4_csv(payload)
+
+    @staticmethod
     def _q4_csv(payload: bytes) -> str:
         result = ScatterGatherResultSerializer.deserialize(payload)
         return f"{result.from_account},{result.to_account}"
+
+    @staticmethod
+    def _q5_csv_lines(payload: bytes):
+        yield Gateway._q5_csv(payload)
 
     @staticmethod
     def _q5_csv(payload: bytes) -> str:
