@@ -141,7 +141,7 @@ class FilterQ5UsdWorker:
             logging.info("filter_q5_usd_rpc_start | id=%s | requesting rates", ID)
             with MessageMiddlewareRpcClientRabbitMQ(MOM_HOST, RATES_REQUEST_QUEUE) as client:
                 client.connect()
-                response = client.call(b"get_rates", timeout=30)
+                response = client.call(b"get_rates", timeout=120)
             self.rates_manager.load_from_payload(response)
             self.rates_loaded = True
             logging.info("filter_q5_usd_rpc_done | id=%s | rates_loaded", ID)
