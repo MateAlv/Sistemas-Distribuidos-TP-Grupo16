@@ -101,10 +101,6 @@ class JoinerWorker:
         )
 
     def _build_output(self, configuration: str):
-        if configuration == C_Q3:
-            return middleware.MessageMiddlewareExchangeRabbitMQ(
-                MOM_HOST, OUTPUT_QUEUE, routing_keys=[], exchange_type="fanout"
-            )
         return middleware.MessageMiddlewareQueueRabbitMQ(MOM_HOST, OUTPUT_QUEUE)
 
     def _process_message(self, message: bytes) -> None:

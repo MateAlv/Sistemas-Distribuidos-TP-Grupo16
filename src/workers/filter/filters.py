@@ -34,6 +34,7 @@ SUM_Q2_QUEUE = os.environ["SUM_Q2_QUEUE"]
 FILTER_Q3_QUEUE = os.environ["FILTER_Q3_QUEUE"]
 SCATTER_GATHER_MAPPER_QUEUE = os.environ["SCATTER_GATHER_MAPPER_QUEUE"]
 FILTER_Q5_USD_QUEUE = os.environ["FILTER_Q5_USD_QUEUE"]
+Q3_CANDIDATES_QUEUE = os.getenv("Q3_CANDIDATES_QUEUE", FILTER_Q3_QUEUE)
 # Cola de salida para el sum de Q3. SUM_PREFIX se conserva para compatibilidad
 # con configuraciones anteriores y para los nombres de control de Sum.
 SUM_PREFIX = os.environ["SUM_PREFIX"]
@@ -164,6 +165,9 @@ class FilterWorker:
             if DATE_ENABLE_Q3:
                 output_queues[SUM_Q3_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
                     MOM_HOST, SUM_Q3_QUEUE
+                )
+                output_queues[Q3_CANDIDATES_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
+                    MOM_HOST, Q3_CANDIDATES_QUEUE
                 )
         return output_queues
 
@@ -371,10 +375,15 @@ class FilterWorker:
                     self._record_forwarded_output(client_id, FILTER_DATE_QUEUE)
                 sent = True
         if CONFIGURATION == C_DATE:
-            if DATE_ENABLE_Q3 and self._filter_transaction(transaction, start_date="2022-09-06", end_date="2022-09-15"):
+            if DATE_ENABLE_Q3 and self._filter_transaction(transaction, start_date="2022-09-01", end_date="2022-09-05"):
                 self._publish_to_queue(SUM_Q3_QUEUE, client_id, transaction, output_queues)
                 with self.lock:
                     self._record_forwarded_output(client_id, SUM_Q3_QUEUE)
+                sent = True
+            if DATE_ENABLE_Q3 and self._filter_transaction(transaction, start_date="2022-09-06", end_date="2022-09-15"):
+                self._publish_to_queue(Q3_CANDIDATES_QUEUE, client_id, transaction, output_queues)
+                with self.lock:
+                    self._record_forwarded_output(client_id, Q3_CANDIDATES_QUEUE)
                 sent = True
             if DATE_ENABLE_Q4 and self._filter_transaction(transaction, start_date="2022-09-01", end_date="2022-09-05"):
                 self._publish_to_queue(SCATTER_GATHER_MAPPER_QUEUE, client_id, transaction, output_queues)
@@ -419,6 +428,9 @@ class FilterWorker:
             if DATE_ENABLE_Q3:
                 output_queues[SUM_Q3_QUEUE].send(
                     eof_packet(forwarded_by_output.get(SUM_Q3_QUEUE, 0))
+                )
+                output_queues[Q3_CANDIDATES_QUEUE].send(
+                    eof_packet(forwarded_by_output.get(Q3_CANDIDATES_QUEUE, 0))
                 )
             if DATE_ENABLE_Q4:
                 output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(

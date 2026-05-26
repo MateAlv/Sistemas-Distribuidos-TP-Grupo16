@@ -26,12 +26,14 @@ FILTER_USD_QUEUE = "filter_usd_queue"
 FILTER_Q1_QUEUE = "filter_q1_queue"
 FILTER_DATE_QUEUE = "filter_date_queue"
 FILTER_Q3_QUEUE = "filter_q3_queue"
+Q3_CANDIDATES_QUEUE = "q3_candidates_queue"
 FILTER_Q5_FORMAT_QUEUE = "filter_q5_format_queue"
 FILTER_Q5_USD_QUEUE = "filter_q5_usd_queue"
 SUM_Q2_QUEUE = "sum_q2_queue"
 SUM_Q3_QUEUE = "sum_q3_queue"
 GATEWAY_Q1_QUEUE = "gateway_results_queue"
 GATEWAY_Q2_QUEUE = "join_q2_results_queue"
+GATEWAY_Q3_QUEUE = "gateway_q3_results_queue"
 GATEWAY_Q4_QUEUE = "gateway_q4_results_queue"
 GATEWAY_Q5_QUEUE = "join_q5_results_queue"
 RATES_REQUEST_QUEUE = "rates_requests"
@@ -102,7 +104,7 @@ def parse_args():
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to the config YAML.")
     parser.add_argument("--output", help="Path for docker-compose.yaml.")
     parser.add_argument("--test-output", help="Path for docker-compose.test.yaml.")
-    parser.add_argument("--preset", choices=("q1-test", "q2-test", "q5-test"), help="Use a built-in compose config preset.")
+    parser.add_argument("--preset", choices=("q1-test", "q2-test", "q3-test", "q5-test"), help="Use a built-in compose config preset.")
     parser.add_argument("--dataset", default=None, help="Dataset name override.")
     parser.add_argument("--filter-usd-workers", type=int, default=None, help="Override filter_usd worker count.")
     parser.add_argument("--sum-q2-workers", type=int, default=None, help="Override sum_q2 worker count.")
@@ -135,7 +137,7 @@ def preset_config(
     sg_detector_workers: int | None = None,
     clients: int | None = None,
 ) -> dict:
-    if name not in ("q1-test", "q2-test", "q5-test"):
+    if name not in ("q1-test", "q2-test", "q3-test", "q5-test"):
         raise ValueError(f"unknown preset: {name}")
     clients = clients or 1
     if clients < 1:
@@ -165,7 +167,7 @@ def preset_config(
             "io_timeout_seconds": 3600,
             **({"filter_prefetch_count": prefetch} if prefetch is not None else {}),
         },
-        "queries": {"q1-test": ["q1"], "q2-test": ["q2"], "q5-test": ["q5"]}[name],
+        "queries": {"q1-test": ["q1"], "q2-test": ["q2"], "q3-test": ["q3"], "q5-test": ["q5"]}[name],
         "workers": {
             "file_ingestors": 1,
             "filters": {
@@ -497,6 +499,11 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
             sum_amount=counts["sum_q3"],
             sum_prefix=SUM_Q3_PREFIX,
         )
+        services["q3_barrier"] = q3_barrier_service(
+            averages_queue=JOIN_Q3_RESULTS_QUEUE,
+            candidates_queue=Q3_CANDIDATES_QUEUE,
+            output_queue=GATEWAY_Q3_QUEUE,
+        )
 
     if q5_enabled:
         for index in range(counts["aggregation_q5"]):
@@ -591,6 +598,8 @@ def gateway_service(file_ingestor_count: int, settings: dict, enabled_queries: s
         environment.append("GATEWAY_Q1_ENABLED=0")
     if "q2" in enabled_queries:
         environment.append(f"GATEWAY_Q2_QUEUE={GATEWAY_Q2_QUEUE}")
+    if "q3" in enabled_queries:
+        environment.append(f"GATEWAY_Q3_QUEUE={GATEWAY_Q3_QUEUE}")
     if "q4" in enabled_queries:
         environment.append(f"GATEWAY_Q4_QUEUE={GATEWAY_Q4_QUEUE}")
     if "q5" in enabled_queries:
@@ -689,6 +698,7 @@ def filter_service(
         f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
         f"MOM_HOST={MOM_HOST}",
         "PYTHONUNBUFFERED=1",
+        f"Q3_CANDIDATES_QUEUE={Q3_CANDIDATES_QUEUE}",
         f"SCATTER_GATHER_MAPPER_QUEUE={SG_MAPPER_QUEUE}",
         f"SUM_PREFIX={SUM_Q3_PREFIX}",
         f"SUM_Q2_QUEUE={SUM_Q2_QUEUE}",
@@ -827,6 +837,26 @@ def joiner_service(
             "PYTHONUNBUFFERED=1",
             f"SUM_AMOUNT={sum_amount}",
             f"SUM_PREFIX={sum_prefix}",
+        ],
+    )
+
+
+def q3_barrier_service(
+    averages_queue: str,
+    candidates_queue: str,
+    output_queue: str,
+) -> dict:
+    return base_service(
+        "workers/q3_barrier/Dockerfile",
+        depends_on=depends_on_rabbitmq(),
+        environment=[
+            "ID=0",
+            f"GATEWAY_Q3_QUEUE={output_queue}",
+            f"MOM_HOST={MOM_HOST}",
+            "PYTHONUNBUFFERED=1",
+            f"Q3_AVERAGES_QUEUE={averages_queue}",
+            f"Q3_CANDIDATES_QUEUE={candidates_queue}",
+            "Q3_THRESHOLD_DIVISOR=100",
         ],
     )
 
