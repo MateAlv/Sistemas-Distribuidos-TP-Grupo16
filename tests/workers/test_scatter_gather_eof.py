@@ -219,7 +219,24 @@ def test_mapper_accepts_batched_transactions(monkeypatch):
 
     assert worker._processed_by_client[client_id] == 2
     assert worker._forwarded_by_client[client_id] == 4
-    assert len(worker._linkers[0].sent) == 4
+    # Edges are buffered, not published one-by-one: nothing is sent until a
+    # flush (size threshold or EOF).
+    assert worker._linkers[0].sent == []
+
+    worker._flush_client_buffers(client_id)
+
+    # With a single linker partition the two edge tags produce two batched
+    # messages, each carrying both transactions.
+    assert len(worker._linkers[0].sent) == 2
+    tags = set()
+    for raw in worker._linkers[0].sent:
+        msg_type, received_client_id, payload = worker._proto.unpack_packet(raw)
+        assert msg_type == MessageType.DATA
+        assert received_client_id == client_id
+        tags.add(payload[0])
+        batch = TransactionSerializer.deserialize_batch(payload[1:])
+        assert len(batch) == 2
+    assert tags == {1, 2}
 
 
 def test_mapper_leader_report_can_use_thread_local_linkers(monkeypatch):
@@ -311,6 +328,47 @@ def test_linker_forwards_after_aggregated_mapper_group_eof(monkeypatch):
     assert client_id in worker._closed_by_client
 
 
+def test_linker_emits_each_relation_once_and_dedups_repeated_edges(monkeypatch):
+    module = _import_module(
+        monkeypatch,
+        "workers.scatter_gather.linker.linker",
+        {
+            "ID": "0",
+            "MOM_HOST": "rabbitmq",
+            "SG_LINKER_EXCHANGE": "sg_linker_exchange",
+            "SG_DETECTOR_EXCHANGE": "sg_detector_exchange",
+            "SG_DETECTOR_AMOUNT": "1",
+        },
+    )
+    worker = module.ScatterGatherLinker()
+    client_id = 34
+
+    # A -> M and M -> B form one relation (A, M, B).
+    worker._add_incoming(client_id, m="M", a="A")
+    worker._add_outgoing(client_id, m="M", b="B")
+    assert worker._emitted_count_by_client[client_id] == 1
+
+    # Repeated edges (same accounts, e.g. another transaction or a redelivery)
+    # add nothing new to the neighbour sets, so nothing is emitted again.
+    worker._add_incoming(client_id, m="M", a="A")
+    worker._add_outgoing(client_id, m="M", b="B")
+    assert worker._emitted_count_by_client[client_id] == 1
+
+    # A second distinct A pairs only with the existing B: exactly one new
+    # relation (A2, M, B), never a duplicate of (A, M, B).
+    worker._add_incoming(client_id, m="M", a="A2")
+    assert worker._emitted_count_by_client[client_id] == 2
+
+    worker._handle_eof(client_id, _control_payload(0, 0, 0))
+    data_type, _, data_payload = worker._proto.unpack_packet(
+        worker._detectors[0].sent[0]
+    )
+    relations = ScatterGatherRelationSerializer.deserialize_batch(data_payload)
+    assert data_type == MessageType.DATA
+    pairs = {(r.from_account, r.to_account) for r in relations}
+    assert pairs == {("A", "B"), ("A2", "B")}
+
+
 def test_linker_batches_relations_until_eof_flush(monkeypatch):
     module = _import_module(
         monkeypatch,
@@ -327,8 +385,8 @@ def test_linker_batches_relations_until_eof_flush(monkeypatch):
     worker = module.ScatterGatherLinker()
     client_id = 33
 
-    worker._try_emit(client_id, "A1", "M", "B1")
-    worker._try_emit(client_id, "A2", "M", "B2")
+    worker._emit_relation(client_id, "A1", "M", "B1")
+    worker._emit_relation(client_id, "A2", "M", "B2")
 
     assert worker._detectors[0].sent == []
 
@@ -532,6 +590,42 @@ def test_detector_reports_late_relations_after_pending_eof(monkeypatch):
     assert received_client_id == client_id
     assert result.from_account == "A"
     assert result.to_account == "B"
+
+
+def test_detector_emits_once_threshold_distinct_intermediaries_reached(monkeypatch):
+    module = _import_module(
+        monkeypatch,
+        "workers.scatter_gather.detector.detector",
+        {
+            "ID": "0",
+            "MOM_HOST": "rabbitmq",
+            "SG_DETECTOR_EXCHANGE": "sg_detector_exchange",
+            "GATEWAY_Q4_QUEUE": "gateway_q4_results_queue",
+            "SG_LINKER_AMOUNT": "1",
+            "SG_DETECTOR_AMOUNT": "1",
+            "MIN_INTERMEDIARIES": "5",
+        },
+    )
+    worker = module.ScatterGatherDetector()
+    client_id = 51
+
+    # Four distinct intermediaries: below threshold, nothing emitted yet.
+    for index in range(1, 5):
+        worker._add_relation(client_id, "A", f"M{index}", "B")
+    assert worker._output.sent == []
+    # State is a plain count, not a set of accounts (Option A).
+    assert worker._intermediaries[client_id][("A", "B")] == 4
+
+    # Fifth distinct intermediary crosses the threshold: emit once, then drop
+    # the pair's state.
+    worker._add_relation(client_id, "A", "M5", "B")
+    assert len(worker._output.sent) == 1
+    assert ("A", "B") not in worker._intermediaries[client_id]
+    assert ("A", "B") in worker._emitted[client_id]
+
+    _, _, payload = worker._proto.unpack_packet(worker._output.sent[0])
+    result = ScatterGatherResultSerializer.deserialize(payload)
+    assert (result.from_account, result.to_account) == ("A", "B")
 
 
 def test_detector_leader_report_can_use_thread_local_gateway_output(monkeypatch):

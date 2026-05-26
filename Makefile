@@ -153,7 +153,11 @@ test:
 		logs_pid=""; \
 		format_pid=""; \
 		cleanup() { \
-			docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) down --volumes --remove-orphans >/dev/null; \
+			docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) down --volumes --remove-orphans >/dev/null 2>&1 || true; \
+			leftover=$$(docker ps -aq --filter "label=com.docker.compose.project=$(TEST_PROJECT)"); \
+			if [ -n "$$leftover" ]; then docker rm -f $$leftover >/dev/null 2>&1 || true; fi; \
+			nets=$$(docker network ls -q --filter "label=com.docker.compose.project=$(TEST_PROJECT)"); \
+			if [ -n "$$nets" ]; then docker network rm $$nets >/dev/null 2>&1 || true; fi; \
 			rm -f "$$log_fifo"; \
 		}; \
 		stop_logs() { \

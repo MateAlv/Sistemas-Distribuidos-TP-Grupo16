@@ -53,8 +53,7 @@ class ScatterGatherDetector:
         self._proto = message_protocol.internal.InternalProtocol()
         self._control_serializer = ControlMessageSerializer()
 
-        # client_id -> (A, B) -> {M}
-        self._intermediaries = defaultdict(lambda: defaultdict(set))
+        self._intermediaries = defaultdict(lambda: defaultdict(int))
         self._emitted = defaultdict(set)
         self._emitted_count_by_client = defaultdict(int)
         self._processed_by_client = defaultdict(int)
@@ -144,9 +143,9 @@ class ScatterGatherDetector:
 
             emitted_delta = 0
             if pair not in self._emitted[client_id]:
-                intermediaries = self._intermediaries[client_id][pair]
-                intermediaries.add(m)
-                should_emit = len(intermediaries) >= MIN_INTERMEDIARIES
+                count = self._intermediaries[client_id][pair] + 1
+                self._intermediaries[client_id][pair] = count
+                should_emit = count >= MIN_INTERMEDIARIES
                 if should_emit:
                     emitted_delta = 1
                     self._emitted[client_id].add(pair)
