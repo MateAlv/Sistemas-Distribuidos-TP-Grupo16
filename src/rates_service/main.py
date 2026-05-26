@@ -1,12 +1,12 @@
 import logging
 import json
 import os
+import signal
 from src.common.middleware import MessageMiddlewareRpcServerRabbitMQ
 from src.common.rates import RatesManager
 from src.common.rates.q5_reference_rates import Q5_REFERENCE_RATES
 
 REQUEST_QUEUE = "rates_requests"
-
 
 
 class ExchangeRateService:
@@ -23,23 +23,48 @@ class ExchangeRateService:
         self._start_date = start_date
         self._end_date = end_date
         self._rpc_server = MessageMiddlewareRpcServerRabbitMQ(rabbit_host, REQUEST_QUEUE)
+        self._shutdown = False
 
     def run(self) -> None:
         if not self._bootstrap_rates():
-            logging.error("rates_service | bootstrap_failed")
+            if self._shutdown:
+                logging.info("rates_service | shutdown_during_bootstrap")
+            else:
+                logging.error("rates_service | bootstrap_failed")
             return
 
+        # El servidor RPC corre en este unico hilo. SIGTERM interrumpe el
+        # start() bloqueante y request_shutdown() agenda el corte de forma
+        # thread-safe (request_stop_consuming -> add_callback_threadsafe), por
+        # lo que nunca se toca el channel desde un hilo distinto al que consume.
         with self._rpc_server:
             self._rpc_server.connect()
+            if self._shutdown:
+                logging.info("rates_service | shutdown_before_rpc_start")
+                return
             logging.info("rates_service | ready | queue=%s", REQUEST_QUEUE)
             self._rpc_server.start(self._on_request)
+        logging.info("rates_service | stopped")
+
+    def request_shutdown(self) -> None:
+        if self._shutdown:
+            return
+        self._shutdown = True
+        logging.info("rates_service | shutdown_requested")
+        # Seguro de invocar desde el signal handler: stop() agenda el corte en
+        # el ioloop de la conexion en vez de tocar el channel directamente.
+        self._rpc_server.stop()
 
     def _bootstrap_rates(self) -> bool:
         if self._manager.load_cache():
             return True
         logging.info("rates_service | cache_miss | fetching")
 
+        if self._shutdown:
+            return False
         if not self._manager.fetch_period(self._start_date, self._end_date):
+            return False
+        if self._shutdown:
             return False
         self._manager.save_cache()
         return True
@@ -49,13 +74,22 @@ class ExchangeRateService:
         reply(payload)
         logging.info("rates_service | replied | bytes=%d", len(payload))
 
-if __name__ == "__main__":
+
+def install_signal_handlers(service: ExchangeRateService) -> None:
+    def _handle_sigterm(signum, _frame):
+        logging.info("rates_service | signal_received | signal=%s", signum)
+        service.request_shutdown()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+
+def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s %(levelname)-8s %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
-    
+
     RABBIT_HOST = os.getenv("RABBIT_HOST", "rabbitmq")
     CACHE_PATH = os.getenv("RATES_CACHE_PATH", "/data/rates/cache.json")
     START_DATE = os.getenv("START_DATE", "2022-09-01")
@@ -65,7 +99,7 @@ if __name__ == "__main__":
     reference_overrides = None
     if REFERENCE_OVERLAY == "q5":
         reference_overrides = Q5_REFERENCE_RATES
-    
+
     service = ExchangeRateService(
         rabbit_host=RABBIT_HOST,
         cache_path=CACHE_PATH,
@@ -73,4 +107,9 @@ if __name__ == "__main__":
         end_date=END_DATE,
         reference_overrides=reference_overrides,
     )
+    install_signal_handlers(service)
     service.run()
+
+
+if __name__ == "__main__":
+    main()
