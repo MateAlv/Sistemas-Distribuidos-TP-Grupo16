@@ -204,6 +204,16 @@ def compute_q4(trans_file, _accounts_file=None):
     # Mirrors the scatter-gather linker/detector: a txn X->Y feeds incoming[Y]
     # (A->M with M=Y) and outgoing[X] (M->B with M=X); a pair (A,B) is emitted
     # once it has >= Q4_MIN_INTERMEDIARIES distinct M with both A->M and M->B.
+    # Accounts are interned to ints so the pair enumeration stays compact: a
+    # single hub M can produce 100M+ pairs, which would OOM as Python objects.
+    account_ids = {}
+
+    def intern(name):
+        i = account_ids.get(name)
+        if i is None:
+            i = account_ids[name] = len(account_ids)
+        return i
+
     incoming = defaultdict(set)
     outgoing = defaultdict(set)
     with open(trans_file, "r") as f:
@@ -215,22 +225,63 @@ def compute_q4(trans_file, _accounts_file=None):
             date = _normalize_date(row[col["date"]])
             if not (Q4_WINDOW[0] <= date <= Q4_WINDOW[1]):
                 continue
-            src = row[col["from_account"]].strip()
-            dst = row[col["to_account"]].strip()
+            src = intern(row[col["from_account"]].strip())
+            dst = intern(row[col["to_account"]].strip())
             incoming[dst].add(src)
             outgoing[src].add(dst)
 
-    intermediaries = defaultdict(set)
-    for m in set(incoming) & set(outgoing):
-        for a in incoming[m]:
-            for b in outgoing[m]:
-                intermediaries[(a, b)].add(m)
+    hubs = set(incoming) & set(outgoing)
+    stride = len(account_ids) + 1  # pack (a, b) into a single a*stride + b key
 
-    return [
-        (a, b)
-        for (a, b), ms in intermediaries.items()
-        if len(ms) >= Q4_MIN_INTERMEDIARIES
-    ]
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+
+    if np is not None:
+        pairs = _q4_qualifying_pairs_numpy(np, incoming, outgoing, hubs, stride)
+    else:
+        pairs = _q4_qualifying_pairs_python(incoming, outgoing, hubs, stride)
+
+    names = [None] * len(account_ids)
+    for name, i in account_ids.items():
+        names[i] = name
+    return [(names[key // stride], names[key % stride]) for key in pairs]
+
+
+def _q4_qualifying_pairs_numpy(np, incoming, outgoing, hubs, stride, chunk=8_000_000):
+    # Pack every (A, B) of every hub into an int64 array, sort it, and keep the
+    # keys whose run length (= distinct intermediary count) reaches the threshold.
+    # The outer product of a hub is filled in row chunks so a single huge hub
+    # (100M+ pairs) never builds one giant temporary array.
+    total = sum(len(incoming[m]) * len(outgoing[m]) for m in hubs)
+    if total == 0:
+        return []
+    keys = np.empty(total, dtype=np.int64)
+    pos = 0
+    for m in hubs:
+        a = np.fromiter(incoming[m], dtype=np.int64, count=len(incoming[m]))
+        b = np.fromiter(outgoing[m], dtype=np.int64, count=len(outgoing[m]))
+        rows_per_chunk = max(1, chunk // b.size)
+        for start in range(0, a.size, rows_per_chunk):
+            block = (a[start:start + rows_per_chunk, None] * stride + b[None, :]).ravel()
+            keys[pos:pos + block.size] = block
+            pos += block.size
+    keys.sort()
+    boundaries = np.flatnonzero(keys[1:] != keys[:-1]) + 1
+    starts = np.concatenate(([0], boundaries))
+    counts = np.diff(np.concatenate((starts, [keys.size])))
+    return keys[starts[counts >= Q4_MIN_INTERMEDIARIES]].tolist()
+
+
+def _q4_qualifying_pairs_python(incoming, outgoing, hubs, stride):
+    counts = defaultdict(int)
+    for m in hubs:
+        for a in incoming[m]:
+            base = a * stride
+            for b in outgoing[m]:
+                counts[base + b] += 1
+    return [key for key, c in counts.items() if c >= Q4_MIN_INTERMEDIARIES]
 
 
 RATES_CACHE = Path("data/rates/cache.json")
