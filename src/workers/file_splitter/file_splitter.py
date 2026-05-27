@@ -95,16 +95,41 @@ class FileSplitter:
             exclusive=False,
         ) as consumer:
             self._consumer = consumer
-            consumer.start_consuming(self._on_message)
+            try:
+                consumer.start_consuming(self._on_message)
+            finally:
+                self._consumer = None
+                self._close_outputs()
 
     def stop(self) -> None:
         logging.info("file_splitter_stop | id=%s", self._config.id)
         if self._consumer is not None:
-            self._consumer.stop_consuming()
+            self._consumer.request_stop_consuming()
+
+    def _close_outputs(self) -> None:
         if self._line_batch_output is not None:
-            self._line_batch_output.close()
+            try:
+                self._line_batch_output.close()
+            except Exception as e:
+                logging.warning(
+                    "file_splitter_close_output_error | id=%s | output=line_batch | error=%s",
+                    self._config.id,
+                    e,
+                )
+            finally:
+                self._line_batch_output = None
+
         if self._accounts_output is not None:
-            self._accounts_output.close()
+            try:
+                self._accounts_output.close()
+            except Exception as e:
+                logging.warning(
+                    "file_splitter_close_output_error | id=%s | output=accounts | error=%s",
+                    self._config.id,
+                    e,
+                )
+            finally:
+                self._accounts_output = None
 
     def _on_message(self, message: bytes, ack, nack) -> None:
         try:
