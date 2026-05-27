@@ -64,6 +64,7 @@ class SumWorker:
         self.control_thread = None
         self.response_thread = None
         self.closed = False
+        self._stopped = False
 
     def _new_output_exchanges(self):
         return [
@@ -428,14 +429,15 @@ class SumWorker:
         output_exchanges = self._new_output_exchanges()
 
         try:
-            control_consumer.start_consuming(
-                lambda message, ack, nack: self._handle_eof_broadcast(
-                    message,
-                    ack,
-                    nack,
-                    output_exchanges,
+            if not self._stopped:
+                control_consumer.start_consuming(
+                    lambda message, ack, nack: self._handle_eof_broadcast(
+                        message,
+                        ack,
+                        nack,
+                        output_exchanges,
+                    )
                 )
-            )
         finally:
             for exchange in output_exchanges:
                 exchange.close()
@@ -450,14 +452,15 @@ class SumWorker:
         output_exchanges = self._new_output_exchanges()
 
         try:
-            response_consumer.start_consuming(
-                lambda message, ack, nack: self._handle_leader_report(
-                    message,
-                    ack,
-                    nack,
-                    output_exchanges,
+            if not self._stopped:
+                response_consumer.start_consuming(
+                    lambda message, ack, nack: self._handle_leader_report(
+                        message,
+                        ack,
+                        nack,
+                        output_exchanges,
+                    )
                 )
-            )
         finally:
             for exchange in output_exchanges:
                 exchange.close()
@@ -471,7 +474,8 @@ class SumWorker:
         self.response_thread.start()
 
         try:
-            self.input_queue.start_consuming(self.process_message)
+            if not self._stopped:
+                self.input_queue.start_consuming(self.process_message)
         finally:
             self.handle_sigterm()
             self.control_thread.join(timeout=5)
@@ -479,19 +483,20 @@ class SumWorker:
             self.close()
 
     def handle_sigterm(self) -> None:
-        if self.closed:
+        if self._stopped:
             return
+        self._stopped = True
 
         logging.info(
             "sum_shutdown | configuration=%s | id=%s",
             CONFIGURATION,
             ID,
         )
-        self.input_queue.stop_consuming()
+        self.input_queue.request_stop_consuming()
         if self.control_consumer is not None:
-            self.control_consumer.stop_consuming()
+            self.control_consumer.request_stop_consuming()
         if self.response_consumer is not None:
-            self.response_consumer.stop_consuming()
+            self.response_consumer.request_stop_consuming()
 
     def close(self) -> None:
         if self.closed:
