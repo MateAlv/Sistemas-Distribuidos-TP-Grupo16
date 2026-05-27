@@ -143,12 +143,7 @@ class Gateway:
                 thread.start()
 
     def stop(self) -> None:
-        """SIGTERM-safe shutdown trigger (runs on the main/signal thread).
-
-        Only signals and unblocks here; the orderly joins and FD closes happen
-        in _shutdown_workers once the accept loop exits. Never touches a channel
-        owned by another thread directly.
-        """
+        """Signal shutdown; the joins and FD closes happen in _shutdown_workers."""
         if self._stopped:
             return
         self._stopped = True
@@ -162,12 +157,7 @@ class Gateway:
         self._shutdown_client_sockets()
 
     def _shutdown_workers(self) -> None:
-        """Join worker/session threads so every FD is closed by its owner.
-
-        Safe regardless of how the accept loop exited: if it ended via an
-        unexpected error rather than stop(), trigger the shutdown signals here
-        so consumers stop and reach their connection-closing finally.
-        """
+        # stop() may not have run if the accept loop died on an error.
         if not self._stopped:
             self.stop()
 

@@ -1,21 +1,5 @@
-"""Shared pytest fixtures and fakes for the test suite.
-
-Centralizes two things every service test needs:
-
-1. Path setup so ``common.*`` (workers/gateway) and ``src.common.*``
-   (rates_service) both import without a configured PYTHONPATH.
-2. A reusable ``pika_env`` fixture that swaps in a fake ``pika`` module so the
-   middleware imports and constructs without a real broker, plus fakes for the
-   two flavours of SIGTERM test we run across services:
-
-   - ``FakeChannel`` / ``FakeConnection``: drive the *real* middleware to assert
-     it schedules stops thread-safely.
-   - ``BlockingFakeConsumer``: stand in for a middleware endpoint so a service's
-     run loop can be started and then released by a shutdown request.
-
-As we add graceful-shutdown tests for more services, reuse ``pika_env`` rather
-than re-deriving the fake-pika/reimport boilerplate per file.
-"""
+"""Shared path setup and the ``pika_env`` fixture (fake pika + reusable fakes)
+for the SIGTERM/shutdown tests."""
 
 import importlib
 import sys
@@ -35,19 +19,12 @@ for _path in (str(REPO_ROOT), str(SRC_ROOT)):
 _MIDDLEWARE_MODULES = (
     "common.middleware",
     "common.middleware.middleware_rabbitmq",
-    "src.common.middleware",
-    "src.common.middleware.middleware_rabbitmq",
 )
 
 
 def make_fake_pika(blocking_connection=None):
-    """Build a stand-in ``pika`` module.
-
-    ``blocking_connection`` is the connection ``pika.BlockingConnection(...)``
-    yields — pass a ``FakeConnection`` to exercise the real middleware. When
-    omitted, each call returns a fresh ``FakeConnection`` so middleware still
-    constructs cleanly even for tests that later inject their own fake endpoint.
-    """
+    """Stand-in ``pika`` module; BlockingConnection returns the given (or a
+    fresh) FakeConnection."""
 
     class AMQPConnectionError(Exception):
         pass
@@ -114,8 +91,7 @@ class FakeConnection:
         return self._channel
 
     def add_callback_threadsafe(self, callback):
-        # Record only; tests invoke callbacks explicitly to model the ioloop
-        # draining them on the owning thread.
+        # Recorded only; tests invoke them explicitly.
         self.callbacks.append(callback)
 
     def close(self):
@@ -123,17 +99,10 @@ class FakeConnection:
 
 
 class BlockingFakeConsumer:
-    """Reusable stand-in for any middleware consumer endpoint.
-
-    Blocks in ``start`` / ``start_consuming`` until a stop is requested, so a
-    service's main loop can be exercised and then released the way SIGTERM
-    releases it. Works for RPC servers (``start``/``stop``) and queue/exchange
-    consumers (``start_consuming``/``stop_consuming``/``request_stop_consuming``)
-    alike, and records lifecycle calls for assertions.
-    """
+    """Middleware endpoint stand-in: blocks in start/start_consuming until a
+    stop is requested, and records lifecycle calls."""
 
     def __init__(self, *args, block_timeout=2.0, **kwargs):
-
         self._block_timeout = block_timeout
         self.connected = False
         self.closed = False
@@ -208,12 +177,7 @@ class PikaEnv:
         return importlib.import_module(module_name)
 
     def cleanup(self):
-        """Drop fake-pika-built modules so the suite stays order-independent.
-
-        ``monkeypatch`` restores ``sys.modules['pika']`` itself; we only evict
-        the middleware/service modules we reimported against the fake so a later
-        test rebuilds them against the real pika.
-        """
+        """Evict fake-pika-built modules so the suite stays order-independent."""
         for name in self._imported:
             sys.modules.pop(name, None)
 

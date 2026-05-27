@@ -328,8 +328,7 @@ class Q3BarrierWorker:
                     )
                 )
         finally:
-            # Este thread es dueño del ioloop de candidates_input, así que lo
-            # cierra él mismo (no el principal) para evitar un close cross-thread.
+            # Este thread cierra las conexiones que consume.
             try:
                 self.candidates_input.close()
             except Exception:
@@ -357,11 +356,6 @@ class Q3BarrierWorker:
             self.close()
 
     def handle_sigterm(self):
-        # SIGTERM-safe: pedir el corte en el ioloop dueño de cada conexión
-        # (request_stop_consuming agenda vía add_callback_threadsafe).
-        # averages_input se consume en el thread principal; candidates_input en
-        # su propio thread, así que un stop_consuming() directo acá sería un
-        # acceso cross-thread no thread-safe a pika.
         if self._stopped:
             return
         self._stopped = True
@@ -374,8 +368,7 @@ class Q3BarrierWorker:
             return
         self.closed = True
 
-        # Conexiones del thread principal. candidates_input la cierra su propio
-        # thread en _consume_candidates (ya joineado antes de llegar acá).
+        # candidates_input la cierra su propio thread.
         for resource in (self.averages_input, self.averages_output_queue):
             try:
                 resource.close()

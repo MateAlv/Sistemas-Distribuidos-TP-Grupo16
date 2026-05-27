@@ -105,8 +105,7 @@ class FilterQ5UsdWorker:
         self.control_thread: threading.Thread | None = None
         self.response_thread: threading.Thread | None = None
         self.closed = False
-        # Set on SIGTERM to abort an in-flight rates RPC promptly (it can
-        # otherwise block the main thread up to the call timeout).
+        # Aborts an in-flight rates RPC on SIGTERM.
         self._shutdown = threading.Event()
 
     # ---------- helpers ----------
