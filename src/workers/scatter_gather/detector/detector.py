@@ -4,6 +4,7 @@ import threading
 from collections import defaultdict
 
 from common import message_protocol
+from common.logging_utils import should_log_progress
 from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
     MessageMiddlewareQueueRabbitMQ,
@@ -57,6 +58,7 @@ class ScatterGatherDetector:
         self._emitted = defaultdict(set)
         self._emitted_count_by_client = defaultdict(int)
         self._processed_by_client = defaultdict(int)
+        self._data_batches_by_client = defaultdict(int)
         self._eofs_by_client = defaultdict(set)
         self._linker_expected_by_client = defaultdict(dict)
         self._complete_by_client = set()
@@ -101,12 +103,29 @@ class ScatterGatherDetector:
                 ack()
                 return
 
-            for relation in ScatterGatherRelationSerializer.deserialize_batch(payload):
+            relations = ScatterGatherRelationSerializer.deserialize_batch(payload)
+            for relation in relations:
                 self._add_relation(
                     client_id,
                     relation.from_account,
                     relation.intermediate_account,
                     relation.to_account,
+                )
+            with self._lock:
+                self._data_batches_by_client[client_id] += 1
+                batches = self._data_batches_by_client[client_id]
+                processed = self._processed_by_client.get(client_id, 0)
+                emitted = self._emitted_count_by_client.get(client_id, 0)
+            if should_log_progress(batches):
+                logging.info(
+                    "detector_%s data_batch | client_id=%s | batch_size=%s | "
+                    "batches=%s | relations_processed=%s | results_emitted=%s",
+                    ID,
+                    client_id,
+                    len(relations),
+                    batches,
+                    processed,
+                    emitted,
                 )
             ack()
         except Exception:
@@ -252,6 +271,7 @@ class ScatterGatherDetector:
         self._emitted.pop(client_id, None)
         self._emitted_count_by_client.pop(client_id, None)
         self._processed_by_client.pop(client_id, None)
+        self._data_batches_by_client.pop(client_id, None)
         self._eofs_by_client.pop(client_id, None)
         self._linker_expected_by_client.pop(client_id, None)
         self._pending_eof_by_client.pop(client_id, None)
@@ -282,12 +302,29 @@ class ScatterGatherDetector:
 
         with self._lock:
             if control_message.sender_id in self._eofs_by_client[client_id]:
+                logging.info(
+                    "detector_%s duplicate_eof | client_id=%s | linker_id=%s",
+                    ID,
+                    client_id,
+                    control_message.sender_id,
+                )
                 return
 
             self._eofs_by_client[client_id].add(control_message.sender_id)
             self._linker_expected_by_client[client_id][
                 control_message.sender_id
             ] = control_message.expected_total
+            eof_count = len(self._eofs_by_client[client_id])
+            logging.info(
+                "detector_%s eof_received | client_id=%s | linker_id=%s | "
+                "eof_count=%s | expected_eofs=%s | linker_expected_total=%s",
+                ID,
+                client_id,
+                control_message.sender_id,
+                eof_count,
+                SG_LINKER_AMOUNT,
+                control_message.expected_total,
+            )
             if len(self._eofs_by_client[client_id]) < SG_LINKER_AMOUNT:
                 return
 

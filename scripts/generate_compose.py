@@ -61,6 +61,15 @@ Q3_AVERAGES_EXCHANGE = "q3_averages_exchange"
 Q3_CANDIDATES_EXCHANGE = "q3_candidates_exchange"
 Q3_AVERAGES_ROUTING_PREFIX = "q3_averages"
 Q3_CANDIDATES_ROUTING_PREFIX = "q3_candidates"
+OBSERVABILITY_DEFAULTS = {
+    "FLOW_LOG_ENABLED": "1",
+    "FLOW_LOG_EVERY_MESSAGES": "100",
+    "FLOW_LOG_EVERY_BYTES": str(8 * 1024 * 1024),
+    "FLOW_LOG_FIRST_MESSAGES": "1",
+    "WORKER_LOG_EVERY_MESSAGES": "100",
+    "CHUNK_LOG_EVERY": "100",
+    "RESULT_LOG_EVERY": "100",
+}
 
 
 def main() -> int:
@@ -156,8 +165,8 @@ def preset_config(
     client_accounts = [
         {
             "client_id": client_id,
-            "accounts_file": f"data/datasets/client-1/{dataset}/{dataset}_accounts.csv",
-            "transactions_file": f"data/datasets/client-1/{dataset}/{dataset}_Trans.csv",
+            "accounts_file": f"data/datasets/{dataset}/{dataset}_accounts.csv",
+            "transactions_file": f"data/datasets/{dataset}/{dataset}_Trans.csv",
         }
         for client_id in range(clients)
     ]
@@ -261,11 +270,11 @@ def apply_cli_overrides(config: dict, args, path: Path) -> None:
             {
                 "client_id": client_id,
                 "accounts_file": (
-                    f"data/datasets/client-1/{args.dataset}/"
+                    f"data/datasets/{args.dataset}/"
                     f"{args.dataset}_accounts.csv"
                 ),
                 "transactions_file": (
-                    f"data/datasets/client-1/{args.dataset}/"
+                    f"data/datasets/{args.dataset}/"
                     f"{args.dataset}_Trans.csv"
                 ),
             }
@@ -762,6 +771,7 @@ def rates_service() -> dict:
             f"RABBIT_HOST={MOM_HOST}",
             "RATES_REFERENCE_OVERLAY=q5",
             "PYTHONUNBUFFERED=1",
+            *observability_env(),
         ],
         "volumes": ["./data/rates:/data/rates:rw"],
     }
@@ -1021,11 +1031,18 @@ def base_service(dockerfile: str, depends_on, environment: list[str], volumes: l
     service = {
         "build": {"context": "./src/", "dockerfile": dockerfile},
         "depends_on": depends_on,
-        "environment": environment,
+        "environment": [*environment, *observability_env()],
     }
     if volumes:
         service["volumes"] = volumes
     return service
+
+
+def observability_env() -> list[str]:
+    return [
+        f"{name}={os.getenv(name, default)}"
+        for name, default in OBSERVABILITY_DEFAULTS.items()
+    ]
 
 
 def depends_on_rabbitmq() -> dict:

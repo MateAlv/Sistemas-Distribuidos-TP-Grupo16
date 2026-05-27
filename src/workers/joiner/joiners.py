@@ -5,6 +5,7 @@ import time
 
 from common import middleware
 from common.constants import C_Q2, C_Q3, C_Q5
+from common.logging_utils import should_log_progress
 from common.message_protocol.internal.common import MessageType
 from common.message_protocol.internal.common.control_message import ControlMessage
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
@@ -49,6 +50,7 @@ class JoinerWorker:
         self.lock = threading.Lock()
         self.closed = False
         self.processors_by_client = {}
+        self.data_count_by_client = {}
         self.eof_count_by_client = {}
         self.closed_by_client = {}  # client_id -> close_timestamp
         self._max_closed_clients = MAX_CLIENTS  # Limpiar cuando exceda este límite
@@ -69,6 +71,7 @@ class JoinerWorker:
     def _emit_results(self, client_id: int) -> None:
         with self.lock:
             processor = self.processors_by_client.pop(client_id, None)
+            self.data_count_by_client.pop(client_id, None)
             self.eof_count_by_client.pop(client_id, None)
             self.closed_by_client[client_id] = time.monotonic()
             
@@ -135,12 +138,37 @@ class JoinerWorker:
 
             if msg_type == MessageType.DATA:
                 self._processor_for_client(client_id).accept(payload)
+                self.data_count_by_client[client_id] = (
+                    self.data_count_by_client.get(client_id, 0) + 1
+                )
+                data_count = self.data_count_by_client[client_id]
+                if should_log_progress(data_count):
+                    logging.info(
+                        "joiner_data | configuration=%s | id=%s | client_id=%s | "
+                        "data_count=%s | payload_bytes=%s",
+                        CONFIGURATION,
+                        ID,
+                        client_id,
+                        data_count,
+                        len(payload),
+                    )
                 return
 
             if msg_type == MessageType.EOF:
                 count = self.eof_count_by_client.get(client_id, 0) + 1
                 self.eof_count_by_client[client_id] = count
                 should_emit = count == AGGREGATION_AMOUNT
+                logging.info(
+                    "joiner_eof_received | configuration=%s | id=%s | "
+                    "client_id=%s | eof_count=%s | expected_eofs=%s | "
+                    "ready=%s",
+                    CONFIGURATION,
+                    ID,
+                    client_id,
+                    count,
+                    AGGREGATION_AMOUNT,
+                    should_emit,
+                )
             else:
                 raise ValueError(f"unsupported message type: {msg_type}")
 

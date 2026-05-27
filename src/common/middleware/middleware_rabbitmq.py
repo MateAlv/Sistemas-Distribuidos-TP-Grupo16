@@ -1,8 +1,10 @@
 import os
+import logging
 import pika
 import uuid
 import time
 import threading
+from common.logging_utils import MessageFlowLogger
 from .middleware import (
     MessageMiddlewareQueue, 
     MessageMiddlewareExchange, 
@@ -29,6 +31,7 @@ class _RabbitMQBase:
         self._channel = None
         self._user_callback = None
         self._queue_name = None
+        self._flow_logger = MessageFlowLogger()
         try:
             self._connection = pika.BlockingConnection(
                 pika.ConnectionParameters(
@@ -48,12 +51,32 @@ class _RabbitMQBase:
         return False
 
     def _on_messaging_callback_adapter(self, ch, method, properties, body):
+        self._record_flow("consume", body)
         ack = lambda: ch.is_open and ch.basic_ack(delivery_tag=method.delivery_tag)
         def nack(requeue=False):
             return ch.is_open and ch.basic_nack(
                 delivery_tag=method.delivery_tag, requeue=requeue
             )
         self._user_callback(body, ack, nack)
+
+    def _record_flow(self, direction, message, routing_key=None):
+        endpoint_type = "exchange" if getattr(self, "_exchange_name", None) else "queue"
+        endpoint = (
+            getattr(self, "_exchange_name", None)
+            or getattr(self, "_queue_name", None)
+            or getattr(self, "_request_queue", None)
+            or "unknown"
+        )
+        try:
+            self._flow_logger.observe(
+                direction=direction,
+                endpoint_type=endpoint_type,
+                endpoint=endpoint,
+                routing_key=routing_key,
+                message=message,
+            )
+        except Exception as e:
+            logging.debug("middleware_flow_log_error | endpoint=%s | error=%s", endpoint, e)
 
     def start_consuming(self, on_message_callback):
         try:
@@ -115,6 +138,7 @@ class MessageMiddlewareQueueRabbitMQ(_RabbitMQBase, MessageMiddlewareQueue):
                 body=message,
                 properties=pika.BasicProperties(delivery_mode=_DELIVERY_MODE),
             )
+            self._record_flow("publish", message, self._queue_name)
         except _CONNECTION_ERRORS as e:
             raise MessageMiddlewareDisconnectedError(e)
         except MessageMiddlewareMessageError:
@@ -158,6 +182,7 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
                     body=message,
                     properties=pika.BasicProperties(delivery_mode=_DELIVERY_MODE),
                 )
+                self._record_flow("publish", message, "")
             else:
                 if not self._routing_keys:
                     raise MessageMiddlewareMessageError("No routing keys provided")
@@ -169,6 +194,7 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
                         body=message,
                         properties=pika.BasicProperties(delivery_mode=_DELIVERY_MODE),
                     )
+                    self._record_flow("publish", message, key)
         except _CONNECTION_ERRORS as e:
             raise MessageMiddlewareDisconnectedError(e)
         except MessageMiddlewareMessageError:
@@ -267,6 +293,7 @@ class MessageMiddlewareRpcClientRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcClie
             nonlocal response
             if props.correlation_id == correlation_id:
                 response = body
+                self._record_flow("rpc", body, reply_queue)
                 ch.basic_ack(delivery_tag=method.delivery_tag)
 
         self._channel.basic_consume(queue=reply_queue, on_message_callback=on_response, auto_ack=False)
@@ -281,6 +308,7 @@ class MessageMiddlewareRpcClientRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcClie
                 delivery_mode=_DELIVERY_MODE,
             )
         )
+        self._record_flow("publish", message, self._request_queue)
 
         deadline = time.monotonic() + timeout
         while response is None:
@@ -320,6 +348,8 @@ class MessageMiddlewareRpcServerRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcServ
                     body=response_message,
                     properties=pika.BasicProperties(correlation_id=properties.correlation_id)
                 )
+                self._record_flow("publish", response_message, properties.reply_to)
+            self._record_flow("consume", body, self._request_queue)
             on_request_callback(body, reply)
             ch.basic_ack(delivery_tag=method.delivery_tag)
         

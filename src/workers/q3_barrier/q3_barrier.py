@@ -4,6 +4,7 @@ import tempfile
 import threading
 
 from common import middleware
+from common.logging_utils import should_log_progress
 from common.message_protocol.internal import (
     ControlMessage,
     ControlMessageSerializer,
@@ -180,6 +181,17 @@ class Q3BarrierWorker:
             if msg_type == MessageType.DATA:
                 result = Q3AverageResultSerializer.deserialize(payload)
                 state.averages[result.payment_format] = result.average
+                average_count = len(state.averages)
+                if should_log_progress(average_count):
+                    logging.info(
+                        "q3_barrier_average_data | id=%s | client_id=%s | "
+                        "averages=%s | payment_format=%s | payload_bytes=%s",
+                        ID,
+                        client_id,
+                        average_count,
+                        result.payment_format,
+                        len(payload),
+                    )
                 return False
             if msg_type == MessageType.EOF:
                 state.avg_eof = True
@@ -201,6 +213,16 @@ class Q3BarrierWorker:
                 # serializado por el filter; lo guardamos crudo y desearializamos
                 # solo al momento del emit.
                 state.disk_log.append(payload)
+                if should_log_progress(state.disk_log.batch_count):
+                    logging.info(
+                        "q3_barrier_candidate_data | id=%s | client_id=%s | "
+                        "batches_on_disk=%s | disk_bytes=%s | payload_bytes=%s",
+                        ID,
+                        client_id,
+                        state.disk_log.batch_count,
+                        state.disk_log.byte_count,
+                        len(payload),
+                    )
                 return False
             if msg_type == MessageType.EOF:
                 control = self.control_serializer.deserialize(payload)

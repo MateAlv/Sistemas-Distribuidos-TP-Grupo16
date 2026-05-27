@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from common import middleware
 from common.domain.account import Q2BankMaxResult
 from common.domain.partial_result import Q2BankMaxPartial
+from common.logging_utils import should_log_progress
 from common.message_protocol.external.types import FILE_TYPE_ACCOUNTS
 from common.message_protocol.internal import (
     InternalProtocol,
@@ -217,6 +218,16 @@ class BankNameJoinerWorker:
                     partial = Q2BankMaxPartialSerializer.deserialize(payload)
                     state.q2_results[partial.bank_id] = partial
                     state.q2_data_count += 1
+                    if should_log_progress(state.q2_data_count):
+                        logging.info(
+                            "q2_bank_name_joiner_q2_data | id=%s | client_id=%s | "
+                            "data_count=%s | banks=%s | payload_bytes=%s",
+                            self._config.id,
+                            client_id,
+                            state.q2_data_count,
+                            len(state.q2_results),
+                            len(payload),
+                        )
                 elif msg_type == MessageType.EOF:
                     control = self._control_serializer.deserialize(payload)
                     state.q2_expected_total = control.expected_total
@@ -256,6 +267,18 @@ class BankNameJoinerWorker:
                     for bank_id, bank_name in mappings:
                         state.bank_names.setdefault(bank_id, bank_name)
                     state.accounts_batch_count += 1
+                    if should_log_progress(state.accounts_batch_count):
+                        logging.info(
+                            "q2_bank_name_joiner_accounts_data | id=%s | "
+                            "client_id=%s | batches=%s | mappings_in_batch=%s | "
+                            "known_banks=%s | payload_bytes=%s",
+                            self._config.id,
+                            client_id,
+                            state.accounts_batch_count,
+                            len(mappings),
+                            len(state.bank_names),
+                            len(payload),
+                        )
                     should_emit = state.ready()
 
             elif msg_type == MessageType.EOF:

@@ -7,6 +7,7 @@ from common.middleware import (
     MessageMiddlewareExchangeRabbitMQ,
     MessageMiddlewareRpcClientRabbitMQ,
 )
+from common.logging_utils import should_log_progress
 from common.message_protocol.internal import InternalProtocol, TransactionSerializer
 from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
@@ -265,7 +266,23 @@ class FilterQ5UsdWorker:
                 self.forwarded_by_client[client_id] = (
                     self.forwarded_by_client.get(client_id, 0) + forwarded_in_batch
                 )
+            processed_total = self.processed_by_client[client_id]
+            forwarded_total = self.forwarded_by_client.get(client_id, 0)
             pending = self.pending_eof_by_client.get(client_id)
+
+        if should_log_progress(processed_total):
+            logging.info(
+                "filter_q5_usd_data_batch | id=%s | client_id=%s | batch_size=%s | "
+                "forwarded_in_batch=%s | processed_total=%s | forwarded_total=%s | "
+                "pending_eof=%s",
+                ID,
+                client_id,
+                processed_delta,
+                forwarded_in_batch,
+                processed_total,
+                forwarded_total,
+                pending is not None,
+            )
 
         if pending is None:
             return
@@ -345,6 +362,17 @@ class FilterQ5UsdWorker:
                 ack()
                 return
 
+            logging.info(
+                "filter_q5_usd_eof_control_snapshot | id=%s | client_id=%s | "
+                "leader_id=%s | processed_count=%s | forwarded_count=%s | "
+                "expected_total=%s",
+                ID,
+                client_id,
+                leader_id,
+                processed_snapshot,
+                forwarded_snapshot,
+                expected_total,
+            )
             self._report_to_leader(
                 client_id,
                 leader_id,
@@ -391,6 +419,14 @@ class FilterQ5UsdWorker:
                     self._cleanup_client(client_id)
 
             if should_close:
+                logging.info(
+                    "filter_q5_usd_eof_ready | id=%s | client_id=%s | "
+                    "expected_total=%s | forwarded_total=%s",
+                    ID,
+                    client_id,
+                    expected_total,
+                    forwarded_total,
+                )
                 self._forward_eof_to_aggregators(
                     client_id, forwarded_total, output_exchanges
                 )
