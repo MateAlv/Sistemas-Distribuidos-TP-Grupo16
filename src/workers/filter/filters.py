@@ -718,9 +718,7 @@ class FilterWorker:
             logging.warning(f"Received FLUSH_ACK control message for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
             return
 
-        data = json.loads(payload.decode("utf-8"))
-        sender_id = data.get("sender_id")
-        counts = data.get("forwarded_by_output", {})
+        sender_id, counts = self._decode_flush_ack_payload(payload, output_queues)
 
         if client_id not in self.flushed_acks_by_client:
             self.flushed_acks_by_client[client_id] = set()
@@ -731,14 +729,45 @@ class FilterWorker:
             agg[output] = agg.get(output, 0) + int(value)
 
         if len(self.flushed_acks_by_client[client_id]) == FILTER_AMOUNT - 1:
-            logging.info(f"Received all FLUSH_ACK control messages for client {client_id} in filter_{CONFIGURATION}, forwarding EOF")
+            logging.info(
+                "filter_flush_ack_complete | filter=%s | id=%s | client_id=%s | "
+                "acks=%s | forwarding_eof=true",
+                CONFIGURATION,
+                ID,
+                client_id,
+                len(self.flushed_acks_by_client[client_id]),
+            )
             self._flush_batcher_for_client(client_id, output_queues)
             global_counts = dict(agg)
             with self.lock:
-                for output, value in self.forwarded_by_output_by_client.get(client_id, {}).items():
-                    global_counts[output] = global_counts.get(output, 0) + value
+                local_counts = self.forwarded_by_output_by_client.get(client_id, {})
+                if local_counts:
+                    for output, value in local_counts.items():
+                        global_counts[output] = global_counts.get(output, 0) + value
+                elif client_id in self.forwarded_by_client:
+                    outputs = output_queues or self.output_queues
+                    if len(outputs) == 1:
+                        output = next(iter(outputs))
+                        global_counts[output] = (
+                            global_counts.get(output, 0)
+                            + self.forwarded_by_client.get(client_id, 0)
+                        )
             self._forward_eof(client_id, global_counts, output_queues)
             self._cleanup_client(client_id)
+
+    def _decode_flush_ack_payload(self, payload, output_queues=None):
+        try:
+            data = json.loads(payload.decode("utf-8"))
+            return data.get("sender_id"), data.get("forwarded_by_output", {})
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            control = self.control_serializer.deserialize(payload)
+            outputs = output_queues or self.output_queues
+            if len(outputs) != 1:
+                raise ValueError(
+                    "legacy FLUSH_ACK payload can only be mapped with one output queue"
+                )
+            output = next(iter(outputs))
+            return control.sender_id, {output: control.processed_count}
 
     def process_data_messages(self, message, ack, nack):
         '''
