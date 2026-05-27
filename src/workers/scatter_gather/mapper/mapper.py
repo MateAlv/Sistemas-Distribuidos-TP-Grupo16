@@ -4,6 +4,7 @@ import threading
 
 from common import message_protocol
 from common.batch_buffer import BatchBuffer
+from common.logging_utils import should_log_progress
 from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareQueueRabbitMQ,
     MessageMiddlewareExchangeRabbitMQ,
@@ -185,7 +186,23 @@ class ScatterGatherMapper:
             self._forwarded_by_client[client_id] = (
                 self._forwarded_by_client.get(client_id, 0) + forwarded_count
             )
+            processed_total = self._processed_by_client[client_id]
+            forwarded_total = self._forwarded_by_client[client_id]
             pending = self._pending_eof_by_client.get(client_id)
+
+        if should_log_progress(processed_total):
+            logging.info(
+                "mapper_%s data_batch | client_id=%s | batch_size=%s | "
+                "edges_in_batch=%s | processed_total=%s | forwarded_total=%s | "
+                "pending_eof=%s",
+                ID,
+                client_id,
+                len(transactions),
+                forwarded_count,
+                processed_total,
+                forwarded_total,
+                pending is not None,
+            )
 
         if pending is not None:
             self._flush_client_buffers(client_id)
@@ -321,11 +338,31 @@ class ScatterGatherMapper:
                 # linker ahead of it, published on this control thread's own
                 # linker channels.
                 self._flush_client_buffers(client_id, linkers)
+                logging.info(
+                    "mapper_%s eof_control_snapshot | client_id=%s | "
+                    "leader_id=%s | processed_count=%s | forwarded_count=%s | "
+                    "expected_total=%s",
+                    ID,
+                    client_id,
+                    leader_id,
+                    processed_count,
+                    forwarded_count,
+                    expected_total,
+                )
                 self._report_to_leader(
                     client_id,
                     leader_id,
                     processed_count=processed_count,
                     forwarded_count=forwarded_count,
+                )
+            else:
+                logging.info(
+                    "mapper_%s duplicate_eof_control | client_id=%s | "
+                    "leader_id=%s | expected_total=%s",
+                    ID,
+                    client_id,
+                    leader_id,
+                    expected_total,
                 )
             ack()
         except Exception:

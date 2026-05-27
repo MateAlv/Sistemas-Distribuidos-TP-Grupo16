@@ -4,6 +4,7 @@ from collections import defaultdict
 
 from common import message_protocol
 from common.batch_buffer import BatchBuffer
+from common.logging_utils import should_log_progress
 from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
 )
@@ -51,6 +52,8 @@ class ScatterGatherLinker:
         self._outgoing = defaultdict(lambda: defaultdict(set))  # [client][M] = {B}
         self._emitted_count_by_client = defaultdict(int)
         self._emitted_count_by_partition = defaultdict(lambda: defaultdict(int))
+        self._data_batches_by_client = defaultdict(int)
+        self._edges_received_by_client = defaultdict(int)
         # Coalesces emitted relations into batches keyed by (client_id, detector
         # partition) before they reach a detector.
         self._batcher = BatchBuffer(
@@ -94,6 +97,22 @@ class ScatterGatherLinker:
                     self._add_outgoing(client_id, m=tx.from_account, b=tx.to_account)
             else:
                 logging.warning("linker_%s unknown edge tag %s", ID, edge_tag)
+
+            self._data_batches_by_client[client_id] += 1
+            self._edges_received_by_client[client_id] += len(transactions)
+            if should_log_progress(self._data_batches_by_client[client_id]):
+                logging.info(
+                    "linker_%s data_batch | client_id=%s | edge_tag=%s | "
+                    "batch_size=%s | batches=%s | edges_received=%s | "
+                    "relations_emitted=%s",
+                    ID,
+                    client_id,
+                    edge_tag,
+                    len(transactions),
+                    self._data_batches_by_client[client_id],
+                    self._edges_received_by_client[client_id],
+                    self._emitted_count_by_client[client_id],
+                )
 
             ack()
         except Exception as e:
@@ -163,9 +182,24 @@ class ScatterGatherLinker:
     def _handle_eof(self, client_id: int, payload: bytes):
         control_message = self._control_serializer.deserialize(payload)
         if control_message.sender_id in self._eofs_by_client[client_id]:
+            logging.info(
+                "linker_%s duplicate_eof | client_id=%s | mapper_id=%s",
+                ID,
+                client_id,
+                control_message.sender_id,
+            )
             return
 
         self._eofs_by_client[client_id].add(control_message.sender_id)
+        logging.info(
+            "linker_%s eof_received | client_id=%s | mapper_id=%s | "
+            "eof_count=%s | mapper_expected_total=%s",
+            ID,
+            client_id,
+            control_message.sender_id,
+            len(self._eofs_by_client[client_id]),
+            control_message.expected_total,
+        )
         self._flush_client(client_id)
 
         for partition, detector in enumerate(self._detectors):
@@ -188,6 +222,8 @@ class ScatterGatherLinker:
         self._outgoing.pop(client_id, None)
         self._emitted_count_by_client.pop(client_id, None)
         self._emitted_count_by_partition.pop(client_id, None)
+        self._data_batches_by_client.pop(client_id, None)
+        self._edges_received_by_client.pop(client_id, None)
         self._batcher.discard(lambda k: k[0] == client_id)
         self._eofs_by_client.pop(client_id, None)
         self._closed_by_client.add(client_id)

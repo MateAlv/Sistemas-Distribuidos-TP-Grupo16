@@ -7,6 +7,7 @@ from common import message_protocol
 from common.domain.transaction import Transaction
 from common import middleware
 from common.constants import *
+from common.logging_utils import should_log_progress
 
 try:
     from output_batcher import OutputBatcher
@@ -445,24 +446,55 @@ class FilterWorker:
 
         output_queues = output_queues or self.output_queues
         if CONFIGURATION == C_Q1:
-            output_queues[GATEWAY_QUEUE].send(eof_packet(count(GATEWAY_QUEUE)))
+            expected_total = count(GATEWAY_QUEUE)
+            output_queues[GATEWAY_QUEUE].send(eof_packet(expected_total))
+            self._log_forwarded_eof(client_id, GATEWAY_QUEUE, expected_total)
         if CONFIGURATION == C_Q5:
-            output_queues[FILTER_Q5_USD_QUEUE].send(eof_packet(count(FILTER_Q5_USD_QUEUE)))
+            expected_total = count(FILTER_Q5_USD_QUEUE)
+            output_queues[FILTER_Q5_USD_QUEUE].send(eof_packet(expected_total))
+            self._log_forwarded_eof(client_id, FILTER_Q5_USD_QUEUE, expected_total)
         if CONFIGURATION == C_USD:
             if USD_ENABLE_Q1:
-                output_queues[FILTER_Q1_QUEUE].send(eof_packet(count(FILTER_Q1_QUEUE)))
+                expected_total = count(FILTER_Q1_QUEUE)
+                output_queues[FILTER_Q1_QUEUE].send(eof_packet(expected_total))
+                self._log_forwarded_eof(client_id, FILTER_Q1_QUEUE, expected_total)
             if USD_ENABLE_Q2:
-                output_queues[SUM_Q2_QUEUE].send(eof_packet(count(SUM_Q2_QUEUE)))
+                expected_total = count(SUM_Q2_QUEUE)
+                output_queues[SUM_Q2_QUEUE].send(eof_packet(expected_total))
+                self._log_forwarded_eof(client_id, SUM_Q2_QUEUE, expected_total)
             if USD_ENABLE_DATE:
-                output_queues[FILTER_DATE_QUEUE].send(eof_packet(count(FILTER_DATE_QUEUE)))
+                expected_total = count(FILTER_DATE_QUEUE)
+                output_queues[FILTER_DATE_QUEUE].send(eof_packet(expected_total))
+                self._log_forwarded_eof(client_id, FILTER_DATE_QUEUE, expected_total)
         if CONFIGURATION == C_DATE:
             if DATE_ENABLE_Q3:
-                output_queues[SUM_Q3_QUEUE].send(eof_packet(count(SUM_Q3_QUEUE)))
-                output_queues[Q3_CANDIDATES_QUEUE].send(eof_packet(count(Q3_CANDIDATES_QUEUE)))
-            if DATE_ENABLE_Q4:
-                output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(
-                    eof_packet(count(SCATTER_GATHER_MAPPER_QUEUE))
+                expected_total = count(SUM_Q3_QUEUE)
+                output_queues[SUM_Q3_QUEUE].send(eof_packet(expected_total))
+                self._log_forwarded_eof(client_id, SUM_Q3_QUEUE, expected_total)
+                expected_total = count(Q3_CANDIDATES_QUEUE)
+                output_queues[Q3_CANDIDATES_QUEUE].send(eof_packet(expected_total))
+                self._log_forwarded_eof(
+                    client_id, Q3_CANDIDATES_QUEUE, expected_total
                 )
+            if DATE_ENABLE_Q4:
+                expected_total = count(SCATTER_GATHER_MAPPER_QUEUE)
+                output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(
+                    eof_packet(expected_total)
+                )
+                self._log_forwarded_eof(
+                    client_id, SCATTER_GATHER_MAPPER_QUEUE, expected_total
+                )
+
+    def _log_forwarded_eof(self, client_id: int, output_name: str, expected_total: int):
+        logging.info(
+            "filter_forward_eof | filter=%s | id=%s | client_id=%s | "
+            "output=%s | expected_total=%s",
+            CONFIGURATION,
+            ID,
+            client_id,
+            output_name,
+            expected_total,
+        )
 
     
     def _filter_transaction(self, transaction: Transaction, start_date=None, end_date=None):
@@ -567,6 +599,22 @@ class FilterWorker:
                 self.processed_by_client[client_id] = (
                     self.processed_by_client.get(client_id, 0) + len(transactions)
                 )
+                processed_total = self.processed_by_client[client_id]
+                forwarded_total = self.forwarded_by_client[client_id]
+
+            if should_log_progress(processed_total):
+                logging.info(
+                    "filter_data_batch | filter=%s | id=%s | client_id=%s | "
+                    "batch_size=%s | forwarded_in_batch=%s | processed_total=%s | "
+                    "forwarded_total=%s",
+                    CONFIGURATION,
+                    ID,
+                    client_id,
+                    len(transactions),
+                    forwarded_in_batch,
+                    processed_total,
+                    forwarded_total,
+                )
 
             # Si habia un EOF pendiente (caso un unico filtro), intentar cerrarlo
             # ahora que se procesaron mensajes adicionales.
@@ -584,7 +632,16 @@ class FilterWorker:
             control_message = self.control_serializer.deserialize(payload)
             expected_total = control_message.expected_total
 
-            logging.info(f"Received EOF for client {client_id} in filter_{CONFIGURATION}. Expected total: {expected_total}.")
+            logging.info(
+                "filter_upstream_eof | filter=%s | id=%s | client_id=%s | "
+                "expected_total=%s | leader=%s | filter_amount=%s",
+                CONFIGURATION,
+                ID,
+                client_id,
+                expected_total,
+                self.is_leader,
+                FILTER_AMOUNT,
+            )
             
             if self.is_leader and FILTER_AMOUNT == 1:
                 # No cerrar al llegar el EOF: registrar el expected_total y cerrar

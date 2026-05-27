@@ -192,6 +192,7 @@ Variables de ejecución:
 | `LOG_ARGS` | Argumentos extra para `docker compose logs`. |
 | `FLOW_LOG_EVERY_MESSAGES` | Cada cuantos mensajes DATA de RabbitMQ loguear progreso por publisher/consumer. Default: `100`. |
 | `FLOW_LOG_EVERY_BYTES` | Cada cuantos bytes de RabbitMQ loguear progreso por publisher/consumer. Default: `8388608`. |
+| `WORKER_LOG_EVERY_MESSAGES` | Cada cuantos batches DATA loguear progreso semantico dentro de cada worker. Default: `100`. |
 | `FLOW_LOG_ENABLED=0` | Desactiva los logs de flujo generados por el middleware. |
 | `CHUNK_LOG_EVERY` | Cada cuantos chunks cliente/gateway loguear progreso. Default: `100`. |
 | `RESULT_LOG_EVERY` | Cada cuantas lineas de resultado gateway->cliente loguear progreso. Default: `100`. |

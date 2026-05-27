@@ -7,6 +7,7 @@ import zlib
 from common import middleware
 from common.constants import C_Q2, C_Q3
 from common.domain.transaction import Transaction
+from common.logging_utils import should_log_progress
 from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal import InternalProtocol
@@ -271,7 +272,20 @@ class SumWorker:
             self.processed_by_client[client_id] = (
                 self.processed_by_client.get(client_id, 0) + len(transactions)
             )
+            processed_total = self.processed_by_client[client_id]
             pending = self.pending_eof_by_client.get(client_id)
+
+        if should_log_progress(processed_total):
+            logging.info(
+                "sum_data_batch | configuration=%s | id=%s | client_id=%s | "
+                "batch_size=%s | processed_total=%s | pending_eof=%s",
+                CONFIGURATION,
+                ID,
+                client_id,
+                len(transactions),
+                processed_total,
+                pending is not None,
+            )
 
         if pending is None:
             return
@@ -343,6 +357,18 @@ class SumWorker:
                 partials,
                 output_exchanges,
             )
+            logging.info(
+                "sum_eof_control_snapshot | configuration=%s | id=%s | "
+                "client_id=%s | leader_id=%s | processed_count=%s | "
+                "partials_forwarded=%s | expected_total=%s",
+                CONFIGURATION,
+                ID,
+                client_id,
+                leader_id,
+                processed_count,
+                forwarded_count,
+                expected_total,
+            )
             self._report_to_leader(
                 client_id,
                 leader_id,
@@ -363,6 +389,7 @@ class SumWorker:
             control_message = self.control_serializer.deserialize(payload)
             should_forward_eof = False
             expected_total = None
+            processed_total = None
 
             with self.lock:
                 self.leader_processed_by_client[client_id] = (
@@ -380,10 +407,21 @@ class SumWorker:
                     and self.leader_processed_by_client[client_id] == expected_total
                 ):
                     should_forward_eof = True
+                    processed_total = self.leader_processed_by_client[client_id]
                     forwarded_total = self.leader_forwarded_by_client[client_id]
                     self._cleanup_client(client_id)
 
             if should_forward_eof:
+                logging.info(
+                    "sum_eof_ready | configuration=%s | id=%s | client_id=%s | "
+                    "processed_total=%s | expected_total=%s | forwarded_total=%s",
+                    CONFIGURATION,
+                    ID,
+                    client_id,
+                    processed_total,
+                    expected_total,
+                    forwarded_total,
+                )
                 self._forward_eof_to_aggregators(
                     client_id,
                     forwarded_total,

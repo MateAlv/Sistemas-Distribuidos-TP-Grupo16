@@ -4,6 +4,7 @@ import threading
 
 from common import middleware
 from common.constants import C_Q2, C_Q3, C_Q5
+from common.logging_utils import should_log_progress
 from common.message_protocol.internal.common import MessageType
 from common.message_protocol.internal.common.control_message import ControlMessage
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
@@ -113,11 +114,24 @@ class AggregatorWorker:
             self.data_count_by_client[client_id] = (
                 self.data_count_by_client.get(client_id, 0) + 1
             )
+            data_count = self.data_count_by_client[client_id]
             if client_id in self.pending_eof_by_client:
                 # DATA que llego despues del EOF (carrera entre el EOF del Sum y
                 # los partials, que viajan por conexiones distintas): reportar el
                 # delta para que el conteo del lider alcance expected_total.
                 report_delta = 1
+
+        if should_log_progress(data_count):
+            logging.info(
+                "aggregation_data | configuration=%s | id=%s | client_id=%s | "
+                "data_count=%s | payload_bytes=%s | pending_eof=%s",
+                CONFIGURATION,
+                ID,
+                client_id,
+                data_count,
+                len(payload),
+                report_delta > 0,
+            )
 
         if report_delta:
             self._report_to_leader(client_id, report_delta)
@@ -137,6 +151,14 @@ class AggregatorWorker:
 
         if snapshot is None:
             # EOF duplicado: el snapshot ya se tomo y se reporto.
+            logging.info(
+                "aggregation_duplicate_eof | configuration=%s | id=%s | "
+                "client_id=%s | expected_total=%s",
+                CONFIGURATION,
+                ID,
+                client_id,
+                expected_total,
+            )
             return
 
         logging.info(
