@@ -77,65 +77,43 @@ class Gateway:
             + int(bool(q5_queue))
         )
 
-        self._q1_consumer = None
-        self._q2_consumer = None
-        self._q3_consumer = None
-        self._q4_consumer = None
-        self._q5_consumer = None
+        # Result consumers run on their own threads; track them so shutdown can
+        # stop each on its own ioloop (request_stop_consuming) and join it.
+        self._consumers: list[MessageMiddlewareQueueRabbitMQ] = []
+        self._consumer_threads: list[threading.Thread] = []
+        # Per-client session threads and their sockets, so SIGTERM can unblock
+        # the blocking recv/select and join the handlers before exit.
+        self._client_threads: list[threading.Thread] = []
+        self._client_socks: set[socket.socket] = set()
 
     def run(self) -> None:
         self._ensure_file_splitter_bindings()
 
-        if self._q1_queue_name:
-            self._q1_consumer = MessageMiddlewareQueueRabbitMQ(
-                self._config.mom_host, self._q1_queue_name
-            )
-            threading.Thread(
-                target=self._run_result_consumer,
-                args=(self._q1_consumer, self._q1_csv_lines, ""),
-                daemon=True,
-            ).start()
+        self._start_result_consumer(self._q1_queue_name, self._q1_csv_lines, "")
+        self._start_result_consumer(self._q2_queue_name, self._q2_csv_lines, "Q2|")
+        self._start_result_consumer(self._q3_queue_name, self._q3_csv_lines, "Q3|")
+        self._start_result_consumer(self._q4_queue_name, self._q4_csv_lines, "Q4|")
+        self._start_result_consumer(self._q5_queue_name, self._q5_csv_lines, "Q5|")
 
-        if self._q2_queue_name:
-            self._q2_consumer = MessageMiddlewareQueueRabbitMQ(
-                self._config.mom_host, self._q2_queue_name
-            )
-            threading.Thread(
-                target=self._run_result_consumer,
-                args=(self._q2_consumer, self._q2_csv_lines, "Q2|"),
-                daemon=True,
-            ).start()
+        try:
+            self._accept_clients()
+        finally:
+            self._shutdown_workers()
 
-        if self._q3_queue_name:
-            self._q3_consumer = MessageMiddlewareQueueRabbitMQ(
-                self._config.mom_host, self._q3_queue_name
-            )
-            threading.Thread(
-                target=self._run_result_consumer,
-                args=(self._q3_consumer, self._q3_csv_lines, "Q3|"),
-                daemon=True,
-            ).start()
+    def _start_result_consumer(self, queue_name, payload_to_csv_lines, prefix: str) -> None:
+        if not queue_name:
+            return
+        consumer = MessageMiddlewareQueueRabbitMQ(self._config.mom_host, queue_name)
+        self._consumers.append(consumer)
+        thread = threading.Thread(
+            target=self._run_result_consumer,
+            args=(consumer, payload_to_csv_lines, prefix),
+            daemon=True,
+        )
+        self._consumer_threads.append(thread)
+        thread.start()
 
-        if self._q4_queue_name:
-            self._q4_consumer = MessageMiddlewareQueueRabbitMQ(
-                self._config.mom_host, self._q4_queue_name
-            )
-            threading.Thread(
-                target=self._run_result_consumer,
-                args=(self._q4_consumer, self._q4_csv_lines, "Q4|"),
-                daemon=True,
-            ).start()
-
-        if self._q5_queue_name:
-            self._q5_consumer = MessageMiddlewareQueueRabbitMQ(
-                self._config.mom_host, self._q5_queue_name
-            )
-            threading.Thread(
-                target=self._run_result_consumer,
-                args=(self._q5_consumer, self._q5_csv_lines, "Q5|"),
-                daemon=True,
-            ).start()
-
+    def _accept_clients(self) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
             self._server_sock = server_sock
             server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -156,38 +134,107 @@ class Gateway:
                     raise
 
                 logging.info("gateway_accept | addr=%s", addr)
-                threading.Thread(
+                thread = threading.Thread(
                     target=self._handle_client,
                     args=(client_sock,),
                     daemon=True,
-                ).start()
+                )
+                with self._client_queues_lock:
+                    self._client_threads = [
+                        t for t in self._client_threads if t.is_alive()
+                    ]
+                    self._client_threads.append(thread)
+                thread.start()
 
     def stop(self) -> None:
+        """SIGTERM-safe shutdown trigger (runs on the main/signal thread).
+
+        Only signals and unblocks here; the orderly joins and FD closes happen
+        in _shutdown_workers once the accept loop exits. Never touches a channel
+        owned by another thread directly.
+        """
+        if self._stopped:
+            return
         self._stopped = True
-        for consumer in (self._q1_consumer, self._q2_consumer, self._q3_consumer, self._q4_consumer, self._q5_consumer):
-            if consumer is not None:
-                try:
-                    consumer.stop_consuming()
-                    consumer.close()
-                except Exception:
-                    pass
-        if self._server_sock is not None:
+        logging.info("gateway_stop")
+
+        # Stop accepting new clients (also unblocks the blocked accept()).
+        self._close_server_socket()
+
+        # Ask result consumers to stop on their own ioloop threads.
+        for consumer in self._consumers:
+            consumer.request_stop_consuming()
+
+        # Unblock client sessions parked in recv/select so their handlers return
+        # and close their own sockets.
+        self._shutdown_client_sockets()
+
+    def _shutdown_workers(self) -> None:
+        """Join worker/session threads so every FD is closed by its owner."""
+        # Result consumers close their own connection in _run_result_consumer's
+        # finally once start_consuming returns.
+        for thread in self._consumer_threads:
+            thread.join(timeout=5)
+            if thread.is_alive():
+                logging.warning("gateway_consumer_join_timeout | thread=%s", thread.name)
+
+        with self._client_queues_lock:
+            client_threads = list(self._client_threads)
+        for thread in client_threads:
+            thread.join(timeout=5)
+
+        # Safety net: close anything a timed-out thread left open.
+        self._close_client_sockets()
+        self._close_server_socket()
+
+    def _close_server_socket(self) -> None:
+        sock = self._server_sock
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def _shutdown_client_sockets(self) -> None:
+        with self._client_queues_lock:
+            socks = list(self._client_socks)
+        for sock in socks:
             try:
-                self._server_sock.shutdown(socket.SHUT_RDWR)
+                sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
+
+    def _close_client_sockets(self) -> None:
+        with self._client_queues_lock:
+            socks = list(self._client_socks)
+            self._client_socks.clear()
+        for sock in socks:
             try:
-                self._server_sock.close()
+                sock.close()
             except OSError:
                 pass
 
     def _handle_client(self, client_sock: socket.socket) -> None:
         client_id = None
+        with self._client_queues_lock:
+            self._client_socks.add(client_sock)
         try:
             client_id = self._serve_client(client_sock)
         except Exception as e:
-            logging.error("gateway_client_error | client_id=%s | error=%s", client_id, e)
+            if self._stopped:
+                logging.info("gateway_client_shutdown | client_id=%s", client_id)
+            else:
+                logging.error(
+                    "gateway_client_error | client_id=%s | error=%s", client_id, e
+                )
         finally:
+            with self._client_queues_lock:
+                self._client_socks.discard(client_sock)
             try:
                 client_sock.close()
             except OSError:
@@ -380,6 +427,12 @@ class Gateway:
         except Exception as e:
             if not self._stopped:
                 logging.error("gateway_results_consumer_stopped | prefix=%s | error=%s", prefix or "Q1", e)
+        finally:
+            # Close the connection on the thread that owns it (no cross-thread close).
+            try:
+                consumer.close()
+            except Exception:
+                pass
 
     def _ensure_file_splitter_bindings(self) -> None:
         bindings = file_splitter_bindings(
