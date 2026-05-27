@@ -79,6 +79,7 @@ class BankNameJoinerWorker:
         self._states: dict[int, ClientState] = {}
         self._closed_by_client: dict[int, float] = {}
         self._closed = False
+        self._stopped = False
 
         self._q2_thread: threading.Thread | None = None
         self._accounts_thread: threading.Thread | None = None
@@ -99,58 +100,90 @@ class BankNameJoinerWorker:
         )
         self._q2_thread.start()
         self._accounts_thread.start()
-        self._q2_thread.join()
-        self._accounts_thread.join()
+        self._await_consumers()
+
+    def _await_consumers(self) -> None:
+        # Bloquea hasta que ambos consumidores terminen (EOF natural o SIGTERM).
+        # join(timeout) es una espera bloqueante real (no busy-wait); al pedirse
+        # el corte (stop) se acota para no colgar el proceso si un consumer no
+        # frena a tiempo.
+        threads = [t for t in (self._q2_thread, self._accounts_thread) if t is not None]
+        while True:
+            alive = [t for t in threads if t.is_alive()]
+            if not alive:
+                return
+            for thread in alive:
+                thread.join(timeout=1.0)
+            if self._stopped:
+                for thread in alive:
+                    thread.join(timeout=5.0)
+                return
 
     def stop(self) -> None:
+        # SIGTERM-safe: pedir el corte de cada consumer en el thread dueño de su
+        # conexión (request_stop_consuming agenda vía add_callback_threadsafe).
+        # Ambos consumers corren en threads propios, así que un stop_consuming()
+        # directo acá sería un acceso cross-thread no thread-safe a pika.
+        if self._stopped:
+            return
+        self._stopped = True
         logging.info("q2_bank_name_joiner_stop | id=%s", self._config.id)
         for consumer in (self._q2_consumer, self._accounts_consumer):
             if consumer is not None:
-                try:
-                    consumer.stop_consuming()
-                except Exception:
-                    pass
+                consumer.request_stop_consuming()
 
     def close(self) -> None:
+        # Los consumers cierran su propia conexión en el finally de su thread
+        # (ya joineados antes de llegar acá). Acá sólo cerramos el recurso del
+        # thread principal.
         if self._closed:
             return
         self._closed = True
-        for resource in (self._q2_consumer, self._accounts_consumer, self._output_queue):
-            if resource is None:
-                continue
-            try:
-                resource.close()
-            except Exception as e:
-                logging.warning(
-                    "q2_bank_name_joiner_close_error | id=%s | error=%s",
-                    self._config.id, e,
-                )
+        try:
+            self._output_queue.close()
+        except Exception as e:
+            logging.warning(
+                "q2_bank_name_joiner_close_error | id=%s | error=%s",
+                self._config.id, e,
+            )
 
     def _run_q2_consumer(self) -> None:
         self._q2_consumer = middleware.MessageMiddlewareQueueRabbitMQ(
             self._config.mom_host, self._config.q2_input_queue
         )
         try:
-            self._q2_consumer.start_consuming(self._on_q2_message)
+            if not self._stopped:
+                self._q2_consumer.start_consuming(self._on_q2_message)
         except Exception as e:
             if not self._closed:
                 logging.error(
                     "q2_bank_name_joiner_q2_consumer_error | id=%s | error=%s",
                     self._config.id, e,
                 )
+        finally:
+            try:
+                self._q2_consumer.close()
+            except Exception:
+                pass
 
     def _run_accounts_consumer(self) -> None:
         self._accounts_consumer = middleware.MessageMiddlewareQueueRabbitMQ(
             self._config.mom_host, self._config.accounts_input_queue
         )
         try:
-            self._accounts_consumer.start_consuming(self._on_accounts_message)
+            if not self._stopped:
+                self._accounts_consumer.start_consuming(self._on_accounts_message)
         except Exception as e:
             if not self._closed:
                 logging.error(
                     "q2_bank_name_joiner_accounts_consumer_error | id=%s | error=%s",
                     self._config.id, e,
                 )
+        finally:
+            try:
+                self._accounts_consumer.close()
+            except Exception:
+                pass
 
     def _on_q2_message(self, message: bytes, ack, nack) -> None:
         try:
