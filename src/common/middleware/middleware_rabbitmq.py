@@ -13,9 +13,6 @@ from .middleware import (
     MessageMiddlewareRpcServer,
 )
 
-# Set RABBITMQ_DURABLE=true to persist queues and messages across broker restarts.
-# Disabled by default: unnecessary overhead for hito 2 (scalability, no fault tolerance).
-# Enable for hito 3 (fault tolerance).
 _DURABLE = os.environ.get("RABBITMQ_DURABLE", "false").lower() == "true"
 _DELIVERY_MODE = 2 if _DURABLE else 1
 _PREFETCH_COUNT = int(os.environ.get("PREFETCH_COUNT", "1"))
