@@ -421,6 +421,14 @@ class FileSplitter:
             payload=payload,
         )
         self._line_batch_sender().send(message)
+        logging.info(
+            "file_splitter_transaction_eof_sent | id=%s | client_id=%s | "
+            "output_queue=%s | expected_total=%s",
+            self._config.id,
+            client_id,
+            self._config.output_queue,
+            expected_total,
+        )
 
     def _send_accounts_eof(self, client_id: int) -> None:
         if self._config.accounts_output_queue is None:
