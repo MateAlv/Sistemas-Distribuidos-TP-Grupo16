@@ -8,6 +8,16 @@ Applies to all filter configs (usd/q1/date/q5_format) — same code path.
 """
 
 import threading
+import time
+
+
+def _wait_control_input(worker, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if worker.control_input is not None:
+            return worker.control_input
+        time.sleep(0.01)
+    raise AssertionError("control consumer was never created")
 
 
 def _setup_filter(pika_env, monkeypatch, configuration="USD"):
@@ -61,7 +71,8 @@ def test_filter_sigterm_stops_both_consumers_and_closes(pika_env, monkeypatch):
     try:
         # Both the main input consumer and the control-thread consumer are live.
         assert worker.input_queue.wait_started(2), "input consumer never started"
-        assert worker.control_input.wait_started(2), "control consumer never started"
+        control_input = _wait_control_input(worker)
+        assert control_input.wait_started(2), "control consumer never started"
 
         worker.handle_sigterm()
 
@@ -73,10 +84,10 @@ def test_filter_sigterm_stops_both_consumers_and_closes(pika_env, monkeypatch):
     assert not runner.is_alive()
     # Both consumers stopped via request_stop_consuming (no cross-thread stop).
     assert worker.input_queue.stop_calls == 1
-    assert worker.control_input.stop_calls == 1
+    assert control_input.stop_calls == 1
     # Every connection closed by its owning thread.
     assert worker.input_queue.closed
-    assert worker.control_input.closed
+    assert control_input.closed
     assert worker.control_output.closed
     assert all(q.closed for q in worker.output_queues.values())
 
@@ -89,11 +100,12 @@ def test_filter_handle_sigterm_is_idempotent(pika_env, monkeypatch):
     threading.Thread(target=lambda: (worker.start(), done.set()), name="filter-start").start()
 
     assert worker.input_queue.wait_started(2)
-    assert worker.control_input.wait_started(2)
+    control_input = _wait_control_input(worker)
+    assert control_input.wait_started(2)
 
     worker.handle_sigterm()
     worker.handle_sigterm()  # duplicate signal must be a no-op
 
     assert done.wait(timeout=10)
     assert worker.input_queue.stop_calls == 1
-    assert worker.control_input.stop_calls == 1
+    assert control_input.stop_calls == 1

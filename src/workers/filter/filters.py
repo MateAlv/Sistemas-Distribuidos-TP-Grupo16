@@ -92,10 +92,7 @@ class FilterWorker:
         else:
             self.output_control_keys.append(f"{FILTER_PREFIX}_0")
 
-        # Definicion de la entrada del exchange de control
-        self.control_input = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, CONTROL_EXCHANGE, [self.personal_control_key]
-        )
+        self.control_input = None
 
         # Definicion del output del exchange de control
         self.control_output = self._new_control_output()
@@ -733,18 +730,22 @@ class FilterWorker:
             nack()
 
     def _start_control_consumer(self):
+        control_input = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, CONTROL_EXCHANGE, [self.personal_control_key]
+        )
+        self.control_input = control_input
         control_output = self._new_control_output()
         output_queues = self._new_output_queues()
         try:
             if self.active:
-                self.control_input.start_consuming(
+                control_input.start_consuming(
                     lambda message, ack, nack: self._process_control_message_with_publishers(
                         message, ack, nack, control_output, output_queues
                     )
                 )
         finally:
             try:
-                self.control_input.close()
+                control_input.close()
             except Exception as e:
                 logging.error(
                     f"Error closing control input in filter_{CONFIGURATION} with id {ID}: {e}"
@@ -796,23 +797,19 @@ class FilterWorker:
 
     def handle_sigterm(self):
         '''
-        Maneja la señal de terminacion: pide el corte de los consumers en el
-        ioloop que les corresponde (request_stop_consuming agenda el stop vía
-        add_callback_threadsafe). No cierra recursos ni hace join acá: puede
-        ejecutarse en el signal handler sobre el thread que está consumiendo.
-        El cierre ordenado ocurre en el finally de start().
+        Maneja la señal de terminacion.
         '''
         if not self.active:
             return
         logging.info(f"Received SIGTERM in filter_{CONFIGURATION} with id {ID}, shutting down")
         self.active = False
         self.input_queue.request_stop_consuming()
-        self.control_input.request_stop_consuming()
+        if self.control_input is not None:
+            self.control_input.request_stop_consuming()
 
     def close(self):
         '''
-        Cierra los recursos del thread principal. control_input lo cierra su
-        propio thread en _start_control_consumer (ya joineado antes de llegar acá).
+        Cierra los recursos utilizados por este worker.
         '''
         if self._closed:
             return
