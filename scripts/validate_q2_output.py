@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Validate Q2 output (per source bank, the max-amount USD transaction enriched
-with the bank name).
-
-Compares every ``results_q2_*.csv`` against the precomputed reference
-(``<dataset>/expected_results/q2.csv``), falling back to computing it from the
-dataset when the reference is absent.
-"""
+"""Validate Q2 output against the precomputed reference (or the dataset if absent)."""
 import os
 import sys
 from pathlib import Path

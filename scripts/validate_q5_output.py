@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""Validate Q5 output.
-
-Q5: count transactions in [2022-09-01, 2022-09-05] with format Wire or ACH whose
-amount converted to USD is less than 1. Each client emits its own count, which
-must equal the reference count (counts are NOT summed across clients).
-
-Compares every ``results_q5_*.csv`` against the precomputed reference
-(``<dataset>/expected_results/q5.csv``), falling back to computing it from the
-dataset when the reference is absent.
-"""
+"""Validate Q5 output against the precomputed reference (or the dataset if absent)."""
 import os
 import sys
 from pathlib import Path

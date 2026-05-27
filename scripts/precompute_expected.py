@@ -1,16 +1,7 @@
 #!/usr/bin/env python3
-"""Precompute the per-dataset reference results for Q1-Q5.
+"""Precompute per-dataset reference results into <root>/<NAME>/expected_results/qN.csv.
 
-For a dataset ``<NAME>`` it reads ``<root>/<NAME>/<NAME>_Trans.csv`` (+
-``_accounts.csv`` for Q2) and writes ``<root>/<NAME>/expected_results/qN.csv``.
-The reference is the single source of truth the validators compare against, so
-the expensive Q4 graph computation runs once per dataset instead of on every
-``make test``.
-
-Usage:
-    python scripts/precompute_expected.py --dataset LI-Mini
-    python scripts/precompute_expected.py --dataset HI-Medium --queries q4
-"""
+Usage: python scripts/precompute_expected.py --dataset LI-Mini [--queries q4] [--force]"""
 import argparse
 import sys
 import time

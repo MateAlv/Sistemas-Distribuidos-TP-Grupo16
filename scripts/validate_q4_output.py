@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""Validate Q4 output.
-
-Q4: over USD transactions in [2022-09-01, 2022-09-05], treat from_account ->
-to_account as a directed graph and emit a pair (A, B) once there are >= 5
-distinct intermediaries M with both A -> M and M -> B. This mirrors the
-scatter-gather linker/detector semantics (src/workers/scatter_gather/).
-
-Compares every ``results_q4_*.csv`` against the precomputed reference
-(``<dataset>/expected_results/q4.csv``), falling back to computing it from the
-dataset when the reference is absent.
-"""
+"""Validate Q4 output against the precomputed reference (or the dataset if absent)."""
 import os
 import sys
 from pathlib import Path

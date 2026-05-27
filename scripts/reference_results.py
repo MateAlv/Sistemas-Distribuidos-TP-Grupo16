@@ -1,25 +1,7 @@
 #!/usr/bin/env python3
-"""Single source of truth for the expected (reference) results of Q1-Q5.
-
-The reference logic that used to live inside each ``validate_qN_output.py`` is
-gathered here so there is exactly one implementation per query. It is used in
-two places:
-
-* ``scripts/precompute_expected.py`` materializes the reference for a dataset
-  under ``<dataset>/expected_results/qN.csv`` (Q4 in particular is expensive to
-  recompute, so we do it once per dataset).
-* the validators load that reference and compare a pipeline run's output against
-  it as **order-independent multisets** (bidirectional: both missing AND
-  unexpected rows fail the check, so a pipeline that emits spurious/duplicate
-  rows does not pass).
-
-The reference is computed to match the *pipeline* semantics, not just the design
-doc. In particular Q4 mirrors the scatter-gather linker/detector
-(``src/workers/scatter_gather/``): a transaction ``X -> Y`` contributes
-``incoming[Y] += {X}`` and ``outgoing[X] += {Y}``; a pair ``(A, B)`` is emitted
-once it has >= MIN_INTERMEDIARIES distinct intermediaries ``M`` with both
-``A -> M`` and ``M -> B``.
-"""
+"""Reference (expected) results for Q1-Q5, shared by precompute_expected.py and
+the validators. Comparison is an order-independent, bidirectional multiset
+equality. Computed to match the pipeline semantics."""
 import csv
 import json
 import sys
@@ -201,10 +183,11 @@ def compute_q3(trans_file, _accounts_file=None):
 
 
 def compute_q4(trans_file, _accounts_file=None):
-    # Mirror the scatter-gather linker join: for every USD txn (X -> Y) in the
-    # window, X is a source into M=Y and a sink M=X out to Y.
-    incoming = defaultdict(set)  # M -> {A : A -> M}
-    outgoing = defaultdict(set)  # M -> {B : M -> B}
+    # Mirrors the scatter-gather linker/detector: a txn X->Y feeds incoming[Y]
+    # (A->M with M=Y) and outgoing[X] (M->B with M=X); a pair (A,B) is emitted
+    # once it has >= Q4_MIN_INTERMEDIARIES distinct M with both A->M and M->B.
+    incoming = defaultdict(set)
+    outgoing = defaultdict(set)
     with open(trans_file, "r") as f:
         reader = csv.reader(f)
         col = _columns(next(reader))
@@ -219,7 +202,6 @@ def compute_q4(trans_file, _accounts_file=None):
             incoming[dst].add(src)
             outgoing[src].add(dst)
 
-    # detector: count distinct intermediaries M per (A, B); emit at >= threshold.
     intermediaries = defaultdict(set)
     for m in set(incoming) & set(outgoing):
         for a in incoming[m]:
@@ -233,7 +215,6 @@ def compute_q4(trans_file, _accounts_file=None):
     ]
 
 
-# ---- Q5 currency conversion (ported from validate_q5_output.py) ----------- #
 RATES_CACHE = Path("data/rates/cache.json")
 
 CURRENCY_NAME_TO_ISO = {
@@ -319,17 +300,14 @@ def compute(query, dataset_dir, trans_name):
 # normalization + I/O shared by reference files and pipeline output files
 # --------------------------------------------------------------------------- #
 def normalize_row(query, fields):
-    """Normalize a positional CSV row into a comparable tuple.
-
-    Works identically on reference rows and pipeline-output rows, so amounts are
-    coerced to two decimals and fields stripped. Q5 normalizes to its integer
-    count.
-    """
+    """Normalize a positional CSV row (reference or pipeline output) into a comparable tuple."""
     f = [x.strip() for x in fields]
     if query == "q1":
         return (f[0], f[1], f[2], f[3], f"{float(f[4]):.2f}")
     if query == "q2":
-        return (f[0], f[1], f[2], f"{float(f[3]):.2f}")
+        # Account is excluded: under a tie for a bank's max amount, which
+        # account wins is non-deterministic. Key on (bank id, bank name, amount).
+        return (f[0], f[2], f"{float(f[3]):.2f}")
     if query == "q3":
         return (f[0], f[1], f"{float(f[2]):.2f}")
     if query == "q4":
@@ -347,11 +325,7 @@ def _data_rows(path):
 
 
 def load_counter(query, path):
-    """Load a results/expected CSV into a multiset of normalized rows.
-
-    For Q5 the returned counter has a single key whose value is the summed count
-    across all data rows, e.g. ``Counter({("count", "9785"): 1})``.
-    """
+    """Load a results/expected CSV into a multiset of normalized rows (Q5 sums to one count)."""
     rows = list(_data_rows(path))
     if not rows:
         return Counter()
@@ -412,16 +386,10 @@ def _summarize_actual(query, counter):
 
 
 def validate_query(query, dataset_dir, trans_name, output_dir="data/output"):
-    """Compare every ``results_<query>_*.csv`` against the reference multiset.
-
-    Bidirectional: a client output passes only if it has no missing AND no
-    unexpected rows relative to the precomputed reference. Returns True iff all
-    client outputs match. Prints a per-file report (the validators wrap this in
-    a ``Qn FLOW VALIDATION`` banner).
-    """
+    """Compare every results_<query>_*.csv against the reference multiset; True iff all match."""
     try:
         expected = expected_counter(query, dataset_dir, trans_name)
-    except Exception as e:  # noqa: BLE001 - surfaced to the caller's banner
+    except Exception as e:
         print(f"ERROR computing/loading expected {query} rows: {e}")
         return False
 

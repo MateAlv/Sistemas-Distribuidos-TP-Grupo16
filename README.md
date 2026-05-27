@@ -8,17 +8,17 @@ Enunciado: [docs/enunciado.md](docs/enunciado.md).
 
 - Docker y Docker Compose.
 - Python 3.12 o compatible.
-- Los datasets montados bajo `data/datasets/client-1/<DATASET>/`.
+- Los datasets montados bajo `data/datasets/<DATASET>/`.
 - Opcional: entorno virtual en `venv/`. El Makefile usa `venv/bin/python` si existe, o `python3` en caso contrario.
 
 La estructura esperada para un dataset es:
 
 ```text
-data/datasets/client-1/LI-Mini/LI-Mini_Trans.csv
-data/datasets/client-1/LI-Mini/LI-Mini_accounts.csv
+data/datasets/LI-Mini/LI-Mini_Trans.csv
+data/datasets/LI-Mini/LI-Mini_accounts.csv
 ```
 
-Para multicliente no hace falta replicar físicamente el dataset: los presets generan varios clientes apuntando al dataset base de `client-1`, cada uno con un `client_id` distinto.
+Para multicliente no hace falta replicar fisicamente el dataset: los presets generan varios clientes apuntando al dataset base, cada uno con un `client_id` distinto.
 
 ## Comandos principales
 
@@ -190,6 +190,11 @@ Variables de ejecución:
 | `TEST_SMOKE_DEADLINE_SECONDS` | Deadline de smoke checks en `make test`. |
 | `LOG_COLOR=never` | Desactiva color en logs formateados. |
 | `LOG_ARGS` | Argumentos extra para `docker compose logs`. |
+| `FLOW_LOG_EVERY_MESSAGES` | Cada cuantos mensajes DATA de RabbitMQ loguear progreso por publisher/consumer. Default: `100`. |
+| `FLOW_LOG_EVERY_BYTES` | Cada cuantos bytes de RabbitMQ loguear progreso por publisher/consumer. Default: `8388608`. |
+| `FLOW_LOG_ENABLED=0` | Desactiva los logs de flujo generados por el middleware. |
+| `CHUNK_LOG_EVERY` | Cada cuantos chunks cliente/gateway loguear progreso. Default: `100`. |
+| `RESULT_LOG_EVERY` | Cada cuantas lineas de resultado gateway->cliente loguear progreso. Default: `100`. |
 
 ## Outputs
 
@@ -206,10 +211,10 @@ data/output/results_q5_<client_id>.csv
 Cada test específico ejecuta su validador correspondiente:
 
 ```bash
-Q1_DATASET_DIR=data/datasets/client-1/LI-Mini Q1_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q1_output.py
-Q2_DATASET_DIR=data/datasets/client-1/LI-Mini Q2_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q2_output.py
-Q3_DATASET_DIR=data/datasets/client-1/LI-Mini Q3_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q3_output.py
-Q5_DATASET_DIR=data/datasets/client-1/LI-Mini Q5_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q5_output.py
+Q1_DATASET_DIR=data/datasets/LI-Mini Q1_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q1_output.py
+Q2_DATASET_DIR=data/datasets/LI-Mini Q2_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q2_output.py
+Q3_DATASET_DIR=data/datasets/LI-Mini Q3_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q3_output.py
+Q5_DATASET_DIR=data/datasets/LI-Mini Q5_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q5_output.py
 ```
 
 ## RabbitMQ

@@ -137,9 +137,24 @@ stats:
 	docker stats
 .PHONY: stats
 
+# Dataset used by the full `make test` run and `make expected`.
+DATASET ?= LI-Small
+
+# Precompute the per-dataset reference results (data/datasets/<DATASET>/expected_results/).
+# Use FORCE=1 to regenerate. The expensive Q4 graph is computed once here, not per run.
+expected:
+	$(PYTHON) scripts/precompute_expected.py --dataset $(DATASET) $(if $(FORCE),--force)
+.PHONY: expected
+
+# Full end-to-end test: kills leftover TP containers, runs the WHOLE pipeline
+# (Q1-Q5) from the full test config, validates every query's output for every
+# client against the precomputed reference, and prints a metrics footer
+# (per-query PASS/FAIL + time, container count, peak CPU/RAM) as the last lines.
+# Parametrize like the test-qN targets, e.g.:
+#   DATASET=HI-Medium CLIENTS=2 USD_WORKERS=4 PREFETCH_COUNT=50 make test
 test:
 	$(PYTHON) $(COMPOSE_SCRIPT) --config $(TEST_CONFIG_FILE) \
-		$(if $(TEST_DATASET),--dataset $(TEST_DATASET)) \
+		$(if $(DATASET),--dataset $(DATASET)) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
 		$(if $(Q2_SUM_WORKERS),--sum-q2-workers $(Q2_SUM_WORKERS)) \
 		$(if $(Q5_FORMAT_WORKERS),--filter-q5-format-workers $(Q5_FORMAT_WORKERS)) \
@@ -151,55 +166,12 @@ test:
 		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
 		$(if $(CLIENTS),--clients $(CLIENTS)) \
 		--test-output $(TEST_COMPOSE_FILE) --skip-output
-	bash -lc 'set -euo pipefail; \
-		log_file="$$(mktemp -t $(TEST_PROJECT).XXXXXX.log)"; \
-		log_fifo="$$(mktemp -u -t $(TEST_PROJECT).XXXXXX.fifo)"; \
-		logs_pid=""; \
-		format_pid=""; \
-		cleanup() { \
-			docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) down --volumes --remove-orphans >/dev/null 2>&1 || true; \
-			leftover=$$(docker ps -aq --filter "label=com.docker.compose.project=$(TEST_PROJECT)"); \
-			if [ -n "$$leftover" ]; then docker rm -f $$leftover >/dev/null 2>&1 || true; fi; \
-			nets=$$(docker network ls -q --filter "label=com.docker.compose.project=$(TEST_PROJECT)"); \
-			if [ -n "$$nets" ]; then docker network rm $$nets >/dev/null 2>&1 || true; fi; \
-			rm -f "$$log_fifo"; \
-		}; \
-		stop_logs() { \
-			if [ -n "$$format_pid" ]; then pkill -TERM -P "$$format_pid" >/dev/null 2>&1 || true; kill "$$format_pid" >/dev/null 2>&1 || true; wait "$$format_pid" >/dev/null 2>&1 || true; fi; \
-			if [ -n "$$logs_pid" ]; then pkill -TERM -P "$$logs_pid" >/dev/null 2>&1 || true; kill "$$logs_pid" >/dev/null 2>&1 || true; wait "$$logs_pid" >/dev/null 2>&1 || true; fi; \
-		}; \
-		wait_for_pattern() { \
-			pattern="$$1"; \
-			while ! grep -q -- "$$pattern" "$$log_file"; do \
-				if [ "$$SECONDS" -ge "$$deadline" ]; then \
-					echo "missing smoke pattern: $$pattern" >&2; \
-					exit 124; \
-				fi; \
-				sleep 1; \
-			done; \
-		}; \
-		trap "stop_logs; cleanup" EXIT; \
-		: > "$$log_file"; \
-		echo "test_log_file=$$log_file" >&2; \
-		mkdir -p data/output; \
-		rm -f data/output/results_q*.csv; \
-		cleanup; \
-		mkfifo "$$log_fifo"; \
-		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) config --quiet; \
-		clients="$$(docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) config --services | grep "^client_" | tr "\n" " ")"; \
-		if [ -z "$$clients" ]; then echo "no client services generated" >&2; exit 2; fi; \
-		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) up --build --remove-orphans --detach; \
-		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) logs --follow --timestamps --no-color > "$$log_fifo" 2>&1 & \
-		logs_pid=$$!; \
-		$(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR) --tee-file "$$log_file" < "$$log_fifo" >&2 & \
-		format_pid=$$!; \
-		deadline=$$((SECONDS + $(TEST_SMOKE_DEADLINE_SECONDS))); \
-		timeout $(TEST_CLIENT_WAIT_TIMEOUT) docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) wait $$clients >/dev/null; \
-		wait_for_pattern "$(TEST_Q1_SUCCESS_PATTERN)"; \
-		wait_for_pattern "$(TEST_CLIENT_DONE_PATTERN)"; \
-		wait_for_pattern "$(TEST_Q2_EOF_PATTERN)"; \
-		wait_for_pattern "$(TEST_Q4_EOF_PATTERN)"; \
-		echo "forward_pass_test_success"'
+	DATASET=$(DATASET) DATASET_ROOT=data/datasets LOG_COLOR=$(LOG_COLOR) \
+	TEST_PROJECT=$(TEST_PROJECT) MAIN_PROJECT=$(MAIN_PROJECT) \
+	TEST_COMPOSE_FILE=$(TEST_COMPOSE_FILE) \
+	TEST_CLIENT_WAIT_TIMEOUT=$(TEST_CLIENT_WAIT_TIMEOUT) \
+	KEEP_CONTAINERS=$(KEEP_CONTAINERS) \
+	$(LOG_PYTHON) scripts/run_full_test.py
 .PHONY: test
 
 Q1_DATASET ?= LI-Mini
@@ -230,7 +202,7 @@ test-q1:
 		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
 		elapsed=$$((SECONDS - start_time)); \
 		echo "Client finished in $${elapsed}s"; \
-		Q1_DATASET_DIR=data/datasets/client-1/$(Q1_DATASET) \
+		Q1_DATASET_DIR=data/datasets/$(Q1_DATASET) \
 		Q1_DATASET_TRANS=$(Q1_DATASET)_Trans.csv \
 			$(PYTHON) scripts/validate_q1_output.py \
 			&& echo "✓ Q1 test PASSED ($${elapsed}s)" \
@@ -270,7 +242,7 @@ test-q2:
 		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
 		elapsed=$$((SECONDS - start_time)); \
 		echo "Client finished in $${elapsed}s"; \
-		Q2_DATASET_DIR=data/datasets/client-1/$(Q2_DATASET) \
+		Q2_DATASET_DIR=data/datasets/$(Q2_DATASET) \
 		Q2_DATASET_TRANS=$(Q2_DATASET)_Trans.csv \
 			$(PYTHON) scripts/validate_q2_output.py \
 			&& echo "✓ Q2 test PASSED ($${elapsed}s)" \
@@ -308,7 +280,7 @@ test-q3:
 		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
 		elapsed=$$((SECONDS - start_time)); \
 		echo "Client finished in $${elapsed}s"; \
-		Q3_DATASET_DIR=data/datasets/client-1/$(Q3_DATASET) \
+		Q3_DATASET_DIR=data/datasets/$(Q3_DATASET) \
 		Q3_DATASET_TRANS=$(Q3_DATASET)_Trans.csv \
 			$(PYTHON) scripts/validate_q3_output.py \
 			&& echo "✓ Q3 test PASSED ($${elapsed}s)" \
@@ -351,7 +323,7 @@ test-q5:
 		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
 		elapsed=$$((SECONDS - start_time)); \
 		echo "Client finished in $${elapsed}s"; \
-		Q5_DATASET_DIR=data/datasets/client-1/$(Q5_DATASET) \
+		Q5_DATASET_DIR=data/datasets/$(Q5_DATASET) \
 		Q5_DATASET_TRANS=$(Q5_DATASET)_Trans.csv \
 			$(PYTHON) scripts/validate_q5_output.py \
 			&& echo "✓ Q5 test PASSED ($${elapsed}s)" \

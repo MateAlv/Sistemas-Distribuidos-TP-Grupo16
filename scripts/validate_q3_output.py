@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""Validate Q3 output.
-
-Q3: source account and amount for USD transactions in [2022-09-06, 2022-09-15]
-whose amount is less than one hundredth of the average amount for the same
-payment format in [2022-09-01, 2022-09-05].
-
-Compares every ``results_q3_*.csv`` against the precomputed reference
-(``<dataset>/expected_results/q3.csv``), falling back to computing it from the
-dataset when the reference is absent.
-"""
+"""Validate Q3 output against the precomputed reference (or the dataset if absent)."""
 import os
 import sys
 from pathlib import Path
