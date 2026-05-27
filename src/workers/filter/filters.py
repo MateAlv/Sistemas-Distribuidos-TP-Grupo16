@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import threading
 
@@ -123,7 +124,10 @@ class FilterWorker:
         self.closed_by_client = set()
         self.control_responses_by_client = {}
         self.all_processed_by_client = {}
-        self.all_forwarded_by_client = {}
+        # Conteos forwardeados por output, agregados por el lider a partir de los
+        # FLUSH_ACK de cada filtro (client_id -> {output_queue: count}). El EOF
+        # downstream lleva el conteo GLOBAL por output, no el local del lider.
+        self.all_forwarded_by_output_by_client = {}
         self.flushed_acks_by_client = {}
         self.first_data_logged_by_client = set()
         self.deserialized_by_client = {}
@@ -277,22 +281,21 @@ class FilterWorker:
         )
         (control_output or self.control_output).send(message)
 
-    def _ack_flush_control_message(self, client_id, msgs_sent, control_output=None):
+    def _ack_flush_control_message(self, client_id, forwarded_by_output, control_output=None):
         '''
-        Envia un mensaje de control a los workers correspondientes 
-        indicando que se han liberado los recursos asociados a un cliente
+        Avisa al lider que se liberaron los recursos del cliente y le reporta los
+        conteos forwardeados por output de este filtro. El FLUSH_ACK lleva un
+        payload JSON (no ControlMessage) porque necesita el desglose por output,
+        que ControlMessage (3 enteros) no puede representar. Es interno al grupo
+        de filtros, asi que no afecta el protocolo de ningun otro worker.
         '''
-        message  = self.control_serializer.serialize(
-            message_protocol.internal.ControlMessage(
-                sender_id=ID,
-                expected_total=0,
-                processed_count=msgs_sent
-            )
-        )
+        payload = json.dumps(
+            {"sender_id": ID, "forwarded_by_output": forwarded_by_output}
+        ).encode("utf-8")
         message = self.internal_packet_serializer.create_packet(
             msg_type=message_protocol.internal.MessageType.FLUSH_ACK,
             client_id_bytes=client_id.to_bytes(16, byteorder='big'),
-            payload=message
+            payload=payload
         )
         (control_output or self.control_output).send(message)
 
@@ -311,8 +314,8 @@ class FilterWorker:
                 del self.forwarded_by_output_by_client[client_id]
             if client_id in self.all_processed_by_client:
                 del self.all_processed_by_client[client_id]
-            if client_id in self.all_forwarded_by_client:
-                del self.all_forwarded_by_client[client_id]
+            if client_id in self.all_forwarded_by_output_by_client:
+                del self.all_forwarded_by_output_by_client[client_id]
             if client_id in self.control_responses_by_client:
                 del self.control_responses_by_client[client_id]
             if client_id in self.flushed_acks_by_client:
@@ -415,10 +418,17 @@ class FilterWorker:
                 sent = True
         return sent
 
-    def _forward_eof(self, client_id: int, expected_total: int, output_queues=None):
+    def _forward_eof(self, client_id: int, forwarded_by_output: dict, output_queues=None):
         '''
-        Envia un mensaje de EOF a la cola de salida correspondiente segun la configuracion del worker
+        Envia un mensaje de EOF a la cola de salida correspondiente segun la
+        configuracion del worker. Cada EOF lleva el conteo GLOBAL de transacciones
+        forwardeadas a ESE output (forwarded_by_output[queue]). Para Q1/Q5/USD ese
+        conteo coincide con el total (cada tx que pasa va a todos sus outputs), asi
+        que el comportamiento no cambia; para DATE cada output recibe su propio
+        conteo, que es lo que el sum/mapper/barrier necesitan para cerrar.
         '''
+        def count(queue: str) -> int:
+            return int(forwarded_by_output.get(queue, 0))
         def eof_packet(total: int):
             message = self.control_serializer.serialize(
                 message_protocol.internal.ControlMessage(
@@ -435,29 +445,23 @@ class FilterWorker:
 
         output_queues = output_queues or self.output_queues
         if CONFIGURATION == C_Q1:
-            output_queues[GATEWAY_QUEUE].send(eof_packet(expected_total))
+            output_queues[GATEWAY_QUEUE].send(eof_packet(count(GATEWAY_QUEUE)))
         if CONFIGURATION == C_Q5:
-            output_queues[FILTER_Q5_USD_QUEUE].send(eof_packet(expected_total))
+            output_queues[FILTER_Q5_USD_QUEUE].send(eof_packet(count(FILTER_Q5_USD_QUEUE)))
         if CONFIGURATION == C_USD:
             if USD_ENABLE_Q1:
-                output_queues[FILTER_Q1_QUEUE].send(eof_packet(expected_total))
+                output_queues[FILTER_Q1_QUEUE].send(eof_packet(count(FILTER_Q1_QUEUE)))
             if USD_ENABLE_Q2:
-                output_queues[SUM_Q2_QUEUE].send(eof_packet(expected_total))
+                output_queues[SUM_Q2_QUEUE].send(eof_packet(count(SUM_Q2_QUEUE)))
             if USD_ENABLE_DATE:
-                output_queues[FILTER_DATE_QUEUE].send(eof_packet(expected_total))
+                output_queues[FILTER_DATE_QUEUE].send(eof_packet(count(FILTER_DATE_QUEUE)))
         if CONFIGURATION == C_DATE:
-            with self.lock:
-                forwarded_by_output = dict(self.forwarded_by_output_by_client.get(client_id, {}))
             if DATE_ENABLE_Q3:
-                output_queues[SUM_Q3_QUEUE].send(
-                    eof_packet(forwarded_by_output.get(SUM_Q3_QUEUE, 0))
-                )
-                output_queues[Q3_CANDIDATES_QUEUE].send(
-                    eof_packet(forwarded_by_output.get(Q3_CANDIDATES_QUEUE, 0))
-                )
+                output_queues[SUM_Q3_QUEUE].send(eof_packet(count(SUM_Q3_QUEUE)))
+                output_queues[Q3_CANDIDATES_QUEUE].send(eof_packet(count(Q3_CANDIDATES_QUEUE)))
             if DATE_ENABLE_Q4:
                 output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(
-                    eof_packet(forwarded_by_output.get(SCATTER_GATHER_MAPPER_QUEUE, 0))
+                    eof_packet(count(SCATTER_GATHER_MAPPER_QUEUE))
                 )
 
     
@@ -610,16 +614,17 @@ class FilterWorker:
                 return
             if self.processed_by_client.get(client_id, 0) < expected_total:
                 return
-            msgs_sent = self.forwarded_by_client.get(client_id, 0)
+            # Filtro unico: sus conteos por output ya son el total global.
+            forwarded_by_output = dict(self.forwarded_by_output_by_client.get(client_id, {}))
             del self.pending_eof_by_client[client_id]
 
         self._flush_batcher_for_client(client_id)
 
         logging.info(
             f"All {expected_total} expected messages processed for client {client_id} "
-            f"in filter_{CONFIGURATION}, forwarding EOF (forwarded={msgs_sent})"
+            f"in filter_{CONFIGURATION}, forwarding EOF (forwarded_by_output={forwarded_by_output})"
         )
-        self._forward_eof(client_id, msgs_sent)
+        self._forward_eof(client_id, forwarded_by_output)
         self._cleanup_client(client_id)
 
     def _process_control_message(self, message, control_output=None, output_queues=None):
@@ -629,6 +634,13 @@ class FilterWorker:
         '''
         # Desempaquetamos el mensaje
         msg_type, client_id, payload = self.internal_packet_serializer.unpack_packet(message)
+
+        # El FLUSH_ACK lleva payload JSON (desglose por output), no ControlMessage:
+        # se maneja antes del deserialize comun para no romperlo.
+        if msg_type == message_protocol.internal.MessageType.FLUSH_ACK:
+            self._handle_flush_ack(client_id, payload, output_queues)
+            return
+
         control_message = self.control_serializer.deserialize(payload)
 
         if msg_type == message_protocol.internal.MessageType.EOF_RECEIVED:
@@ -688,35 +700,45 @@ class FilterWorker:
                 logging.warning(f"Received FLUSH_ORDER control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am the leader, ignoring")
                 return
             self._flush_batcher_for_client(client_id, output_queues)
-            msgs_sent = 0
             with self.lock:
-                msgs_sent = self.forwarded_by_client.get(client_id, 0)
+                forwarded_by_output = dict(self.forwarded_by_output_by_client.get(client_id, {}))
             self._cleanup_client(client_id)
-            self._ack_flush_control_message(client_id, msgs_sent, control_output)
-            
-        
-        elif msg_type == message_protocol.internal.MessageType.FLUSH_ACK:
-            if not self.is_leader:
-                logging.warning(f"Received FLUSH_ACK control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
-                return
-            
-            if client_id not in self.flushed_acks_by_client:
-                self.flushed_acks_by_client[client_id] = set()            
-            self.flushed_acks_by_client[client_id].add(control_message.sender_id)
-            if client_id not in self.all_forwarded_by_client:
-                self.all_forwarded_by_client[client_id] = 0
-            self.all_forwarded_by_client[client_id] += control_message.processed_count
-
-            if len(self.flushed_acks_by_client[client_id]) == FILTER_AMOUNT - 1:
-                logging.info(f"Received all FLUSH_ACK control messages for client {client_id} in filter_{CONFIGURATION}, cleaning up client")
-                self._flush_batcher_for_client(client_id, output_queues)
-                with self.lock:
-                    msgs_sent = self.all_forwarded_by_client[client_id] + self.forwarded_by_client.get(client_id, 0)
-                self._forward_eof(client_id, msgs_sent, output_queues)
-                self._cleanup_client(client_id)
+            self._ack_flush_control_message(client_id, forwarded_by_output, control_output)
 
         else:
             logging.warning(f"Received unknown control message type: {msg_type} from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}")
+
+    def _handle_flush_ack(self, client_id, payload, output_queues=None):
+        '''
+        El lider agrega los conteos por output de cada FLUSH_ACK. Cuando recibio
+        el de todos los filtros, combina con los propios y reenvia el EOF
+        downstream con el conteo GLOBAL por output.
+        '''
+        if not self.is_leader:
+            logging.warning(f"Received FLUSH_ACK control message for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
+            return
+
+        data = json.loads(payload.decode("utf-8"))
+        sender_id = data.get("sender_id")
+        counts = data.get("forwarded_by_output", {})
+
+        if client_id not in self.flushed_acks_by_client:
+            self.flushed_acks_by_client[client_id] = set()
+        self.flushed_acks_by_client[client_id].add(sender_id)
+
+        agg = self.all_forwarded_by_output_by_client.setdefault(client_id, {})
+        for output, value in counts.items():
+            agg[output] = agg.get(output, 0) + int(value)
+
+        if len(self.flushed_acks_by_client[client_id]) == FILTER_AMOUNT - 1:
+            logging.info(f"Received all FLUSH_ACK control messages for client {client_id} in filter_{CONFIGURATION}, forwarding EOF")
+            self._flush_batcher_for_client(client_id, output_queues)
+            global_counts = dict(agg)
+            with self.lock:
+                for output, value in self.forwarded_by_output_by_client.get(client_id, {}).items():
+                    global_counts[output] = global_counts.get(output, 0) + value
+            self._forward_eof(client_id, global_counts, output_queues)
+            self._cleanup_client(client_id)
 
     def process_data_messages(self, message, ack, nack):
         '''

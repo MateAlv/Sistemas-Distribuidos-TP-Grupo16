@@ -360,7 +360,7 @@ class ScatterGatherMapper:
 
                 if (
                     expected_total is not None
-                    and self._leader_processed_by_client[client_id] == expected_total
+                    and self._leader_processed_by_client[client_id] >= expected_total
                 ):
                     should_forward_eof = True
                     forwarded_total = self._leader_forwarded_by_client[client_id]
