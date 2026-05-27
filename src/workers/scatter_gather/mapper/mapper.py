@@ -63,6 +63,7 @@ class ScatterGatherMapper:
         self._control_thread = None
         self._response_thread = None
         self._closed = False
+        self._stopped = False
 
     def _new_linker_outputs(self):
         return [
@@ -384,11 +385,12 @@ class ScatterGatherMapper:
         # flush, and pika channels are not shared across threads.
         linkers = self._new_linker_outputs()
         try:
-            control_consumer.start_consuming(
-                lambda message, ack, nack: self._handle_eof_broadcast(
-                    message, ack, nack, linkers
+            if not self._stopped:
+                control_consumer.start_consuming(
+                    lambda message, ack, nack: self._handle_eof_broadcast(
+                        message, ack, nack, linkers
+                    )
                 )
-            )
         finally:
             for linker in linkers:
                 linker.close()
@@ -402,11 +404,12 @@ class ScatterGatherMapper:
         self._response_consumer = response_consumer
         linkers = self._new_linker_outputs()
         try:
-            response_consumer.start_consuming(
-                lambda message, ack, nack: self._handle_leader_report(
-                    message, ack, nack, linkers
+            if not self._stopped:
+                response_consumer.start_consuming(
+                    lambda message, ack, nack: self._handle_leader_report(
+                        message, ack, nack, linkers
+                    )
                 )
-            )
         finally:
             for linker in linkers:
                 linker.close()
@@ -430,7 +433,8 @@ class ScatterGatherMapper:
             self._control_thread.start()
             self._response_thread.start()
         try:
-            self._input.start_consuming(self._on_message)
+            if not self._stopped:
+                self._input.start_consuming(self._on_message)
         finally:
             self.handle_sigterm()
             if self._control_thread is not None:
@@ -440,14 +444,15 @@ class ScatterGatherMapper:
             self.close()
 
     def handle_sigterm(self):
-        if self._closed:
+        if self._stopped:
             return
+        self._stopped = True
         logging.info("mapper_%s sigterm", ID)
-        self._input.stop_consuming()
+        self._input.request_stop_consuming()
         if self._control_consumer is not None:
-            self._control_consumer.stop_consuming()
+            self._control_consumer.request_stop_consuming()
         if self._response_consumer is not None:
-            self._response_consumer.stop_consuming()
+            self._response_consumer.request_stop_consuming()
 
     def close(self):
         if self._closed:
