@@ -132,6 +132,7 @@ class Q3BarrierWorker:
         self.closed_by_client: set[int] = set()
         self.candidates_thread: threading.Thread | None = None
         self.closed = False
+        self._stopped = False
 
     def _build_input(
         self,
@@ -320,13 +321,23 @@ class Q3BarrierWorker:
     def _consume_candidates(self):
         output_queue = middleware.MessageMiddlewareQueueRabbitMQ(MOM_HOST, OUTPUT_QUEUE)
         try:
-            self.candidates_input.start_consuming(
-                lambda message, ack, nack: self._handle_candidate(
-                    message, ack, nack, output_queue
+            if not self._stopped:
+                self.candidates_input.start_consuming(
+                    lambda message, ack, nack: self._handle_candidate(
+                        message, ack, nack, output_queue
+                    )
                 )
-            )
         finally:
-            output_queue.close()
+            # Este thread es dueño del ioloop de candidates_input, así que lo
+            # cierra él mismo (no el principal) para evitar un close cross-thread.
+            try:
+                self.candidates_input.close()
+            except Exception:
+                pass
+            try:
+                output_queue.close()
+            except Exception:
+                pass
 
     def start(self):
         logging.info(
@@ -337,7 +348,8 @@ class Q3BarrierWorker:
         self.candidates_thread = threading.Thread(target=self._consume_candidates)
         self.candidates_thread.start()
         try:
-            self.averages_input.start_consuming(self._handle_average)
+            if not self._stopped:
+                self.averages_input.start_consuming(self._handle_average)
         finally:
             self.handle_sigterm()
             if self.candidates_thread is not None:
@@ -345,19 +357,32 @@ class Q3BarrierWorker:
             self.close()
 
     def handle_sigterm(self):
-        try:
-            self.averages_input.stop_consuming()
-        except Exception:
-            pass
-        try:
-            self.candidates_input.stop_consuming()
-        except Exception:
-            pass
+        # SIGTERM-safe: pedir el corte en el ioloop dueño de cada conexión
+        # (request_stop_consuming agenda vía add_callback_threadsafe).
+        # averages_input se consume en el thread principal; candidates_input en
+        # su propio thread, así que un stop_consuming() directo acá sería un
+        # acceso cross-thread no thread-safe a pika.
+        if self._stopped:
+            return
+        self._stopped = True
+        logging.info("q3_barrier_shutdown | id=%s", ID)
+        self.averages_input.request_stop_consuming()
+        self.candidates_input.request_stop_consuming()
 
     def close(self):
         if self.closed:
             return
         self.closed = True
+
+        # Conexiones del thread principal. candidates_input la cierra su propio
+        # thread en _consume_candidates (ya joineado antes de llegar acá).
+        for resource in (self.averages_input, self.averages_output_queue):
+            try:
+                resource.close()
+            except Exception as e:
+                logging.warning(
+                    "q3_barrier_close_error | id=%s | error=%s", ID, e
+                )
 
         # Cleanup de archivos temporales de clientes que quedaron a medio procesar
         # (caso de SIGTERM antes de emit). TemporaryFile también se limpia solo
