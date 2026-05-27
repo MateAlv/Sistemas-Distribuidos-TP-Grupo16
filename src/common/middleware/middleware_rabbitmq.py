@@ -257,20 +257,20 @@ class MessageMiddlewareRpcClientRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcClie
     def connect(self):
         self._channel.queue_declare(queue=self._request_queue, durable=_DURABLE)
 
-    def call(self, message, timeout=30):
+    def call(self, message, timeout=30, cancel_event=None):
         correlation_id = str(uuid.uuid4())
         reply_queue = self._channel.queue_declare(queue='', exclusive=True).method.queue
-        
+
         response = None
-        
+
         def on_response(ch, method, props, body):
             nonlocal response
             if props.correlation_id == correlation_id:
                 response = body
                 ch.basic_ack(delivery_tag=method.delivery_tag)
-        
+
         self._channel.basic_consume(queue=reply_queue, on_message_callback=on_response, auto_ack=False)
-        
+
         self._channel.basic_publish(
             exchange="",
             routing_key=self._request_queue,
@@ -281,14 +281,16 @@ class MessageMiddlewareRpcClientRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcClie
                 delivery_mode=_DELIVERY_MODE,
             )
         )
-        
+
         deadline = time.monotonic() + timeout
         while response is None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise MessageMiddlewareMessageError("RPC call cancelled")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise MessageMiddlewareMessageError("RPC call timed out")
             self._connection.process_data_events(time_limit=min(1, remaining))
-            
+
         return response
 
 

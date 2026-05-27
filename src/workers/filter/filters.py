@@ -489,7 +489,6 @@ class FilterWorker:
         configuracion de este worker y reenviando la transaccion a la cola de salida correspondiente 
         si la transaccion pasa el filtro
         '''
-        # Desempaquetamos el mensaje
         msg_type, client_id, payload = self.internal_packet_serializer.unpack_packet(message)
 
         with self.lock:
@@ -744,8 +743,6 @@ class FilterWorker:
                     )
                 )
         finally:
-            # Este thread es dueño del ioloop de control_input, así que lo cierra
-            # él mismo (no el thread principal) para evitar un close cross-thread.
             try:
                 self.control_input.close()
             except Exception as e:
@@ -787,7 +784,6 @@ class FilterWorker:
         self.control_thread.start()
 
         try:
-            # Se procesan los mensajes de la cola de entrada en el thread principal
             if self.active:
                 self.input_queue.start_consuming(self.process_data_messages)
         except Exception as e:
