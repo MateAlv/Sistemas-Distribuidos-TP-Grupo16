@@ -242,6 +242,17 @@ class FileIngestor:
                 processed_count=snapshot,
                 forwarded_count=snapshot,
             )
+            logging.info(
+                "file_ingestor_eof_control_snapshot | id=%s | client_id=%s | "
+                "leader_id=%s | processed_count=%s | forwarded_count=%s | "
+                "expected_total=%s",
+                self._config.id,
+                client_id,
+                leader_id,
+                snapshot,
+                snapshot,
+                control.expected_total,
+            )
             ack()
         except Exception as e:
             logging.error(
