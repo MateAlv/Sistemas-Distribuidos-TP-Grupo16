@@ -28,6 +28,7 @@ MAX_TCP_PORT = 65535
 MAX_CLIENT_ID = 2**32 - 1
 CSV_EXTENSIONS = (".csv",)
 MAX_LOGGED_RESULT_LINES = 5
+DEFAULT_CHUNK_LOG_EVERY = 100
 
 @dataclass(frozen=True)
 class ClientConfig:
@@ -109,6 +110,7 @@ class Client:
         config = self.require_config()
         reader = self.require_reader()
         sender = self.require_sender()
+        chunk_log_every = get_int("CHUNK_LOG_EVERY", DEFAULT_CHUNK_LOG_EVERY)
 
         logging.info(
             "client_connect | client_id=%s | data_dir=%s | server=%s:%s",
@@ -145,6 +147,20 @@ class Client:
                 sender.send_file_chunk(chunk.serialize())
                 sent_chunks += 1
                 sent_payload_bytes += chunk.payload_size()
+                if _should_log_progress(sent_chunks, chunk_log_every):
+                    logging.info(
+                        "client_chunk_sent | client_id=%s | chunks=%s | "
+                        "payload_bytes=%s | file_type=%s | path=%s | "
+                        "offset=%s | last_payload_bytes=%s | message_bytes=%s",
+                        config.client_id,
+                        sent_chunks,
+                        sent_payload_bytes,
+                        file_type_name(chunk.file_type()),
+                        chunk.path(),
+                        chunk.offset(),
+                        chunk.payload_size(),
+                        message_size,
+                    )
 
             sender.send_finished()
             logging.info(
@@ -393,3 +409,7 @@ def relative_input_path(data_dir: str, abs_path: str) -> str:
     except ValueError:
         pass
     return os.path.basename(abs_path)
+
+
+def _should_log_progress(count: int, every: int) -> bool:
+    return count == 1 or (every > 0 and count % every == 0)
