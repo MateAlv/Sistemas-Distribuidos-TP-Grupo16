@@ -13,6 +13,7 @@ from common.message_protocol.external.types import (
     HANDSHAKE, FILE_CHUNK, FINISH, ACK,
     MSG_CHUNK, MSG_EOF,
     file_ingestor_routing_key,
+    file_type_name,
 )
 from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
@@ -42,8 +43,15 @@ class ClientSession:
     client_id: int
     sock: socket.socket
     chunks_forwarded: int = 0
+    payload_bytes_forwarded: int = 0
+    result_lines_sent: int = 0
+    result_bytes_sent: int = 0
     used_partitions: set[int] = field(default_factory=set)
     current_file: tuple[str, int, int] | None = None
+
+
+DEFAULT_CHUNK_LOG_EVERY = 100
+DEFAULT_RESULT_LOG_EVERY = 100
 
 
 class Gateway:
@@ -310,10 +318,21 @@ class Gateway:
                             prev_partition,
                             file_ingestor_routing_key(prev_partition),
                         )
+                        logging.info(
+                            "gateway_file_eof_sent | client_id=%s | path=%s | "
+                            "file_type=%s | partition=%s | routing_key=%s | "
+                            "reason=file_switch",
+                            session.client_id,
+                            prev_path,
+                            file_type_name(prev_file_type),
+                            prev_partition,
+                            file_ingestor_routing_key(prev_partition),
+                        )
                         session.current_file = current_file
 
                     publisher.send(partition, _serialize_chunk(chunk))
                     session.chunks_forwarded += 1
+                    session.payload_bytes_forwarded += chunk.payload_size()
                     session.used_partitions.add(partition)
                     logging.debug(
                         "gateway_forward_chunk | client_id=%s | path=%s | "
@@ -324,6 +343,25 @@ class Gateway:
                         partition,
                         file_ingestor_routing_key(partition),
                     )
+                    if _should_log_progress(
+                        session.chunks_forwarded,
+                        _env_int("CHUNK_LOG_EVERY", DEFAULT_CHUNK_LOG_EVERY),
+                    ):
+                        logging.info(
+                            "gateway_chunk_forwarded | client_id=%s | chunks=%s | "
+                            "payload_bytes=%s | file_type=%s | path=%s | "
+                            "offset=%s | last_payload_bytes=%s | partition=%s | "
+                            "routing_key=%s",
+                            session.client_id,
+                            session.chunks_forwarded,
+                            session.payload_bytes_forwarded,
+                            file_type_name(chunk.file_type()),
+                            chunk.path(),
+                            chunk.offset(),
+                            chunk.payload_size(),
+                            partition,
+                            file_ingestor_routing_key(partition),
+                        )
                     _send_ack(session.sock)
 
                 elif msg_type == FINISH:
@@ -342,13 +380,25 @@ class Gateway:
                             partition,
                             file_ingestor_routing_key(partition),
                         )
+                        logging.info(
+                            "gateway_file_eof_sent | client_id=%s | path=%s | "
+                            "file_type=%s | partition=%s | routing_key=%s | "
+                            "reason=client_finish",
+                            session.client_id,
+                            path,
+                            file_type_name(file_type),
+                            partition,
+                            file_ingestor_routing_key(partition),
+                        )
                         session.current_file = None
 
                     _send_ack(session.sock)
                     logging.info(
-                        "gateway_finish | client_id=%s | chunks=%s | partitions=%s",
+                        "gateway_finish | client_id=%s | chunks=%s | "
+                        "payload_bytes=%s | partitions=%s",
                         session.client_id,
                         session.chunks_forwarded,
+                        session.payload_bytes_forwarded,
                         sorted(session.used_partitions),
                     )
                     break
@@ -369,7 +419,20 @@ class Gateway:
                 if result is None:
                     logging.info("gateway_results_eof | client_id=%s", session.client_id)
                     break
-                sendall(session.sock, result.encode("utf-8"))
+                encoded = result.encode("utf-8")
+                sendall(session.sock, encoded)
+                session.result_lines_sent += 1
+                session.result_bytes_sent += len(encoded)
+                if _should_log_progress(
+                    session.result_lines_sent,
+                    _env_int("RESULT_LOG_EVERY", DEFAULT_RESULT_LOG_EVERY),
+                ):
+                    logging.info(
+                        "gateway_result_sent | client_id=%s | lines=%s | bytes=%s",
+                        session.client_id,
+                        session.result_lines_sent,
+                        session.result_bytes_sent,
+                    )
             except queue.Empty:
                 readable, _, _ = select.select([session.sock], [], [], 0.0)
                 if readable:
@@ -499,6 +562,20 @@ def _serialize_file_eof(client_id: int, file_type: int, rel_path: str) -> bytes:
         client_id=client_id,
         file_type=file_type,
     ).serialize()
+
+
+def _should_log_progress(count: int, every: int) -> bool:
+    return count == 1 or (every > 0 and count % every == 0)
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 class FileIngestorPublisher:
