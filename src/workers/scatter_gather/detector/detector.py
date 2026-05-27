@@ -74,6 +74,7 @@ class ScatterGatherDetector:
         self._control_thread = None
         self._response_thread = None
         self._closed = False
+        self._stopped = False
 
     def _new_gateway_output(self):
         return MessageMiddlewareQueueRabbitMQ(MOM_HOST, GATEWAY_Q4_QUEUE)
@@ -418,7 +419,8 @@ class ScatterGatherDetector:
         )
         self._control_consumer = control_consumer
         try:
-            control_consumer.start_consuming(self._handle_eof_broadcast)
+            if not self._stopped:
+                control_consumer.start_consuming(self._handle_eof_broadcast)
         finally:
             control_consumer.close()
 
@@ -430,11 +432,12 @@ class ScatterGatherDetector:
         self._response_consumer = response_consumer
         output = self._new_gateway_output()
         try:
-            response_consumer.start_consuming(
-                lambda message, ack, nack: self._handle_leader_report(
-                    message, ack, nack, output
+            if not self._stopped:
+                response_consumer.start_consuming(
+                    lambda message, ack, nack: self._handle_leader_report(
+                        message, ack, nack, output
+                    )
                 )
-            )
         finally:
             output.close()
             response_consumer.close()
@@ -447,7 +450,8 @@ class ScatterGatherDetector:
             self._control_thread.start()
             self._response_thread.start()
         try:
-            self._input.start_consuming(self._on_message)
+            if not self._stopped:
+                self._input.start_consuming(self._on_message)
         finally:
             self.handle_sigterm()
             if self._control_thread is not None:
@@ -457,14 +461,15 @@ class ScatterGatherDetector:
             self.close()
 
     def handle_sigterm(self):
-        if self._closed:
+        if self._stopped:
             return
+        self._stopped = True
         logging.info("detector_%s sigterm", ID)
-        self._input.stop_consuming()
+        self._input.request_stop_consuming()
         if self._control_consumer is not None:
-            self._control_consumer.stop_consuming()
+            self._control_consumer.request_stop_consuming()
         if self._response_consumer is not None:
-            self._response_consumer.stop_consuming()
+            self._response_consumer.request_stop_consuming()
 
     def close(self):
         if self._closed:
