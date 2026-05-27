@@ -107,13 +107,14 @@ def _normalize_date(value):
     return value[:10].replace("/", "-")
 
 
-def _normalize_bank_id(value):
+def _notebook_bank_id(value):
+    """Match pandas read_csv numeric inference for bank id columns."""
     value = (value or "").strip()
     if not value:
         return ""
     if value.isdigit():
         return str(int(value))
-    return value.lstrip("0") or "0"
+    return value
 
 
 # --------------------------------------------------------------------------- #
@@ -146,7 +147,7 @@ def compute_q2(trans_file, accounts_file=None):
     if accounts_file and Path(accounts_file).exists():
         with open(accounts_file, "r") as f:
             for row in csv.DictReader(f):
-                bank_id = (row["Bank ID"] or "").strip()
+                bank_id = _notebook_bank_id(row["Bank ID"])
                 bank_name = (row["Bank Name"] or "").strip()
                 key = (bank_id, bank_name)
                 if bank_id and key not in seen_bank_names:
@@ -160,7 +161,7 @@ def compute_q2(trans_file, accounts_file=None):
         for row in reader:
             if row[col["currency"]].strip() != USD_CURRENCY:
                 continue
-            bank_id = row[col["from_bank"]].strip()
+            bank_id = _notebook_bank_id(row[col["from_bank"]])
             amount = float(row[col["amount"]])
             if bank_id not in max_by_bank or amount > max_by_bank[bank_id][1]:
                 max_by_bank[bank_id] = (row[col["from_account"]].strip(), amount)
@@ -191,7 +192,7 @@ def compute_q3(trans_file, _accounts_file=None):
             elif Q3_NOTEBOOK_CANDIDATE[0] <= timestamp <= Q3_NOTEBOOK_CANDIDATE[1]:
                 candidates.append((
                     fmt,
-                    row[col["from_bank"]].strip(),
+                    _notebook_bank_id(row[col["from_bank"]]),
                     row[col["from_account"]].strip(),
                     amount,
                 ))

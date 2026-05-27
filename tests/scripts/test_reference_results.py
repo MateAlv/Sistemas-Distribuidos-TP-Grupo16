@@ -29,7 +29,7 @@ def _write_csv(path, header, rows):
         writer.writerows(rows)
 
 
-def test_compute_q2_uses_notebook_raw_inner_join(tmp_path):
+def test_compute_q2_uses_notebook_bank_id_coercion_and_inner_join(tmp_path):
     trans_file = tmp_path / "sample_Trans.csv"
     accounts_file = tmp_path / "sample_accounts.csv"
     _write_csv(
@@ -53,7 +53,7 @@ def test_compute_q2_uses_notebook_raw_inner_join(tmp_path):
     )
 
     assert ref.compute_q2(trans_file, accounts_file) == [
-        ("1", "raw-match", "Raw One", "50.00")
+        ("1", "leading-high", "Raw One", "200.00")
     ]
 
 
@@ -73,8 +73,8 @@ def test_compute_q3_uses_notebook_timestamp_bounds_and_format_column(tmp_path):
         TRANS_HEADER,
         [
             ["2022/09/01 00:00", "1", "baseline-wire", "9", "dst", "100", "US Dollar", "Wire"],
-            ["2022/09/06 00:00", "2", "candidate-a", "9", "dst", "0.50", "US Dollar", "Wire"],
-            ["2022/09/14 23:59", "3", "candidate-b", "9", "dst", "0.70", "US Dollar", "Wire"],
+            ["2022/09/06 00:00", "002", "candidate-a", "9", "dst", "0.50", "US Dollar", "Wire"],
+            ["2022/09/14 23:59", "003", "candidate-b", "9", "dst", "0.70", "US Dollar", "Wire"],
             ["2022/09/15 00:00", "4", "excluded-15th", "9", "dst", "0.10", "US Dollar", "Wire"],
             ["2022/09/14 23:59", "5", "too-large", "9", "dst", "1.00", "US Dollar", "Wire"],
             ["2022/09/14 23:59", "6", "non-usd", "9", "dst", "0.10", "Euro", "Wire"],
