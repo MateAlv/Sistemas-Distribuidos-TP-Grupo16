@@ -1,4 +1,5 @@
 from common.constants import C_Q2, C_Q3
+from common.bank_ids import notebook_bank_id
 from common.domain.partial_result import Q2BankMaxPartial, Q3PaymentFormatPartial
 from common.message_protocol.internal.partial_result_serializer import (
     Q2BankMaxPartialSerializer,
@@ -22,7 +23,7 @@ class Q2SumProcessor(SumProcessor):
         self.max_by_bank = {}
 
     def process(self, transaction) -> None:
-        bank_id = transaction.from_bank
+        bank_id = notebook_bank_id(transaction.from_bank)
         current = self.max_by_bank.get(bank_id)
         candidate = {
             "bank_id": bank_id,
@@ -43,7 +44,7 @@ class Q2SumProcessor(SumProcessor):
         return [
             self._partial_tuple(
                 {
-                    "bank_id": transaction.from_bank,
+                    "bank_id": notebook_bank_id(transaction.from_bank),
                     "from_account": transaction.from_account,
                     "amount": transaction.amount,
                 }

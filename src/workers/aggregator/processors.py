@@ -1,4 +1,5 @@
 from common.constants import C_Q2, C_Q3, C_Q5
+from common.bank_ids import notebook_bank_id
 from common.domain.partial_result import Q2BankMaxPartial, Q3AverageResult
 from common.message_protocol.internal.aggregation_serializer import AggregationSerializer
 from common.message_protocol.internal.partial_result_serializer import (
@@ -27,6 +28,13 @@ class Q2AggregatorProcessor(AggregatorProcessor):
 
     def accept(self, payload: bytes) -> None:
         partial = Q2BankMaxPartialSerializer.deserialize(payload)
+        bank_id = notebook_bank_id(partial.bank_id)
+        if bank_id != partial.bank_id:
+            partial = Q2BankMaxPartial(
+                bank_id=bank_id,
+                from_account=partial.from_account,
+                amount=partial.amount,
+            )
         current = self.max_by_bank.get(partial.bank_id)
         if current is None or partial.amount > current.amount:
             self.max_by_bank[partial.bank_id] = partial
