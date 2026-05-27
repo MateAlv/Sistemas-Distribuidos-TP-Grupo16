@@ -67,17 +67,18 @@ class BankNameJoinerWorker:
 
         self._q2_consumer: middleware.MessageMiddlewareQueueRabbitMQ | None = None
         self._accounts_consumer: middleware.MessageMiddlewareQueueRabbitMQ | None = None
-        self._output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
-            config.mom_host, config.output_queue
-        )
 
         self._protocol = InternalProtocol()
         self._control_serializer = ControlMessageSerializer()
         self._line_batch_serializer = LineBatchSerializer()
 
         self._lock = threading.Lock()
+        self._output_queues_lock = threading.Lock()
         self._states: dict[int, ClientState] = {}
         self._closed_by_client: dict[int, float] = {}
+        self._output_queues_by_thread: dict[
+            int, middleware.MessageMiddlewareQueueRabbitMQ
+        ] = {}
         self._closed = False
         self._stopped = False
 
@@ -103,10 +104,6 @@ class BankNameJoinerWorker:
         self._await_consumers()
 
     def _await_consumers(self) -> None:
-        # Bloquea hasta que ambos consumidores terminen (EOF natural o SIGTERM).
-        # join(timeout) es una espera bloqueante real (no busy-wait); al pedirse
-        # el corte (stop) se acota para no colgar el proceso si un consumer no
-        # frena a tiempo.
         threads = [t for t in (self._q2_thread, self._accounts_thread) if t is not None]
         while True:
             alive = [t for t in threads if t.is_alive()]
@@ -120,10 +117,6 @@ class BankNameJoinerWorker:
                 return
 
     def stop(self) -> None:
-        # SIGTERM-safe: pedir el corte de cada consumer en el thread dueño de su
-        # conexión (request_stop_consuming agenda vía add_callback_threadsafe).
-        # Ambos consumers corren en threads propios, así que un stop_consuming()
-        # directo acá sería un acceso cross-thread no thread-safe a pika.
         if self._stopped:
             return
         self._stopped = True
@@ -133,14 +126,30 @@ class BankNameJoinerWorker:
                 consumer.request_stop_consuming()
 
     def close(self) -> None:
-        # Los consumers cierran su propia conexión en el finally de su thread
-        # (ya joineados antes de llegar acá). Acá sólo cerramos el recurso del
-        # thread principal.
         if self._closed:
             return
         self._closed = True
+        self._close_thread_output_queue()
+
+    def _output_queue_for_thread(self) -> middleware.MessageMiddlewareQueueRabbitMQ:
+        thread_id = threading.get_ident()
+        with self._output_queues_lock:
+            output_queue = self._output_queues_by_thread.get(thread_id)
+            if output_queue is None:
+                output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
+                    self._config.mom_host, self._config.output_queue
+                )
+                self._output_queues_by_thread[thread_id] = output_queue
+            return output_queue
+
+    def _close_thread_output_queue(self) -> None:
+        thread_id = threading.get_ident()
+        with self._output_queues_lock:
+            output_queue = self._output_queues_by_thread.pop(thread_id, None)
+        if output_queue is None:
+            return
         try:
-            self._output_queue.close()
+            output_queue.close()
         except Exception as e:
             logging.warning(
                 "q2_bank_name_joiner_close_error | id=%s | error=%s",
@@ -161,6 +170,7 @@ class BankNameJoinerWorker:
                     self._config.id, e,
                 )
         finally:
+            self._close_thread_output_queue()
             try:
                 self._q2_consumer.close()
             except Exception:
@@ -180,6 +190,7 @@ class BankNameJoinerWorker:
                     self._config.id, e,
                 )
         finally:
+            self._close_thread_output_queue()
             try:
                 self._accounts_consumer.close()
             except Exception:
@@ -323,6 +334,7 @@ class BankNameJoinerWorker:
         if state is None:
             return
 
+        output_queue = self._output_queue_for_thread()
         missing = 0
         emitted = 0
         for bank_id, partial in state.q2_results.items():
@@ -337,7 +349,7 @@ class BankNameJoinerWorker:
                 amount=partial.amount,
             )
             payload = Q2BankMaxResultSerializer.serialize(result)
-            self._output_queue.send(
+            output_queue.send(
                 self._packet(MessageType.DATA, client_id, payload)
             )
             emitted += 1
@@ -349,7 +361,7 @@ class BankNameJoinerWorker:
                 processed_count=0,
             )
         )
-        self._output_queue.send(self._packet(MessageType.EOF, client_id, control_payload))
+        output_queue.send(self._packet(MessageType.EOF, client_id, control_payload))
 
         logging.info(
             "q2_bank_name_joiner_emit | id=%s | client_id=%s | results=%s | "
