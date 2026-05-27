@@ -443,15 +443,11 @@ class Gateway:
 
     @staticmethod
     def _q1_csv_lines(payload: bytes):
-        yield Gateway._q1_csv(payload)
-
-    @staticmethod
-    def _q1_csv(payload: bytes) -> str:
-        tx = TransactionSerializer().deserialize(payload)
-        return (
-            f"{tx.from_bank},{tx.from_account},"
-            f"{tx.to_bank},{tx.to_account},{tx.amount:.2f}"
-        )
+        for tx in TransactionSerializer().deserialize_batch(payload):
+            yield (
+                f"{tx.from_bank},{tx.from_account},"
+                f"{tx.to_bank},{tx.to_account},{tx.amount:.2f}"
+            )
 
     @staticmethod
     def _q2_csv_lines(payload: bytes):

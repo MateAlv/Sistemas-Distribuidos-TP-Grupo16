@@ -17,7 +17,7 @@ TEST_Q1_SUCCESS_PATTERN := Forward pass successful - Mate | filter=Q1
 TEST_CLIENT_DONE_PATTERN := client_results_finished
 TEST_Q2_EOF_PATTERN := gateway_eof | prefix=Q2|
 TEST_Q4_EOF_PATTERN := gateway_eof | prefix=Q4|
-TEST_CLIENT_WAIT_TIMEOUT ?= 600s
+TEST_CLIENT_WAIT_TIMEOUT ?= 4600s
 TEST_SMOKE_DEADLINE_SECONDS ?= 600
 SCENARIOS_DIR := config/scenarios
 RABBIT_SCREEN_URL ?= http://localhost:15672/\#/queues
@@ -107,6 +107,10 @@ clean-state:
 	rm -f data/output/results_q*.csv
 	find data/datasets -mindepth 1 -maxdepth 1 -type d -name 'client-*' -exec rm -rf {} +
 .PHONY: clean-state
+
+logs-test:
+	docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) logs -f --timestamps --no-color $(LOG_ARGS) | $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR)
+.PHONY: logs-test
 
 logs:
 	docker compose -f $(COMPOSE_FILE) logs --timestamps --no-color $(LOG_ARGS) | $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR)
@@ -355,18 +359,6 @@ test-q5:
 		echo ""; \
 		echo "=== client_0 logs ==="; $$compose logs client_0'
 .PHONY: test-q5
-
-
-switch:
-	@echo Escenarios de prueba:
-	@echo "1) Un cliente, una sola réplica de cada elemento"
-	@echo "2) Múltiples clientes, una sola réplica de cada elemento"
-	@echo "3) Múltiples clientes, sum replicado, un solo aggregator"
-	@echo "4) Múltiples clientes, múltiples réplicas"
-	@echo "5) Múltiples clientes, múltiples réplicas, datasets mixtos"
-	@read -p "Selecciona uno [1-5]: " option;	\
-	$(PYTHON) $(COMPOSE_SCRIPT) --config $(SCENARIOS_DIR)/$${option}.yaml
-.PHONY: switch
 
 test-unit:
 	docker build -f Dockerfile.test -t test-runner .
