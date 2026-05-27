@@ -33,10 +33,7 @@ class ExchangeRateService:
                 logging.error("rates_service | bootstrap_failed")
             return
 
-        # El servidor RPC corre en este unico hilo. SIGTERM interrumpe el
-        # start() bloqueante y request_shutdown() agenda el corte de forma
-        # thread-safe (request_stop_consuming -> add_callback_threadsafe), por
-        # lo que nunca se toca el channel desde un hilo distinto al que consume.
+
         with self._rpc_server:
             self._rpc_server.connect()
             if self._shutdown:
@@ -51,8 +48,6 @@ class ExchangeRateService:
             return
         self._shutdown = True
         logging.info("rates_service | shutdown_requested")
-        # Seguro de invocar desde el signal handler: stop() agenda el corte en
-        # el ioloop de la conexion en vez de tocar el channel directamente.
         self._rpc_server.stop()
 
     def _bootstrap_rates(self) -> bool:
