@@ -2,6 +2,9 @@ FROM python:3.11-slim
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY src/ ./
+# Keep the src/ dir so both import styles resolve: `common.*` via /app/src and
+# `src.common.*` (used by rates_service) via /app. Mirrors the local test setup.
+COPY src/ ./src/
 COPY tests/ ./tests/
+ENV PYTHONPATH=/app:/app/src
 CMD ["python", "-m", "pytest", "tests/", "--tb=short"]

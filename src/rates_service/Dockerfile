@@ -3,7 +3,9 @@ FROM python:3.11-slim
 # Evita archivos .pyc y habilita logs en tiempo real
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
+# El código importa como `common.*` (igual que el resto de los servicios), así
+# que /app/src debe estar en el path para resolver `common` como top-level.
+ENV PYTHONPATH=/app/src
 
 WORKDIR /app
 
@@ -11,7 +13,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiamos todo el código fuente (para que vea src.common)
+# Copiamos todo el código fuente
 COPY src/ ./src/
 
 # Ejecutamos el servicio de cotizaciones

@@ -9,6 +9,14 @@ from common.message_protocol.internal import InternalProtocol
 
 
 
+# Data-dependent integration test: skip where the dataset isn't mounted
+# (e.g. the Dockerfile.test container, which doesn't copy data/).
+pytestmark = pytest.mark.skipif(
+    not Path("data/datasets/client-1/LI-Mini").exists(),
+    reason="Q1 integration dataset not present (data/ not mounted in this env)",
+)
+
+
 class TestQ1FlowIntegration:
     DATASET_DIR = Path("data/datasets/client-1/LI-Mini")
     TRANSACTIONS_FILE = DATASET_DIR / "LI-Mini_Trans.csv"

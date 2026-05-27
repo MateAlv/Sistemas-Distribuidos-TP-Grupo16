@@ -46,6 +46,7 @@ class FileIngestor:
         self._control_thread: threading.Thread | None = None
         self._response_thread: threading.Thread | None = None
         self._closed = False
+        self._stopped = False
 
         self._lock = threading.Lock()
         self._processed_by_client: dict[int, int] = {}
@@ -85,7 +86,8 @@ class FileIngestor:
             self._config.queue_name,
         )
         try:
-            self._input_queue.start_consuming(self._process_message)
+            if not self._stopped:
+                self._input_queue.start_consuming(self._process_message)
         finally:
             self.stop()
             if self._control_thread is not None:
@@ -95,6 +97,9 @@ class FileIngestor:
             self._close()
 
     def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
         logging.info("file_ingestor_stop | id=%s", self._config.id)
         for consumer in (
             self._input_queue,
@@ -102,10 +107,7 @@ class FileIngestor:
             self._response_consumer,
         ):
             if consumer is not None:
-                try:
-                    consumer.stop_consuming()
-                except Exception:
-                    pass
+                consumer.request_stop_consuming()
 
     def _process_message(self, message: bytes, ack, nack) -> None:
         try:
@@ -191,7 +193,8 @@ class FileIngestor:
             [self._config.control_exchange],
         )
         try:
-            self._control_consumer.start_consuming(self._handle_eof_broadcast)
+            if not self._stopped:
+                self._control_consumer.start_consuming(self._handle_eof_broadcast)
         except Exception as e:
             if not self._closed:
                 logging.error(
@@ -290,11 +293,12 @@ class FileIngestor:
         )
         eof_sender = self._new_transaction_sender()
         try:
-            self._response_consumer.start_consuming(
-                lambda message, ack, nack: self._handle_leader_report(
-                    message, ack, nack, eof_sender
+            if not self._stopped:
+                self._response_consumer.start_consuming(
+                    lambda message, ack, nack: self._handle_leader_report(
+                        message, ack, nack, eof_sender
+                    )
                 )
-            )
         except Exception as e:
             if not self._closed:
                 logging.error(

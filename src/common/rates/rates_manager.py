@@ -19,9 +19,9 @@ class RatesManager:
         for attempt in range(1, max_retries + 1):
             try:
                 logging.info("fetch_rates | url=%s | atempt=%d", url, attempt)
-                response = requests.get(url, timeout=10)
-                response.raise_for_status()
-                self._rates = response.json().get("rates", {})
+                with requests.get(url, timeout=10) as response:
+                    response.raise_for_status()
+                    self._rates = response.json().get("rates", {})
                 self.apply_reference_overrides()
                 logging.info("fetch_rates | result=success | entries=%d", len(self._rates))
                 return True

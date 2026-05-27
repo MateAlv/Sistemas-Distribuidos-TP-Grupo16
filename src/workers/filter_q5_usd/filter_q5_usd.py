@@ -105,6 +105,8 @@ class FilterQ5UsdWorker:
         self.control_thread: threading.Thread | None = None
         self.response_thread: threading.Thread | None = None
         self.closed = False
+        # Aborts an in-flight rates RPC on SIGTERM.
+        self._shutdown = threading.Event()
 
     # ---------- helpers ----------
 
@@ -141,7 +143,9 @@ class FilterQ5UsdWorker:
             logging.info("filter_q5_usd_rpc_start | id=%s | requesting rates", ID)
             with MessageMiddlewareRpcClientRabbitMQ(MOM_HOST, RATES_REQUEST_QUEUE) as client:
                 client.connect()
-                response = client.call(b"get_rates", timeout=120)
+                response = client.call(
+                    b"get_rates", timeout=120, cancel_event=self._shutdown
+                )
             self.rates_manager.load_from_payload(response)
             self.rates_loaded = True
             logging.info("filter_q5_usd_rpc_done | id=%s | rates_loaded", ID)
@@ -403,11 +407,12 @@ class FilterQ5UsdWorker:
         self.control_consumer = consumer
         output_exchanges = self._new_output_exchanges()
         try:
-            consumer.start_consuming(
-                lambda message, ack, nack: self._handle_eof_broadcast(
-                    message, ack, nack, output_exchanges
+            if not self._shutdown.is_set():
+                consumer.start_consuming(
+                    lambda message, ack, nack: self._handle_eof_broadcast(
+                        message, ack, nack, output_exchanges
+                    )
                 )
-            )
         finally:
             for exchange in output_exchanges:
                 try:
@@ -424,11 +429,12 @@ class FilterQ5UsdWorker:
         self.response_consumer = consumer
         output_exchanges = self._new_output_exchanges()
         try:
-            consumer.start_consuming(
-                lambda message, ack, nack: self._handle_leader_report(
-                    message, ack, nack, output_exchanges
+            if not self._shutdown.is_set():
+                consumer.start_consuming(
+                    lambda message, ack, nack: self._handle_leader_report(
+                        message, ack, nack, output_exchanges
+                    )
                 )
-            )
         finally:
             for exchange in output_exchanges:
                 try:
@@ -456,7 +462,8 @@ class FilterQ5UsdWorker:
         self.response_thread.start()
 
         try:
-            self.input_queue.start_consuming(self.process_messages)
+            if not self._shutdown.is_set():
+                self.input_queue.start_consuming(self.process_messages)
         except Exception as e:
             logging.error("filter_q5_usd_start_error | id=%s | error=%s", ID, e)
         finally:
@@ -468,23 +475,16 @@ class FilterQ5UsdWorker:
             self.close()
 
     def handle_sigterm(self):
-        if self.closed:
+        if self.closed or self._shutdown.is_set():
             return
         logging.info("filter_q5_usd_shutdown | id=%s", ID)
-        try:
-            self.input_queue.stop_consuming()
-        except Exception:
-            pass
+
+        self._shutdown.set()
+        self.input_queue.request_stop_consuming()
         if self.control_consumer is not None:
-            try:
-                self.control_consumer.stop_consuming()
-            except Exception:
-                pass
+            self.control_consumer.request_stop_consuming()
         if self.response_consumer is not None:
-            try:
-                self.response_consumer.stop_consuming()
-            except Exception:
-                pass
+            self.response_consumer.request_stop_consuming()
 
     def close(self):
         if self.closed:

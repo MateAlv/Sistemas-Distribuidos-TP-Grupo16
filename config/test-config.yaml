@@ -10,31 +10,36 @@ settings:
   result_line_max_bytes: 1048576
   connect_timeout_seconds: 30
   io_timeout_seconds: 3600
+  filter_prefetch_count: 50
 
 workers:
-  file_splitters: 2
-  file_ingestors: 5
+  file_splitters: 3
+  file_ingestors: 6
   filters:
-    usd: 1
-    q1: 1
-    date: 1
+    usd: 6
+    q1: 3
+    date: 4
+    q5_format: 3
+    q5_usd: 3
   sums:
-    q2: 3
-    q3: 3
+    q2: 4
+    q3: 4
   aggregators:
-    q2: 1
-    q3: 1
-  joiners:
-    q2: 1
-    q3: 1
+    q2: 2
+    q3: 2
+    q5: 2
   scatter_gather:
-    mappers: 1
-    linkers: 1
+    mappers: 3
+    linkers: 2
     detectors: 6
     min_intermediaries: 5
+  q3_barrier: 3
 
-clients: 1
+clients: 2
 client_accounts:
   - client_id: 0
+    accounts_file: data/datasets/client-1/LI-Small/LI-Small_accounts.csv
+    transactions_file: data/datasets/client-1/LI-Small/LI-Small_Trans.csv
+  - client_id: 1
     accounts_file: data/datasets/client-1/LI-Small/LI-Small_accounts.csv
     transactions_file: data/datasets/client-1/LI-Small/LI-Small_Trans.csv

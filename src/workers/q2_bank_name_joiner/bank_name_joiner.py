@@ -67,18 +67,20 @@ class BankNameJoinerWorker:
 
         self._q2_consumer: middleware.MessageMiddlewareQueueRabbitMQ | None = None
         self._accounts_consumer: middleware.MessageMiddlewareQueueRabbitMQ | None = None
-        self._output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
-            config.mom_host, config.output_queue
-        )
 
         self._protocol = InternalProtocol()
         self._control_serializer = ControlMessageSerializer()
         self._line_batch_serializer = LineBatchSerializer()
 
         self._lock = threading.Lock()
+        self._output_queues_lock = threading.Lock()
         self._states: dict[int, ClientState] = {}
         self._closed_by_client: dict[int, float] = {}
+        self._output_queues_by_thread: dict[
+            int, middleware.MessageMiddlewareQueueRabbitMQ
+        ] = {}
         self._closed = False
+        self._stopped = False
 
         self._q2_thread: threading.Thread | None = None
         self._accounts_thread: threading.Thread | None = None
@@ -99,58 +101,100 @@ class BankNameJoinerWorker:
         )
         self._q2_thread.start()
         self._accounts_thread.start()
-        self._q2_thread.join()
-        self._accounts_thread.join()
+        self._await_consumers()
+
+    def _await_consumers(self) -> None:
+        threads = [t for t in (self._q2_thread, self._accounts_thread) if t is not None]
+        while True:
+            alive = [t for t in threads if t.is_alive()]
+            if not alive:
+                return
+            for thread in alive:
+                thread.join(timeout=1.0)
+            if self._stopped:
+                for thread in alive:
+                    thread.join(timeout=5.0)
+                return
 
     def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
         logging.info("q2_bank_name_joiner_stop | id=%s", self._config.id)
         for consumer in (self._q2_consumer, self._accounts_consumer):
             if consumer is not None:
-                try:
-                    consumer.stop_consuming()
-                except Exception:
-                    pass
+                consumer.request_stop_consuming()
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        for resource in (self._q2_consumer, self._accounts_consumer, self._output_queue):
-            if resource is None:
-                continue
-            try:
-                resource.close()
-            except Exception as e:
-                logging.warning(
-                    "q2_bank_name_joiner_close_error | id=%s | error=%s",
-                    self._config.id, e,
+        self._close_thread_output_queue()
+
+    def _output_queue_for_thread(self) -> middleware.MessageMiddlewareQueueRabbitMQ:
+        thread_id = threading.get_ident()
+        with self._output_queues_lock:
+            output_queue = self._output_queues_by_thread.get(thread_id)
+            if output_queue is None:
+                output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
+                    self._config.mom_host, self._config.output_queue
                 )
+                self._output_queues_by_thread[thread_id] = output_queue
+            return output_queue
+
+    def _close_thread_output_queue(self) -> None:
+        thread_id = threading.get_ident()
+        with self._output_queues_lock:
+            output_queue = self._output_queues_by_thread.pop(thread_id, None)
+        if output_queue is None:
+            return
+        try:
+            output_queue.close()
+        except Exception as e:
+            logging.warning(
+                "q2_bank_name_joiner_close_error | id=%s | error=%s",
+                self._config.id, e,
+            )
 
     def _run_q2_consumer(self) -> None:
         self._q2_consumer = middleware.MessageMiddlewareQueueRabbitMQ(
             self._config.mom_host, self._config.q2_input_queue
         )
         try:
-            self._q2_consumer.start_consuming(self._on_q2_message)
+            if not self._stopped:
+                self._q2_consumer.start_consuming(self._on_q2_message)
         except Exception as e:
             if not self._closed:
                 logging.error(
                     "q2_bank_name_joiner_q2_consumer_error | id=%s | error=%s",
                     self._config.id, e,
                 )
+        finally:
+            self._close_thread_output_queue()
+            try:
+                self._q2_consumer.close()
+            except Exception:
+                pass
 
     def _run_accounts_consumer(self) -> None:
         self._accounts_consumer = middleware.MessageMiddlewareQueueRabbitMQ(
             self._config.mom_host, self._config.accounts_input_queue
         )
         try:
-            self._accounts_consumer.start_consuming(self._on_accounts_message)
+            if not self._stopped:
+                self._accounts_consumer.start_consuming(self._on_accounts_message)
         except Exception as e:
             if not self._closed:
                 logging.error(
                     "q2_bank_name_joiner_accounts_consumer_error | id=%s | error=%s",
                     self._config.id, e,
                 )
+        finally:
+            self._close_thread_output_queue()
+            try:
+                self._accounts_consumer.close()
+            except Exception:
+                pass
 
     def _on_q2_message(self, message: bytes, ack, nack) -> None:
         try:
@@ -290,6 +334,7 @@ class BankNameJoinerWorker:
         if state is None:
             return
 
+        output_queue = self._output_queue_for_thread()
         missing = 0
         emitted = 0
         for bank_id, partial in state.q2_results.items():
@@ -304,7 +349,7 @@ class BankNameJoinerWorker:
                 amount=partial.amount,
             )
             payload = Q2BankMaxResultSerializer.serialize(result)
-            self._output_queue.send(
+            output_queue.send(
                 self._packet(MessageType.DATA, client_id, payload)
             )
             emitted += 1
@@ -316,7 +361,7 @@ class BankNameJoinerWorker:
                 processed_count=0,
             )
         )
-        self._output_queue.send(self._packet(MessageType.EOF, client_id, control_payload))
+        output_queue.send(self._packet(MessageType.EOF, client_id, control_payload))
 
         logging.info(
             "q2_bank_name_joiner_emit | id=%s | client_id=%s | results=%s | "
