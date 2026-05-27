@@ -13,9 +13,6 @@ from .middleware import (
     MessageMiddlewareRpcServer,
 )
 
-# Set RABBITMQ_DURABLE=true to persist queues and messages across broker restarts.
-# Disabled by default: unnecessary overhead for hito 2 (scalability, no fault tolerance).
-# Enable for hito 3 (fault tolerance).
 _DURABLE = os.environ.get("RABBITMQ_DURABLE", "false").lower() == "true"
 _DELIVERY_MODE = 2 if _DURABLE else 1
 _PREFETCH_COUNT = int(os.environ.get("PREFETCH_COUNT", "1"))
@@ -33,7 +30,13 @@ class _RabbitMQBase:
         self._user_callback = None
         self._queue_name = None
         try:
-            self._connection = pika.BlockingConnection(pika.ConnectionParameters(host=host))
+            self._connection = pika.BlockingConnection(
+                pika.ConnectionParameters(
+                    host=host,
+                    heartbeat=0,
+                    blocked_connection_timeout=300,
+                )
+            )
             self._channel = self._connection.channel()
         except _CONNECTION_ERRORS as e:
             raise MessageMiddlewareDisconnectedError(e)
@@ -72,6 +75,14 @@ class _RabbitMQBase:
             self._channel.stop_consuming()
         except _CONNECTION_ERRORS as e:
             raise MessageMiddlewareDisconnectedError(e)
+        except Exception:
+            return
+
+    def request_stop_consuming(self):
+        try:
+            if not self._connection or not self._connection.is_open:
+                return
+            self._connection.add_callback_threadsafe(self.stop_consuming)
         except Exception:
             return
 
@@ -246,20 +257,20 @@ class MessageMiddlewareRpcClientRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcClie
     def connect(self):
         self._channel.queue_declare(queue=self._request_queue, durable=_DURABLE)
 
-    def call(self, message, timeout=30):
+    def call(self, message, timeout=30, cancel_event=None):
         correlation_id = str(uuid.uuid4())
         reply_queue = self._channel.queue_declare(queue='', exclusive=True).method.queue
-        
+
         response = None
-        
+
         def on_response(ch, method, props, body):
             nonlocal response
             if props.correlation_id == correlation_id:
                 response = body
                 ch.basic_ack(delivery_tag=method.delivery_tag)
-        
+
         self._channel.basic_consume(queue=reply_queue, on_message_callback=on_response, auto_ack=False)
-        
+
         self._channel.basic_publish(
             exchange="",
             routing_key=self._request_queue,
@@ -270,14 +281,16 @@ class MessageMiddlewareRpcClientRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcClie
                 delivery_mode=_DELIVERY_MODE,
             )
         )
-        
+
         deadline = time.monotonic() + timeout
         while response is None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise MessageMiddlewareMessageError("RPC call cancelled")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise MessageMiddlewareMessageError("RPC call timed out")
             self._connection.process_data_events(time_limit=min(1, remaining))
-            
+
         return response
 
 
@@ -286,6 +299,7 @@ class MessageMiddlewareRpcServerRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcServ
         self._request_queue = request_queue_name
         super().__init__(host)
         self._consuming = False
+        self._stop_requested = False
 
     def __enter__(self):
         return self
@@ -309,15 +323,33 @@ class MessageMiddlewareRpcServerRabbitMQ(_RabbitMQBase, MessageMiddlewareRpcServ
             on_request_callback(body, reply)
             ch.basic_ack(delivery_tag=method.delivery_tag)
         
-        self._channel.basic_qos(prefetch_count=_PREFETCH_COUNT)
-        self._channel.basic_consume(queue=self._request_queue, on_message_callback=_on_request)
-        self._consuming = True
-        self._channel.start_consuming()
+        try:
+            self._channel.basic_qos(prefetch_count=_PREFETCH_COUNT)
+            self._channel.basic_consume(
+                queue=self._request_queue,
+                on_message_callback=_on_request,
+            )
+            self._consuming = True
+            if self._stop_requested:
+                self.stop_consuming()
+                return
+            self._channel.start_consuming()
+        except _CONNECTION_ERRORS as e:
+            raise MessageMiddlewareDisconnectedError(e)
+        except Exception as e:
+            raise MessageMiddlewareMessageError(e)
+        finally:
+            self._consuming = False
 
     def stop(self):
-        if self._consuming:
-            self._channel.stop_consuming()
-            self._consuming = False
+        if self._stop_requested:
+            return
+
+        self._stop_requested = True
+        if not self._consuming:
+            return
+
+        self.request_stop_consuming()
 
     def close(self):
         self.stop()

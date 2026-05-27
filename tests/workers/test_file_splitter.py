@@ -9,6 +9,7 @@ from common.message_protocol.internal import (
     LineBatchSerializer,
     MessageType,
 )
+import workers.file_splitter.file_splitter as file_splitter_module
 from workers.file_splitter.file_splitter import FileSplitter, FileSplitterConfig
 
 
@@ -24,12 +25,15 @@ ROW_3 = b"2022/09/01 00:10,5,from-3,6,to-3,33.0,US Dollar,Cash"
 class RecordingSender:
     def __init__(self):
         self.messages = []
+        self.closed = False
 
     def send(self, message: bytes) -> None:
+        if self.closed:
+            raise RuntimeError("send on closed sender")
         self.messages.append(message)
 
     def close(self) -> None:
-        pass
+        self.closed = True
 
 
 def test_file_splitter_emits_line_batches_and_authoritative_eof():
@@ -197,6 +201,48 @@ def test_file_splitter_drops_accounts_files():
     )
 
     assert sender.messages == []
+
+
+def test_file_splitter_stop_does_not_close_outputs_until_start_unwinds(monkeypatch):
+    created = {}
+    closed_during_stop = []
+
+    class StopRecordingConsumer:
+        def __init__(self, *args, **kwargs):
+            self.stop_requests = 0
+            self.closed = False
+            created["consumer"] = self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            self.close()
+            return False
+
+        def start_consuming(self, callback):
+            splitter.stop()
+            closed_during_stop.append(sender.closed)
+
+        def request_stop_consuming(self):
+            self.stop_requests += 1
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        file_splitter_module,
+        "MessageMiddlewareExchangeRabbitMQ",
+        StopRecordingConsumer,
+    )
+    splitter, sender = _splitter(max_batch_bytes=4096)
+
+    splitter.start()
+
+    assert created["consumer"].stop_requests == 1
+    assert closed_during_stop == [False]
+    assert sender.closed
+    assert splitter._line_batch_output is None
 
 
 def _splitter(max_batch_bytes: int) -> tuple[FileSplitter, RecordingSender]:
