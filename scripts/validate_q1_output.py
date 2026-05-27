@@ -18,7 +18,7 @@ if __name__ == "__main__":
     success = ref.validate_query("q1", DATASET_DIR, DATASET_TRANS)
     print("=" * 60)
     if success:
-        print("✓✓✓ Q1 TEST PASSED ✓✓✓")
+        print(ref.green("✓✓✓ Q1 TEST PASSED ✓✓✓"))
         sys.exit(0)
-    print("✗✗✗ Q1 TEST FAILED ✗✗✗")
+    print(ref.red("✗✗✗ Q1 TEST FAILED ✗✗✗"))
     sys.exit(1)

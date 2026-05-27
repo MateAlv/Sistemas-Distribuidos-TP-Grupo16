@@ -4,6 +4,7 @@ the validators. Comparison is an order-independent, bidirectional multiset
 equality. Computed to match the pipeline semantics."""
 import csv
 import json
+import os
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -13,6 +14,23 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 USD_CURRENCY = "US Dollar"
+
+
+def _use_color():
+    mode = os.environ.get("LOG_COLOR", "auto")
+    if mode == "always":
+        return True
+    if mode == "never":
+        return False
+    return sys.stdout.isatty()
+
+
+def green(text):
+    return f"\033[32m{text}\033[0m" if _use_color() else text
+
+
+def red(text):
+    return f"\033[31m{text}\033[0m" if _use_color() else text
 
 QUERIES = ("q1", "q2", "q3", "q4", "q5")
 
@@ -416,19 +434,19 @@ def validate_query(query, dataset_dir, trans_name, output_dir="data/output"):
         print(f"    {_summarize_actual(query, actual)}")
         missing, unexpected = compare(expected, actual)
         if missing or unexpected:
-            print(
+            print(red(
                 f"    ERROR: differs from reference "
                 f"(missing={sum(missing.values())}, "
                 f"unexpected={sum(unexpected.values())})"
-            )
+            ))
             for row in list(missing)[:5]:
                 print(f"      missing: {row}")
             for row in list(unexpected)[:5]:
                 print(f"      unexpected: {row}")
             all_ok = False
         else:
-            print("    ✓ matches reference")
+            print(green("    ✓ matches reference"))
 
     if all_ok:
-        print(f"\nAll {len(output_files)} client outputs match the reference")
+        print(green(f"\nAll {len(output_files)} client outputs match the reference"))
     return all_ok

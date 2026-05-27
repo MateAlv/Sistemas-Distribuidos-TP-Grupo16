@@ -244,10 +244,12 @@ def print_summary(results, timings, sampler, wall, timed_out, num_clients):
     print()
     print(f"{'Query':<8}{'Result':<10}{'Pipeline time':<16}")
     for q in QUERIES:
-        mark = "✓ PASS" if results.get(q) else "✗ FAIL"
+        passed = results.get(q)
+        cell = f"{'✓ PASS' if passed else '✗ FAIL':<10}"
+        cell = ref.green(cell) if passed else ref.red(cell)
         t = timings.get(q)
         t_str = f"{t:.1f}s" if t is not None else "—"
-        print(f"{q.upper():<8}{mark:<10}{t_str:<16}")
+        print(f"{q.upper():<8}{cell}{t_str:<16}")
     print()
     print(f"Total wall time : {wall:.1f}s")
     if timed_out:
@@ -271,9 +273,9 @@ def print_summary(results, timings, sampler, wall, timed_out, num_clients):
     print(BAR)
     overall = all(results.values()) and not timed_out
     if overall:
-        print("✓✓✓ FULL PIPELINE TEST PASSED ✓✓✓")
+        print(ref.green("✓✓✓ FULL PIPELINE TEST PASSED ✓✓✓"))
     else:
-        print("✗✗✗ FULL PIPELINE TEST FAILED ✗✗✗")
+        print(ref.red("✗✗✗ FULL PIPELINE TEST FAILED ✗✗✗"))
     print(BAR)
     return overall
 
