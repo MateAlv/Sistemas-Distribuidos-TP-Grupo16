@@ -32,8 +32,6 @@ for _path in (str(REPO_ROOT), str(SRC_ROOT)):
         sys.path.insert(0, _path)
 
 
-# Both import styles resolve to the same files but are distinct module objects
-# in sys.modules; pop every spelling so a reimport re-binds against fake pika.
 _MIDDLEWARE_MODULES = (
     "common.middleware",
     "common.middleware.middleware_rabbitmq",
@@ -134,14 +132,19 @@ class BlockingFakeConsumer:
     alike, and records lifecycle calls for assertions.
     """
 
-    def __init__(self, block_timeout=2.0):
+    def __init__(self, *args, block_timeout=2.0, **kwargs):
+
         self._block_timeout = block_timeout
         self.connected = False
         self.closed = False
         self.start_calls = 0
         self.stop_calls = 0
+        self.sent = []
         self.started = threading.Event()
         self._stopped = threading.Event()
+
+    def send(self, message, *args, **kwargs):
+        self.sent.append(message)
 
     def __enter__(self):
         return self
