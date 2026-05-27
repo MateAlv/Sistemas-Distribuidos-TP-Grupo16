@@ -12,7 +12,7 @@ import threading
 
 def _make_service(pika_env, tmp_path):
     """Build a service with a pre-seeded rates cache and a fake RPC endpoint."""
-    module = pika_env.import_fresh("src.rates_service.main")
+    module = pika_env.import_fresh("rates_service.main")
     cache_path = tmp_path / "rates.json"
     cache_path.write_text(
         json.dumps({"2022-09-01": {"EUR": 1.0}}), encoding="utf-8"
@@ -64,7 +64,7 @@ def test_shutdown_before_run_skips_blocking_consume(pika_env, tmp_path):
 
 
 def test_sigterm_handler_requests_service_shutdown(pika_env, monkeypatch):
-    module = pika_env.import_fresh("src.rates_service.main")
+    module = pika_env.import_fresh("rates_service.main")
     installed = {}
 
     class FakeService:

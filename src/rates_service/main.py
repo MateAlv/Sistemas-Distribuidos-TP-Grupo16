@@ -2,9 +2,9 @@ import logging
 import json
 import os
 import signal
-from src.common.middleware import MessageMiddlewareRpcServerRabbitMQ
-from src.common.rates import RatesManager
-from src.common.rates.q5_reference_rates import Q5_REFERENCE_RATES
+from common.middleware import MessageMiddlewareRpcServerRabbitMQ
+from common.rates import RatesManager
+from common.rates.q5_reference_rates import Q5_REFERENCE_RATES
 
 REQUEST_QUEUE = "rates_requests"
 
