@@ -1,23 +1,8 @@
 """
 Publisher que rutea mensajes a N shards según el client_id extraído del header
 del InternalProtocol.
-
-Duck-typeado con MessageMiddlewareQueueRabbitMQ: expone `.send(message)` y
-`.close()`. Internamente mantiene N MessageMiddlewareExchangeRabbitMQ (uno por
-routing key) y elige el shard parseando los 16 bytes de client_id del header
-(offset 1, longitud 16, big-endian — ver InternalProtocol.HEADER_FORMAT).
-
-Uso típico:
-    publisher = ShardedByClientPublisher(
-        mom_host="rabbitmq",
-        exchange_name="q3_candidates_exchange",
-        routing_key_prefix="q3_candidates",
-        shard_count=3,
-    )
-    publisher.send(packet)   # packet = InternalProtocol.create_packet(...)
-    # → publica a routing_key "q3_candidates_{client_id % 3}"
 """
-from common.middleware.middleware_rabbitmq import (
+from .middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
 )
 
