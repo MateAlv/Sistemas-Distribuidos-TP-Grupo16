@@ -77,12 +77,8 @@ class Gateway:
             + int(bool(q5_queue))
         )
 
-        # Result consumers run on their own threads; track them so shutdown can
-        # stop each on its own ioloop (request_stop_consuming) and join it.
         self._consumers: list[MessageMiddlewareQueueRabbitMQ] = []
         self._consumer_threads: list[threading.Thread] = []
-        # Per-client session threads and their sockets, so SIGTERM can unblock
-        # the blocking recv/select and join the handlers before exit.
         self._client_threads: list[threading.Thread] = []
         self._client_socks: set[socket.socket] = set()
 
@@ -158,33 +154,40 @@ class Gateway:
         self._stopped = True
         logging.info("gateway_stop")
 
-        # Stop accepting new clients (also unblocks the blocked accept()).
         self._close_server_socket()
 
-        # Ask result consumers to stop on their own ioloop threads.
         for consumer in self._consumers:
             consumer.request_stop_consuming()
 
-        # Unblock client sessions parked in recv/select so their handlers return
-        # and close their own sockets.
         self._shutdown_client_sockets()
 
     def _shutdown_workers(self) -> None:
-        """Join worker/session threads so every FD is closed by its owner."""
-        # Result consumers close their own connection in _run_result_consumer's
-        # finally once start_consuming returns.
+        """Join worker/session threads so every FD is closed by its owner.
+
+        Safe regardless of how the accept loop exited: if it ended via an
+        unexpected error rather than stop(), trigger the shutdown signals here
+        so consumers stop and reach their connection-closing finally.
+        """
+        if not self._stopped:
+            self.stop()
+
         for thread in self._consumer_threads:
             thread.join(timeout=5)
             if thread.is_alive():
                 logging.warning("gateway_consumer_join_timeout | thread=%s", thread.name)
 
+        self._shutdown_client_sockets()
         with self._client_queues_lock:
             client_threads = list(self._client_threads)
         for thread in client_threads:
             thread.join(timeout=5)
 
-        # Safety net: close anything a timed-out thread left open.
         self._close_client_sockets()
+        for thread in client_threads:
+            thread.join(timeout=2)
+            if thread.is_alive():
+                logging.warning("gateway_client_join_timeout | thread=%s", thread.name)
+
         self._close_server_socket()
 
     def _close_server_socket(self) -> None:
@@ -246,7 +249,6 @@ class Gateway:
         client_id = self._recv_handshake(client_sock)
         session = ClientSession(client_id=client_id, sock=client_sock)
         
-        # Register client queue early to avoid race condition with results consumer
         q = queue.Queue()
         with self._client_queues_lock:
             self._client_queues[client_id] = q
@@ -428,7 +430,6 @@ class Gateway:
             if not self._stopped:
                 logging.error("gateway_results_consumer_stopped | prefix=%s | error=%s", prefix or "Q1", e)
         finally:
-            # Close the connection on the thread that owns it (no cross-thread close).
             try:
                 consumer.close()
             except Exception:
@@ -503,12 +504,10 @@ def _send_ack(sock: socket.socket) -> None:
 
 
 def _serialize_chunk(chunk: FileChunk) -> bytes:
-    # Wire layout: msg_type(1) | FileChunk bytes
     return MSG_CHUNK.to_bytes(1, "big") + chunk.serialize()
 
 
 def _serialize_file_eof(client_id: int, file_type: int, rel_path: str) -> bytes:
-    # Wire layout: msg_type(1) | FileEof bytes
     return MSG_EOF.to_bytes(1, "big") + FileEof(
         rel_path=rel_path,
         client_id=client_id,
