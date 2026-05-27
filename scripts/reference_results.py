@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reference (expected) results for Q1-Q5, shared by precompute_expected.py and
 the validators. Comparison is an order-independent, bidirectional multiset
-equality. Computed to match the pipeline semantics."""
+equality. Computed to match the notebook semantics used as reference."""
 import csv
 import json
 import os
@@ -37,16 +37,17 @@ QUERIES = ("q1", "q2", "q3", "q4", "q5")
 OUTPUT_COLUMNS = {
     "q1": ["From Bank", "Account", "To Bank", "Account.1", "Amount Paid"],
     "q2": ["From Bank", "Account", "Bank Name", "Amount Paid"],
-    "q3": ["From Bank", "Account", "Amount Paid"],
+    "q3": ["From Bank", "Account", "Payment Format", "Amount Paid"],
     "q4": ["from_account", "to_account"],
     "q5": ["count"],
 }
 
 # Q1: USD transactions paying less than 50.
 Q1_MAX_AMOUNT = 50.0
-# Q3: candidate USD txns whose amount is < 1/100 of the per-format baseline avg.
-Q3_BASELINE = ("2022-09-01", "2022-09-05")
-Q3_CANDIDATE = ("2022-09-06", "2022-09-15")
+# Q3: notebook string comparisons use slash dates as upper bounds. Timestamped
+# rows on 09/06 and 09/15 compare greater than those date-only bounds.
+Q3_NOTEBOOK_BASELINE = ("2022/09/01", "2022/09/06")
+Q3_NOTEBOOK_CANDIDATE = ("2022/09/06", "2022/09/15")
 # Q4: USD txns in the window, >= 5 distinct intermediaries per (A, B) pair.
 Q4_WINDOW = ("2022-09-01", "2022-09-05")
 Q4_MIN_INTERMEDIARIES = 5
@@ -55,7 +56,7 @@ Q5_WINDOW = ("2022-09-01", "2022-09-05")
 Q5_FORMATS = {"Wire", "ACH"}
 Q5_MAX_AMOUNT_USD = 1.0
 
-GENERATOR_VERSION = 1
+GENERATOR_VERSION = 2
 
 
 # --------------------------------------------------------------------------- #
@@ -140,13 +141,17 @@ def compute_q1(trans_file, _accounts_file=None):
 
 
 def compute_q2(trans_file, accounts_file=None):
-    bank_names = {}
+    bank_names_by_id = defaultdict(list)
+    seen_bank_names = set()
     if accounts_file and Path(accounts_file).exists():
         with open(accounts_file, "r") as f:
             for row in csv.DictReader(f):
-                bank_id = _normalize_bank_id(row["Bank ID"])
-                if bank_id:
-                    bank_names.setdefault(bank_id, row["Bank Name"].strip())
+                bank_id = (row["Bank ID"] or "").strip()
+                bank_name = (row["Bank Name"] or "").strip()
+                key = (bank_id, bank_name)
+                if bank_id and key not in seen_bank_names:
+                    bank_names_by_id[bank_id].append(bank_name)
+                    seen_bank_names.add(key)
 
     max_by_bank = {}
     with open(trans_file, "r") as f:
@@ -162,8 +167,8 @@ def compute_q2(trans_file, accounts_file=None):
 
     rows = []
     for bank_id, (account, amount) in max_by_bank.items():
-        bank_name = bank_names.get(_normalize_bank_id(bank_id), "")
-        rows.append((bank_id, account, bank_name, f"{amount:.2f}"))
+        for bank_name in bank_names_by_id.get(bank_id, []):
+            rows.append((bank_id, account, bank_name, f"{amount:.2f}"))
     return rows
 
 
@@ -177,13 +182,13 @@ def compute_q3(trans_file, _accounts_file=None):
         for row in reader:
             if row[col["currency"]].strip() != USD_CURRENCY:
                 continue
-            date = _normalize_date(row[col["date"]])
+            timestamp = row[col["date"]].strip()
             fmt = row[col["payment_format"]].strip()
             amount = float(row[col["amount"]])
-            if Q3_BASELINE[0] <= date <= Q3_BASELINE[1]:
+            if Q3_NOTEBOOK_BASELINE[0] <= timestamp <= Q3_NOTEBOOK_BASELINE[1]:
                 sums[fmt] += amount
                 counts[fmt] += 1
-            elif Q3_CANDIDATE[0] <= date <= Q3_CANDIDATE[1]:
+            elif Q3_NOTEBOOK_CANDIDATE[0] <= timestamp <= Q3_NOTEBOOK_CANDIDATE[1]:
                 candidates.append((
                     fmt,
                     row[col["from_bank"]].strip(),
@@ -196,7 +201,7 @@ def compute_q3(trans_file, _accounts_file=None):
     for fmt, from_bank, from_account, amount in candidates:
         avg = averages.get(fmt)
         if avg is not None and amount < (avg / 100):
-            rows.append((from_bank, from_account, f"{amount:.2f}"))
+            rows.append((from_bank, from_account, fmt, f"{amount:.2f}"))
     return rows
 
 
@@ -374,11 +379,9 @@ def normalize_row(query, fields):
     if query == "q1":
         return (f[0], f[1], f[2], f[3], f"{float(f[4]):.2f}")
     if query == "q2":
-        # Account is excluded: under a tie for a bank's max amount, which
-        # account wins is non-deterministic. Key on (bank id, bank name, amount).
-        return (f[0], f[2], f"{float(f[3]):.2f}")
+        return (f[0], f[1], f[2], f"{float(f[3]):.2f}")
     if query == "q3":
-        return (f[0], f[1], f"{float(f[2]):.2f}")
+        return (f[0], f[1], f[2], f"{float(f[3]):.2f}")
     if query == "q4":
         return (f[0], f[1])
     if query == "q5":
