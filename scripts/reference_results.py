@@ -395,3 +395,72 @@ def write_expected(query, rows, path, source_name):
 def compare(expected, actual):
     """Return (missing, unexpected) multisets between expected and actual."""
     return expected - actual, actual - expected
+
+
+def _describe(query, counter):
+    if query == "q5":
+        _, total = next(iter(counter))
+        return f"expected count = {total}"
+    return f"{sum(counter.values())} expected rows"
+
+
+def _summarize_actual(query, counter):
+    if query == "q5":
+        _, total = next(iter(counter)) if counter else ("count", "0")
+        return f"count = {total}"
+    return f"{sum(counter.values())} rows"
+
+
+def validate_query(query, dataset_dir, trans_name, output_dir="data/output"):
+    """Compare every ``results_<query>_*.csv`` against the reference multiset.
+
+    Bidirectional: a client output passes only if it has no missing AND no
+    unexpected rows relative to the precomputed reference. Returns True iff all
+    client outputs match. Prints a per-file report (the validators wrap this in
+    a ``Qn FLOW VALIDATION`` banner).
+    """
+    try:
+        expected = expected_counter(query, dataset_dir, trans_name)
+    except Exception as e:  # noqa: BLE001 - surfaced to the caller's banner
+        print(f"ERROR computing/loading expected {query} rows: {e}")
+        return False
+
+    src = expected_path(dataset_dir, query)
+    print(f"Reference: {src if src.exists() else 'computed from dataset'}")
+    print(f"{_describe(query, expected)}")
+
+    output_files = sorted(Path(output_dir).glob(f"results_{query}_*.csv"))
+    if not output_files:
+        print(f"ERROR: no {query} output files found in {output_dir}")
+        return False
+    print(f"Found {len(output_files)} output file(s)")
+
+    all_ok = True
+    for output_file in output_files:
+        print(f"\n  Reading: {output_file.name}")
+        try:
+            actual = load_counter(query, output_file)
+        except Exception as e:  # noqa: BLE001
+            print(f"    ERROR reading {output_file.name}: {e}")
+            all_ok = False
+            continue
+
+        print(f"    {_summarize_actual(query, actual)}")
+        missing, unexpected = compare(expected, actual)
+        if missing or unexpected:
+            print(
+                f"    ERROR: differs from reference "
+                f"(missing={sum(missing.values())}, "
+                f"unexpected={sum(unexpected.values())})"
+            )
+            for row in list(missing)[:5]:
+                print(f"      missing: {row}")
+            for row in list(unexpected)[:5]:
+                print(f"      unexpected: {row}")
+            all_ok = False
+        else:
+            print("    ✓ matches reference")
+
+    if all_ok:
+        print(f"\nAll {len(output_files)} client outputs match the reference")
+    return all_ok
