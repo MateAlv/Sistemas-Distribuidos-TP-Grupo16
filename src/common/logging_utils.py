@@ -16,6 +16,7 @@ from common.message_protocol.internal.common import MessageType
 DEFAULT_FLOW_LOG_EVERY_MESSAGES = 100
 DEFAULT_FLOW_LOG_EVERY_BYTES = 8 * 1024 * 1024
 DEFAULT_FLOW_LOG_FIRST_MESSAGES = 1
+DEFAULT_WORKER_LOG_EVERY_MESSAGES = 100
 FILE_INGESTOR_EXCHANGE = os.getenv("FILE_INGESTOR_EXCHANGE", "file_ingestor_exchange")
 FILE_SPLITTER_QUEUE_PREFIX = os.getenv("FILE_SPLITTER_QUEUE_PREFIX", "file_splitter")
 
@@ -208,6 +209,15 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def should_log_progress(count: int, every: int | None = None) -> bool:
+    if every is None:
+        every = _env_int(
+            "WORKER_LOG_EVERY_MESSAGES",
+            _env_int("FLOW_LOG_EVERY_MESSAGES", DEFAULT_WORKER_LOG_EVERY_MESSAGES),
+        )
+    return count == 1 or (every > 0 and count % every == 0)
 
 
 def _env_int(name: str, default: int) -> int:
