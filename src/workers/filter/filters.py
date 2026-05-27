@@ -116,6 +116,7 @@ class FilterWorker:
         # Estado interno
         self.lock = threading.Lock()
         self.active = True
+        self._closed = False
         self.control_thread = None
 
         # Procesados por cliente
@@ -736,12 +737,21 @@ class FilterWorker:
         control_output = self._new_control_output()
         output_queues = self._new_output_queues()
         try:
-            self.control_input.start_consuming(
-                lambda message, ack, nack: self._process_control_message_with_publishers(
-                    message, ack, nack, control_output, output_queues
+            if self.active:
+                self.control_input.start_consuming(
+                    lambda message, ack, nack: self._process_control_message_with_publishers(
+                        message, ack, nack, control_output, output_queues
+                    )
                 )
-            )
         finally:
+            # Este thread es dueño del ioloop de control_input, así que lo cierra
+            # él mismo (no el thread principal) para evitar un close cross-thread.
+            try:
+                self.control_input.close()
+            except Exception as e:
+                logging.error(
+                    f"Error closing control input in filter_{CONFIGURATION} with id {ID}: {e}"
+                )
             self._close_control_thread_publishers(control_output, output_queues)
 
     def _process_control_message_with_publishers(
@@ -778,7 +788,8 @@ class FilterWorker:
 
         try:
             # Se procesan los mensajes de la cola de entrada en el thread principal
-            self.input_queue.start_consuming(self.process_data_messages)
+            if self.active:
+                self.input_queue.start_consuming(self.process_data_messages)
         except Exception as e:
             logging.error(f"Error in filter_{CONFIGURATION} with id {ID}: {e}")
         finally:
@@ -786,32 +797,36 @@ class FilterWorker:
             if self.control_thread is not None:
                 self.control_thread.join(timeout=5)
             self.close()
-    
+
     def handle_sigterm(self):
         '''
-        Maneja la señal de terminacion, cerrando los recursos de manera ordenada
+        Maneja la señal de terminacion: pide el corte de los consumers en el
+        ioloop que les corresponde (request_stop_consuming agenda el stop vía
+        add_callback_threadsafe). No cierra recursos ni hace join acá: puede
+        ejecutarse en el signal handler sobre el thread que está consumiendo.
+        El cierre ordenado ocurre en el finally de start().
         '''
+        if not self.active:
+            return
         logging.info(f"Received SIGTERM in filter_{CONFIGURATION} with id {ID}, shutting down")
         self.active = False
-        self.input_queue.stop_consuming()
-        self.control_input.stop_consuming()
-        self.close()
-    
+        self.input_queue.request_stop_consuming()
+        self.control_input.request_stop_consuming()
+
     def close(self):
         '''
-        Cierra los recursos utilizados por este worker
+        Cierra los recursos del thread principal. control_input lo cierra su
+        propio thread en _start_control_consumer (ya joineado antes de llegar acá).
         '''
+        if self._closed:
+            return
+        self._closed = True
         logging.info(f"Closing filter_{CONFIGURATION} with id {ID}")
 
         try:
             self.input_queue.close()
         except Exception as e:
             logging.error(f"Error closing input queue in filter_{CONFIGURATION} with id {ID}: {e}")
-
-        try:
-            self.control_input.close()
-        except Exception as e:
-            logging.error(f"Error closing control input in filter_{CONFIGURATION} with id {ID}: {e}")
 
         try:
             self.control_output.close()
