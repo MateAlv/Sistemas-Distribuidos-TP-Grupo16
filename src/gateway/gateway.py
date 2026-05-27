@@ -6,6 +6,7 @@ import queue
 import os
 from dataclasses import dataclass, field
 
+from common.bank_ids import notebook_bank_id
 from common.message_protocol.external import FileChunk, FileEof, recv_exact, sendall
 from common.message_protocol.external.types import (
     FILE_TYPE_ACCOUNTS,
@@ -527,7 +528,10 @@ class Gateway:
     @staticmethod
     def _q3_csv_lines(payload: bytes):
         for tx in TransactionSerializer().deserialize_batch(payload):
-            yield f"{tx.from_bank},{tx.from_account},{tx.amount:.2f}"
+            yield (
+                f"{notebook_bank_id(tx.from_bank)},"
+                f"{tx.from_account},{tx.format},{tx.amount:.2f}"
+            )
 
     @staticmethod
     def _q4_csv_lines(payload: bytes):

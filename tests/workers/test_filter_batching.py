@@ -32,7 +32,14 @@ class FakeExchange(FakeQueue):
 
 
 def _import_filter_module(
-    monkeypatch, configuration: str = "USD", filter_amount: str = "1"
+    monkeypatch,
+    configuration: str = "USD",
+    filter_amount: str = "1",
+    usd_enable_q1: str = "0",
+    usd_enable_q2: str = "1",
+    usd_enable_date: str = "0",
+    date_enable_q3: str = "0",
+    date_enable_q4: str = "0",
 ):
     # Solo activamos USD_ENABLE_Q2 para acotar el output del filter al
     # SUM_Q2_QUEUE en este test. El resto se desactiva con flags.
@@ -51,11 +58,11 @@ def _import_filter_module(
     monkeypatch.setenv("SUM_Q3_QUEUE", "sum_q3_queue")
     monkeypatch.setenv("FILTER_AMOUNT", filter_amount)
     monkeypatch.setenv("FILTER_PREFIX", "filter")
-    monkeypatch.setenv("USD_ENABLE_Q1", "0")
-    monkeypatch.setenv("USD_ENABLE_Q2", "1")
-    monkeypatch.setenv("USD_ENABLE_DATE", "0")
-    monkeypatch.setenv("DATE_ENABLE_Q3", "0")
-    monkeypatch.setenv("DATE_ENABLE_Q4", "0")
+    monkeypatch.setenv("USD_ENABLE_Q1", usd_enable_q1)
+    monkeypatch.setenv("USD_ENABLE_Q2", usd_enable_q2)
+    monkeypatch.setenv("USD_ENABLE_DATE", usd_enable_date)
+    monkeypatch.setenv("DATE_ENABLE_Q3", date_enable_q3)
+    monkeypatch.setenv("DATE_ENABLE_Q4", date_enable_q4)
 
     fake_pika = types.SimpleNamespace(
         exceptions=types.SimpleNamespace(
@@ -79,11 +86,18 @@ def _import_filter_module(
     return module
 
 
-def _tx(amount: float, currency: str, fmt: str = "Wire") -> Transaction:
+def _tx(
+    amount: float,
+    currency: str,
+    fmt: str = "Wire",
+    date: str = "2022/09/01 00:08",
+    from_bank: str = "1",
+    from_account: str = "abc",
+) -> Transaction:
     return Transaction(
-        date="2022/09/01 00:08",
-        from_bank="1",
-        from_account="abc",
+        date=date,
+        from_bank=from_bank,
+        from_account=from_account,
         to_bank="2",
         to_account="def",
         amount=amount,
@@ -175,6 +189,73 @@ def test_q5_filter_batches_wire_and_ach_to_filter_q5_usd(monkeypatch):
     batch_txs = TransactionSerializer.deserialize_batch(payload)
     assert len(batch_txs) == 2
     assert {tx.format for tx in batch_txs} == {"Wire", "ACH"}
+
+
+def test_date_filter_uses_notebook_q3_timestamp_bounds(monkeypatch):
+    monkeypatch.setenv("FILTER_OUTPUT_BATCH_MAX_TX", "1")
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="DATE",
+        usd_enable_q2="0",
+        date_enable_q3="1",
+        date_enable_q4="0",
+    )
+    worker = module.FilterWorker()
+
+    worker._process_data_message(
+        _data_packet(
+            314,
+            [
+                _tx(
+                    10.0,
+                    "US Dollar",
+                    date="2022/09/05 23:59",
+                    from_account="baseline",
+                ),
+                _tx(
+                    20.0,
+                    "US Dollar",
+                    date="2022/09/06 00:00",
+                    from_account="start",
+                ),
+                _tx(
+                    30.0,
+                    "US Dollar",
+                    date="2022/09/14 23:59",
+                    from_account="end",
+                ),
+                _tx(
+                    40.0,
+                    "US Dollar",
+                    date="2022/09/15 00:00",
+                    from_account="excluded",
+                ),
+                _tx(
+                    50.0,
+                    "US Dollar",
+                    date="2022/08/31 23:59",
+                    from_account="before",
+                ),
+            ],
+        )
+    )
+
+    sum_q3_sent = worker.output_queues["sum_q3_queue"].sent
+    q3_candidates_sent = worker.output_queues["filter_q3_queue"].sent
+    assert len(sum_q3_sent) == 1
+    assert len(q3_candidates_sent) == 2
+
+    _, _, baseline_payload = InternalProtocol.unpack_packet(sum_q3_sent[0])
+    baseline_txs = TransactionSerializer.deserialize_batch(baseline_payload)
+    assert [tx.from_account for tx in baseline_txs] == ["baseline"]
+
+    candidate_accounts = []
+    for packet in q3_candidates_sent:
+        _, _, payload = InternalProtocol.unpack_packet(packet)
+        candidate_accounts.extend(
+            tx.from_account for tx in TransactionSerializer.deserialize_batch(payload)
+        )
+    assert candidate_accounts == ["start", "end"]
 
 
 def test_eof_flushes_partial_batch_before_forwarding(monkeypatch):
