@@ -162,6 +162,8 @@ class Q4DeduperWorker:
         expected_total: int,
         output=None,
     ) -> None:
+        """Send the single Q4 EOF to the gateway. In multi-shard mode only the
+        leader calls this, with the global count summed across all shards."""
         output = output or self._gateway_output
         output.send(
             self._packet(
@@ -188,6 +190,8 @@ class Q4DeduperWorker:
         emitted_accounts: int,
         output=None,
     ) -> None:
+        """Non-leader shards. Send our emitted-account count to shard 0 so it can
+        decide when every shard is done and send the single gateway EOF."""
         output = output or self._leader_output
         if output is None:
             raise RuntimeError("leader output is not configured")
@@ -215,6 +219,8 @@ class Q4DeduperWorker:
             yield self._account_from_key(key)
 
     def _accept_accounts(self, client_id: int, payload: bytes) -> int:
+        """Main data path. Add each account to the per-client set. The set itself
+        handles deduplication — repeats are silently absorbed."""
         accounts = self._account_serializer.deserialize_batch(payload)
         if not accounts:
             return 0
@@ -252,6 +258,8 @@ class Q4DeduperWorker:
         return len(accounts)
 
     def _handle_eof(self, client_id: int, payload: bytes) -> None:
+        """Count one EOF from one aggregator shard. Once every aggregator has
+        sent us its EOF for this client, we have all the candidates → close."""
         control = self._control_serializer.deserialize(payload)
         should_emit = False
 
@@ -291,6 +299,10 @@ class Q4DeduperWorker:
             self._emit_and_close_client(client_id)
 
     def _emit_and_close_client(self, client_id: int, output=None) -> int:
+        """End-of-client. Emit every unique account to the gateway (sorted for
+        deterministic output). In single-shard mode, send the gateway EOF now.
+        In multi-shard mode, send our emitted count to shard 0; only shard 0
+        sends the one EOF to the gateway after every shard has reported."""
         with self._lock:
             if client_id in self._closed_by_client:
                 return 0
@@ -329,6 +341,9 @@ class Q4DeduperWorker:
         control: ControlMessage,
         output=None,
     ) -> None:
+        """Leader-only (shard 0). Count one shard's emitted-account tally. Once
+        every deduper shard has reported, send the single final EOF to the gateway
+        with the global total. The gateway expects exactly one EOF per query."""
         if ID != 0:
             return
 

@@ -161,6 +161,8 @@ class Q4JoinerWorker:
             self._send_batch(client_id, partition, batch_payload, output)
 
     def _accept_block_edges(self, client_id: int, payload: bytes) -> int:
+        """Main data path. For each half-edge, file it into its block's incoming
+        or outgoing dict by role. Nothing is paired yet — only sorting and counting."""
         edges = self._block_edge_serializer.deserialize_batch(payload)
         if not edges:
             return 0
@@ -205,6 +207,8 @@ class Q4JoinerWorker:
         return len(edges)
 
     def _handle_eof(self, client_id: int, payload: bytes) -> None:
+        """Count one EOF from one q4_sum shard. Once every q4_sum shard has sent
+        us its EOF for this client, all the block data is in → run the join."""
         control = self._control_serializer.deserialize(payload)
         should_emit = False
 
@@ -244,6 +248,10 @@ class Q4JoinerWorker:
             self._emit_and_close_client(client_id)
 
     def _emit_client_pairs(self, client_id: int, output=None) -> None:
+        """The actual A->M->B join. For every block that has both incoming and
+        outgoing records, do the cartesian product, multiply the counts to get
+        the block's path_count for (A, B), skip A == B, cap at the threshold,
+        and emit one Q4PairPaths per pair, routed by hash(A, B) to an aggregator."""
         incoming = self._incoming_by_client.get(client_id, {})
         outgoing = self._outgoing_by_client.get(client_id, {})
         blocks = set(incoming) & set(outgoing)
@@ -298,6 +306,8 @@ class Q4JoinerWorker:
         counts_by_partition: dict[int, int],
         output=None,
     ) -> None:
+        """Send one EOF to every aggregator partition, each carrying how many
+        Q4PairPaths we sent that aggregator so it knows when we're done."""
         output = output or self._pair_reducer_output
         for partition in range(Q4_AGGREGATOR_AMOUNT):
             expected_total = int(counts_by_partition.get(partition, 0))
@@ -323,6 +333,8 @@ class Q4JoinerWorker:
             )
 
     def _emit_and_close_client(self, client_id: int, output=None) -> None:
+        """End-of-client. Run the per-block joins, flush batched buffers, drop
+        per-client state, then forward EOF to every aggregator partition."""
         with self._lock:
             if client_id in self._closed_by_client:
                 return
