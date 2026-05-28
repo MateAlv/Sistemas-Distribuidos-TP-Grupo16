@@ -1,0 +1,46 @@
+compose:
+  output_file: docker-compose.yaml
+  test_output_file: docker-compose.test.yaml
+  rabbitmq_ports: true
+
+settings:
+  logging_level: INFO
+  server_port: 5678
+  chunk_max_bytes: 65536
+  result_line_max_bytes: 1048576
+  connect_timeout_seconds: 30
+  io_timeout_seconds: 3600
+
+workers:
+  file_splitters: 3
+  file_ingestors: 6
+  filters:
+    usd: 6
+    q1: 3
+    date: 4
+    q5_format: 3
+    q5_usd: 3
+  sums:
+    q2: 4
+    q3: 6
+  aggregators:
+    q2: 3
+    q3: 3
+    q5: 2
+  joiners:
+    q2: 1
+    q3: 1
+    q5: 1
+  q3_barrier: 2
+  q4:
+    filters: 6
+    sums: 4
+    joiners: 8
+    aggregators: 8
+    dedupers: 2
+
+clients: 1
+client_accounts:
+  - client_id: 0
+    accounts_file: data/datasets/LI-Small/LI-Small_accounts.csv
+    transactions_file: data/datasets/LI-Small/LI-Small_Trans.csv

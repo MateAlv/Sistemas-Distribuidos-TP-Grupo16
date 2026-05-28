@@ -1,0 +1,5 @@
+pika
+pyyaml
+pytest
+requests
+numpy
