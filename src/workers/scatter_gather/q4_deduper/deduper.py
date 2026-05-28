@@ -22,31 +22,31 @@ from common.middleware.middleware_rabbitmq import (
 
 ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
-Q4_ACCOUNT_DEDUPER_EXCHANGE = os.environ["Q4_ACCOUNT_DEDUPER_EXCHANGE"]
-Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX = os.environ.get(
-    "Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX", "q4_account_deduper"
+Q4_DEDUPER_EXCHANGE = os.environ["Q4_DEDUPER_EXCHANGE"]
+Q4_DEDUPER_ROUTING_PREFIX = os.environ.get(
+    "Q4_DEDUPER_ROUTING_PREFIX", "q4_deduper"
 )
-Q4_PAIR_REDUCER_AMOUNT = int(os.environ["Q4_PAIR_REDUCER_AMOUNT"])
-Q4_ACCOUNT_DEDUPER_AMOUNT = int(os.environ["Q4_ACCOUNT_DEDUPER_AMOUNT"])
-Q4_ACCOUNT_DEDUPER_RESPONSE_QUEUE_PREFIX = os.environ.get(
-    "Q4_ACCOUNT_DEDUPER_RESPONSE_QUEUE_PREFIX",
-    "q4_account_deduper_response",
+Q4_AGGREGATOR_AMOUNT = int(os.environ["Q4_AGGREGATOR_AMOUNT"])
+Q4_DEDUPER_AMOUNT = int(os.environ["Q4_DEDUPER_AMOUNT"])
+Q4_DEDUPER_RESPONSE_QUEUE_PREFIX = os.environ.get(
+    "Q4_DEDUPER_RESPONSE_QUEUE_PREFIX",
+    "q4_deduper_response",
 )
 GATEWAY_Q4_QUEUE = os.environ["GATEWAY_Q4_QUEUE"]
-Q4_ACCOUNT_DEDUPER_BATCH_BYTES = int(
-    os.environ.get("Q4_ACCOUNT_DEDUPER_BATCH_BYTES", str(1024 * 1024))
+Q4_DEDUPER_BATCH_BYTES = int(
+    os.environ.get("Q4_DEDUPER_BATCH_BYTES", str(1024 * 1024))
 )
-Q4_ACCOUNT_DEDUPER_BATCH_MAX_ACCOUNTS = int(
-    os.environ.get("Q4_ACCOUNT_DEDUPER_BATCH_MAX_ACCOUNTS", "5000")
+Q4_DEDUPER_BATCH_MAX_ACCOUNTS = int(
+    os.environ.get("Q4_DEDUPER_BATCH_MAX_ACCOUNTS", "5000")
 )
 
-class Q4AccountDeduperWorker:
+class Q4DeduperWorker:
     """Deduplicates notebook Q4 account candidates and writes gateway batches."""
 
     def __init__(self):
         self._input = MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST,
-            Q4_ACCOUNT_DEDUPER_EXCHANGE,
+            Q4_DEDUPER_EXCHANGE,
             [self._input_routing_key()],
             queue_name=self._input_routing_key(),
             exclusive=False,
@@ -54,17 +54,17 @@ class Q4AccountDeduperWorker:
         self._gateway_output = self._new_gateway_output()
         self._leader_output = (
             self._new_leader_output()
-            if Q4_ACCOUNT_DEDUPER_AMOUNT > 1
+            if Q4_DEDUPER_AMOUNT > 1
             else None
         )
         self._response_consumer = (
             self._new_response_consumer()
-            if Q4_ACCOUNT_DEDUPER_AMOUNT > 1 and ID == 0
+            if Q4_DEDUPER_AMOUNT > 1 and ID == 0
             else None
         )
         self._gateway_eof_output = (
             self._new_gateway_output()
-            if Q4_ACCOUNT_DEDUPER_AMOUNT > 1 and ID == 0
+            if Q4_DEDUPER_AMOUNT > 1 and ID == 0
             else None
         )
 
@@ -72,8 +72,8 @@ class Q4AccountDeduperWorker:
         self._account_serializer = Q4AccountIdSerializer()
         self._control_serializer = ControlMessageSerializer()
         self._batcher = BatchBuffer(
-            Q4_ACCOUNT_DEDUPER_BATCH_BYTES,
-            Q4_ACCOUNT_DEDUPER_BATCH_MAX_ACCOUNTS,
+            Q4_DEDUPER_BATCH_BYTES,
+            Q4_DEDUPER_BATCH_MAX_ACCOUNTS,
         )
 
         self._lock = threading.Lock()
@@ -91,10 +91,10 @@ class Q4AccountDeduperWorker:
         self._stopped = False
 
     def _input_routing_key(self) -> str:
-        return f"{Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX}_{ID}"
+        return f"{Q4_DEDUPER_ROUTING_PREFIX}_{ID}"
 
     def _response_queue_name(self, worker_id: int = 0) -> str:
-        return f"{Q4_ACCOUNT_DEDUPER_RESPONSE_QUEUE_PREFIX}_{worker_id}"
+        return f"{Q4_DEDUPER_RESPONSE_QUEUE_PREFIX}_{worker_id}"
 
     def _new_gateway_output(self):
         return MessageMiddlewareQueueRabbitMQ(MOM_HOST, GATEWAY_Q4_QUEUE)
@@ -175,7 +175,7 @@ class Q4AccountDeduperWorker:
             )
         )
         logging.info(
-            "q4_account_deduper_forward_gateway_eof | id=%s | client_id=%s | "
+            "q4_deduper_forward_gateway_eof | id=%s | client_id=%s | "
             "expected_total=%s",
             ID,
             client_id,
@@ -203,7 +203,7 @@ class Q4AccountDeduperWorker:
             )
         )
         logging.info(
-            "q4_account_deduper_report_leader | id=%s | client_id=%s | "
+            "q4_deduper_report_leader | id=%s | client_id=%s | "
             "emitted_accounts=%s",
             ID,
             client_id,
@@ -222,7 +222,7 @@ class Q4AccountDeduperWorker:
         with self._lock:
             if client_id in self._closed_by_client:
                 logging.info(
-                    "q4_account_deduper_message_for_closed_client | id=%s | "
+                    "q4_deduper_message_for_closed_client | id=%s | "
                     "client_id=%s",
                     ID,
                     client_id,
@@ -241,7 +241,7 @@ class Q4AccountDeduperWorker:
 
         if should_log_progress(processed_total):
             logging.info(
-                "q4_account_deduper_data_batch | id=%s | client_id=%s | "
+                "q4_deduper_data_batch | id=%s | client_id=%s | "
                 "batch_size=%s | processed_total=%s | in_memory_unique=%s",
                 ID,
                 client_id,
@@ -260,7 +260,7 @@ class Q4AccountDeduperWorker:
                 return
             if control.sender_id in self._eofs_by_client[client_id]:
                 logging.info(
-                    "q4_account_deduper_duplicate_eof | id=%s | client_id=%s | "
+                    "q4_deduper_duplicate_eof | id=%s | client_id=%s | "
                     "pair_reducer_id=%s",
                     ID,
                     client_id,
@@ -271,18 +271,18 @@ class Q4AccountDeduperWorker:
             self._eofs_by_client[client_id].add(control.sender_id)
             eof_count = len(self._eofs_by_client[client_id])
             processed_total = self._processed_by_client.get(client_id, 0)
-            if eof_count >= Q4_PAIR_REDUCER_AMOUNT:
+            if eof_count >= Q4_AGGREGATOR_AMOUNT:
                 should_emit = True
 
         logging.info(
-            "q4_account_deduper_eof_received | id=%s | client_id=%s | "
+            "q4_deduper_eof_received | id=%s | client_id=%s | "
             "pair_reducer_id=%s | eof_count=%s | expected_eofs=%s | "
             "sender_expected_total=%s | processed_total=%s",
             ID,
             client_id,
             control.sender_id,
             eof_count,
-            Q4_PAIR_REDUCER_AMOUNT,
+            Q4_AGGREGATOR_AMOUNT,
             control.expected_total,
             processed_total,
         )
@@ -309,7 +309,7 @@ class Q4AccountDeduperWorker:
             self._batcher.discard(lambda k: k == client_id)
 
         logging.info(
-            "q4_account_deduper_emit_client | id=%s | client_id=%s | "
+            "q4_deduper_emit_client | id=%s | client_id=%s | "
             "processed_total=%s | emitted_accounts=%s",
             ID,
             client_id,
@@ -317,7 +317,7 @@ class Q4AccountDeduperWorker:
             emitted_accounts,
         )
 
-        if Q4_ACCOUNT_DEDUPER_AMOUNT == 1:
+        if Q4_DEDUPER_AMOUNT == 1:
             self._send_gateway_eof(client_id, emitted_accounts, output)
         else:
             self._report_to_leader(client_id, emitted_accounts)
@@ -338,7 +338,7 @@ class Q4AccountDeduperWorker:
                 return
             if control.sender_id in self._leader_reports_by_client[client_id]:
                 logging.info(
-                    "q4_account_deduper_duplicate_leader_report | id=%s | "
+                    "q4_deduper_duplicate_leader_report | id=%s | "
                     "client_id=%s | deduper_id=%s",
                     ID,
                     client_id,
@@ -353,21 +353,21 @@ class Q4AccountDeduperWorker:
             )
             self._leader_totals_by_client[client_id] = total
             report_count = len(self._leader_reports_by_client[client_id])
-            if report_count >= Q4_ACCOUNT_DEDUPER_AMOUNT:
+            if report_count >= Q4_DEDUPER_AMOUNT:
                 should_forward = True
                 self._leader_reports_by_client.pop(client_id, None)
                 self._leader_totals_by_client.pop(client_id, None)
                 self._leader_closed_by_client.add(client_id)
 
         logging.info(
-            "q4_account_deduper_leader_report | id=%s | client_id=%s | "
+            "q4_deduper_leader_report | id=%s | client_id=%s | "
             "deduper_id=%s | report_count=%s | expected_reports=%s | "
             "emitted_accounts=%s",
             ID,
             client_id,
             control.sender_id,
             report_count,
-            Q4_ACCOUNT_DEDUPER_AMOUNT,
+            Q4_DEDUPER_AMOUNT,
             control.expected_total,
         )
 
@@ -387,7 +387,7 @@ class Q4AccountDeduperWorker:
                 )
             ack()
         except Exception:
-            logging.exception("q4_account_deduper_error | id=%s", ID)
+            logging.exception("q4_deduper_error | id=%s", ID)
             nack()
 
     def _on_leader_message(self, raw, ack, nack):
@@ -404,7 +404,7 @@ class Q4AccountDeduperWorker:
             )
             ack()
         except Exception:
-            logging.exception("q4_account_deduper_leader_error | id=%s", ID)
+            logging.exception("q4_deduper_leader_error | id=%s", ID)
             nack()
 
     def _start_response_consumer(self) -> None:
@@ -419,14 +419,14 @@ class Q4AccountDeduperWorker:
 
     def start(self) -> None:
         logging.info(
-            "q4_account_deduper_start | id=%s | input_exchange=%s | input_key=%s | "
-            "pair_reducer_amount=%s | account_deduper_amount=%s | "
+            "q4_deduper_start | id=%s | input_exchange=%s | input_key=%s | "
+            "aggregator_amount=%s | deduper_amount=%s | "
             "gateway_queue=%s",
             ID,
-            Q4_ACCOUNT_DEDUPER_EXCHANGE,
+            Q4_DEDUPER_EXCHANGE,
             self._input_routing_key(),
-            Q4_PAIR_REDUCER_AMOUNT,
-            Q4_ACCOUNT_DEDUPER_AMOUNT,
+            Q4_AGGREGATOR_AMOUNT,
+            Q4_DEDUPER_AMOUNT,
             GATEWAY_Q4_QUEUE,
         )
         self._start_response_consumer()
@@ -441,7 +441,7 @@ class Q4AccountDeduperWorker:
         if self._stopped:
             return
         self._stopped = True
-        logging.info("q4_account_deduper_shutdown | id=%s", ID)
+        logging.info("q4_deduper_shutdown | id=%s", ID)
         self._input.request_stop_consuming()
         if self._response_consumer is not None:
             self._response_consumer.request_stop_consuming()
@@ -463,7 +463,7 @@ class Q4AccountDeduperWorker:
                 resource.close()
             except Exception as e:
                 logging.warning(
-                    "q4_account_deduper_close_error | id=%s | error=%s",
+                    "q4_deduper_close_error | id=%s | error=%s",
                     ID,
                     e,
                 )

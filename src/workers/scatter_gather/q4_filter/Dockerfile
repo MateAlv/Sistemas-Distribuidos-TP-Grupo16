@@ -3,6 +3,6 @@ FROM python:3-alpine
 RUN pip3 install pika
 
 COPY common ./common
-COPY workers/q4_account_deduper .
+COPY workers/scatter_gather/q4_filter .
 
 ENTRYPOINT ["python3", "main.py"]

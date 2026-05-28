@@ -30,33 +30,33 @@ from common.middleware.middleware_rabbitmq import (
 ID = int(os.environ["ID"])
 LEADER_ID = 0
 MOM_HOST = os.environ["MOM_HOST"]
-INPUT_QUEUE = os.environ.get("INPUT_QUEUE", "q4_source_prefilter_input")
-INPUT_EXCHANGE = os.environ.get("Q4_SOURCE_PREFILTER_INPUT_EXCHANGE")
+INPUT_QUEUE = os.environ.get("INPUT_QUEUE", "q4_filter_input")
+INPUT_EXCHANGE = os.environ.get("Q4_FILTER_INPUT_EXCHANGE")
 INPUT_ROUTING_PREFIX = os.environ.get(
-    "Q4_SOURCE_PREFILTER_INPUT_ROUTING_PREFIX", "q4_source_prefilter"
+    "Q4_FILTER_INPUT_ROUTING_PREFIX", "q4_filter"
 )
-Q4_SOURCE_PREFILTER_AMOUNT = int(os.environ.get("Q4_SOURCE_PREFILTER_AMOUNT", "1"))
-Q4_SOURCE_PREFILTER_PREFIX = os.environ.get(
-    "Q4_SOURCE_PREFILTER_PREFIX", "q4_source_prefilter"
+Q4_FILTER_AMOUNT = int(os.environ.get("Q4_FILTER_AMOUNT", "1"))
+Q4_FILTER_PREFIX = os.environ.get(
+    "Q4_FILTER_PREFIX", "q4_filter"
 )
 CONTROL_EXCHANGE = os.environ.get(
-    "Q4_SOURCE_PREFILTER_CONTROL_EXCHANGE",
-    f"{Q4_SOURCE_PREFILTER_PREFIX}_control",
+    "Q4_FILTER_CONTROL_EXCHANGE",
+    f"{Q4_FILTER_PREFIX}_control",
 )
 RESPONSE_QUEUE_PREFIX = os.environ.get(
-    "Q4_SOURCE_PREFILTER_RESPONSE_QUEUE_PREFIX",
-    f"{Q4_SOURCE_PREFILTER_PREFIX}_response",
+    "Q4_FILTER_RESPONSE_QUEUE_PREFIX",
+    f"{Q4_FILTER_PREFIX}_response",
 )
-Q4_EDGE_STORE_EXCHANGE = os.environ["Q4_EDGE_STORE_EXCHANGE"]
-Q4_EDGE_STORE_AMOUNT = int(os.environ["Q4_EDGE_STORE_AMOUNT"])
-Q4_EDGE_STORE_ROUTING_PREFIX = os.environ.get(
-    "Q4_EDGE_STORE_ROUTING_PREFIX", "q4_edge_store"
+Q4_SUM_EXCHANGE = os.environ["Q4_SUM_EXCHANGE"]
+Q4_SUM_AMOUNT = int(os.environ["Q4_SUM_AMOUNT"])
+Q4_SUM_ROUTING_PREFIX = os.environ.get(
+    "Q4_SUM_ROUTING_PREFIX", "q4_sum"
 )
-Q4_SOURCE_PREFILTER_BATCH_BYTES = int(
-    os.environ.get("Q4_SOURCE_PREFILTER_BATCH_BYTES", str(1024 * 1024))
+Q4_FILTER_BATCH_BYTES = int(
+    os.environ.get("Q4_FILTER_BATCH_BYTES", str(1024 * 1024))
 )
-Q4_SOURCE_PREFILTER_BATCH_MAX_EDGES = int(
-    os.environ.get("Q4_SOURCE_PREFILTER_BATCH_MAX_EDGES", "5000")
+Q4_FILTER_BATCH_MAX_EDGES = int(
+    os.environ.get("Q4_FILTER_BATCH_MAX_EDGES", "5000")
 )
 
 
@@ -67,7 +67,7 @@ class _SourceState:
     pending: list[Q4TransactionEdge] = field(default_factory=list)
 
 
-class Q4SourcePrefilterWorker:
+class Q4FilterWorker:
     """Notebook-exact Q4 source prefilter.
 
     The worker owns complete sources through upstream sharding. It keeps a capped
@@ -79,7 +79,7 @@ class Q4SourcePrefilterWorker:
         self._input = self._new_input()
         self._edge_store_output = self._new_edge_store_output()
         self._control_sender = None
-        if Q4_SOURCE_PREFILTER_AMOUNT > 1:
+        if Q4_FILTER_AMOUNT > 1:
             self._control_sender = MessageMiddlewareExchangeRabbitMQ(
                 MOM_HOST,
                 CONTROL_EXCHANGE,
@@ -92,8 +92,8 @@ class Q4SourcePrefilterWorker:
         self._counted_edge_serializer = Q4CountedEdgeSerializer()
         self._control_serializer = ControlMessageSerializer()
         self._batcher = BatchBuffer(
-            Q4_SOURCE_PREFILTER_BATCH_BYTES,
-            Q4_SOURCE_PREFILTER_BATCH_MAX_EDGES,
+            Q4_FILTER_BATCH_BYTES,
+            Q4_FILTER_BATCH_MAX_EDGES,
         )
 
         self._lock = threading.Lock()
@@ -123,18 +123,18 @@ class Q4SourcePrefilterWorker:
                 queue_name=f"{INPUT_ROUTING_PREFIX}_{ID}",
                 exclusive=False,
             )
-        if Q4_SOURCE_PREFILTER_AMOUNT > 1:
+        if Q4_FILTER_AMOUNT > 1:
             logging.warning(
-                "q4_source_prefilter_queue_input_with_multiple_workers | "
+                "q4_filter_queue_input_with_multiple_workers | "
                 "amount=%s | exact_source_ownership_requires_input_exchange",
-                Q4_SOURCE_PREFILTER_AMOUNT,
+                Q4_FILTER_AMOUNT,
             )
         return MessageMiddlewareQueueRabbitMQ(MOM_HOST, INPUT_QUEUE)
 
     def _new_edge_store_output(self):
         return MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST,
-            Q4_EDGE_STORE_EXCHANGE,
+            Q4_SUM_EXCHANGE,
             [],
         )
 
@@ -160,12 +160,12 @@ class Q4SourcePrefilterWorker:
         )
 
     def _routing_key(self, partition: int) -> str:
-        return f"{Q4_EDGE_STORE_ROUTING_PREFIX}_{partition}"
+        return f"{Q4_SUM_ROUTING_PREFIX}_{partition}"
 
     def _edge_store_partition(self, account_id: Q4AccountId) -> int:
         return partition_for_parts(
             (account_id.bank_id, account_id.account),
-            Q4_EDGE_STORE_AMOUNT,
+            Q4_SUM_AMOUNT,
         )
 
     def _edge_from_transaction(self, tx) -> Q4TransactionEdge:
@@ -293,7 +293,7 @@ class Q4SourcePrefilterWorker:
         with self._lock:
             if client_id in self._closed_by_client:
                 logging.info(
-                    "q4_source_prefilter_message_for_closed_client | id=%s | "
+                    "q4_filter_message_for_closed_client | id=%s | "
                     "client_id=%s",
                     ID,
                     client_id,
@@ -315,7 +315,7 @@ class Q4SourcePrefilterWorker:
 
         if should_log_progress(processed_total):
             logging.info(
-                "q4_source_prefilter_data_batch | id=%s | client_id=%s | "
+                "q4_filter_data_batch | id=%s | client_id=%s | "
                 "batch_size=%s | forwarded_in_batch=%s | processed_total=%s | "
                 "forwarded_total=%s | pending_eof=%s",
                 ID,
@@ -337,14 +337,14 @@ class Q4SourcePrefilterWorker:
                 forwarded_count=forwarded_count,
             )
 
-        if Q4_SOURCE_PREFILTER_AMOUNT == 1:
+        if Q4_FILTER_AMOUNT == 1:
             self._try_forward_single_worker_eof(client_id, output)
 
     def _handle_upstream_eof(self, client_id: int, payload: bytes) -> None:
         control = self._control_serializer.deserialize(payload)
         expected_total = control.expected_total
 
-        if Q4_SOURCE_PREFILTER_AMOUNT == 1:
+        if Q4_FILTER_AMOUNT == 1:
             with self._lock:
                 if client_id in self._closed_by_client:
                     return
@@ -357,7 +357,7 @@ class Q4SourcePrefilterWorker:
                 return
             if client_id in self._pending_eof_by_client:
                 logging.info(
-                    "q4_source_prefilter_duplicate_upstream_eof | id=%s | "
+                    "q4_filter_duplicate_upstream_eof | id=%s | "
                     "client_id=%s",
                     ID,
                     client_id,
@@ -372,7 +372,7 @@ class Q4SourcePrefilterWorker:
                 self._leader_expected_by_client[client_id] = expected_total
 
         logging.info(
-            "q4_source_prefilter_upstream_eof | id=%s | client_id=%s | "
+            "q4_filter_upstream_eof | id=%s | client_id=%s | "
             "expected_total=%s | processed_snapshot=%s | forwarded_snapshot=%s",
             ID,
             client_id,
@@ -469,7 +469,7 @@ class Q4SourcePrefilterWorker:
 
             if should_flush:
                 logging.info(
-                    "q4_source_prefilter_flush_ready | id=%s | client_id=%s | "
+                    "q4_filter_flush_ready | id=%s | client_id=%s | "
                     "processed_total=%s | expected_total=%s",
                     ID,
                     client_id,
@@ -480,7 +480,7 @@ class Q4SourcePrefilterWorker:
 
             ack()
         except Exception:
-            logging.exception("q4_source_prefilter_response_error | id=%s", ID)
+            logging.exception("q4_filter_response_error | id=%s", ID)
             nack()
 
     def _handle_flush_order(self, message: bytes, ack, nack, output=None) -> None:
@@ -494,7 +494,7 @@ class Q4SourcePrefilterWorker:
             self._flush_and_close_client(client_id, output)
             ack()
         except Exception:
-            logging.exception("q4_source_prefilter_control_error | id=%s", ID)
+            logging.exception("q4_filter_control_error | id=%s", ID)
             nack()
 
     def _forward_eof_to_edge_store(
@@ -504,7 +504,7 @@ class Q4SourcePrefilterWorker:
         output=None,
     ) -> None:
         output = output or self._edge_store_output
-        for partition in range(Q4_EDGE_STORE_AMOUNT):
+        for partition in range(Q4_SUM_AMOUNT):
             expected_total = int(counts_by_partition.get(partition, 0))
             output.send(
                 self._packet(
@@ -519,7 +519,7 @@ class Q4SourcePrefilterWorker:
                 routing_key=self._routing_key(partition),
             )
             logging.info(
-                "q4_source_prefilter_forward_eof | id=%s | client_id=%s | "
+                "q4_filter_forward_eof | id=%s | client_id=%s | "
                 "edge_store_partition=%s | expected_total=%s",
                 ID,
                 client_id,
@@ -558,7 +558,7 @@ class Q4SourcePrefilterWorker:
                 raise ValueError(f"unexpected q4 source prefilter message: {msg_type}")
             ack()
         except Exception:
-            logging.exception("q4_source_prefilter_error | id=%s", ID)
+            logging.exception("q4_filter_error | id=%s", ID)
             nack()
 
     def _start_control_consumer(self) -> None:
@@ -594,16 +594,16 @@ class Q4SourcePrefilterWorker:
 
     def start(self) -> None:
         logging.info(
-            "q4_source_prefilter_start | id=%s | amount=%s | input_queue=%s | "
-            "input_exchange=%s | edge_store_exchange=%s | edge_store_amount=%s",
+            "q4_filter_start | id=%s | amount=%s | input_queue=%s | "
+            "input_exchange=%s | edge_store_exchange=%s | sum_amount=%s",
             ID,
-            Q4_SOURCE_PREFILTER_AMOUNT,
+            Q4_FILTER_AMOUNT,
             INPUT_QUEUE,
             INPUT_EXCHANGE,
-            Q4_EDGE_STORE_EXCHANGE,
-            Q4_EDGE_STORE_AMOUNT,
+            Q4_SUM_EXCHANGE,
+            Q4_SUM_AMOUNT,
         )
-        if Q4_SOURCE_PREFILTER_AMOUNT > 1:
+        if Q4_FILTER_AMOUNT > 1:
             self._control_thread = threading.Thread(target=self._start_control_consumer)
             self._control_thread.start()
             if ID == LEADER_ID:
@@ -627,7 +627,7 @@ class Q4SourcePrefilterWorker:
         if self._stopped:
             return
         self._stopped = True
-        logging.info("q4_source_prefilter_shutdown | id=%s", ID)
+        logging.info("q4_filter_shutdown | id=%s", ID)
         self._input.request_stop_consuming()
         if self._control_consumer is not None:
             self._control_consumer.request_stop_consuming()
@@ -645,7 +645,7 @@ class Q4SourcePrefilterWorker:
                 resource.close()
             except Exception as e:
                 logging.warning(
-                    "q4_source_prefilter_close_error | id=%s | error=%s",
+                    "q4_filter_close_error | id=%s | error=%s",
                     ID,
                     e,
                 )

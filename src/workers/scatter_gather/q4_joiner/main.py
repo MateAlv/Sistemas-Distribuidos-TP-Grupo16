@@ -1,12 +1,12 @@
 import logging
 import signal
 
-from linker import ScatterGatherLinker
+from joiner import Q4JoinerWorker
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO)
-    worker = ScatterGatherLinker()
+    worker = Q4JoinerWorker()
     signal.signal(signal.SIGTERM, lambda *_: worker.handle_sigterm())
     try:
         worker.start()

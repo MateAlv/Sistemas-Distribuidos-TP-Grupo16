@@ -1,12 +1,12 @@
 import logging
 import signal
 
-from source_prefilter import Q4SourcePrefilterWorker
+from sums import Q4SumWorker
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO)
-    worker = Q4SourcePrefilterWorker()
+    worker = Q4SumWorker()
     signal.signal(signal.SIGTERM, lambda *_: worker.handle_sigterm())
     try:
         worker.start()
