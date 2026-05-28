@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass, field
 
 from common import middleware
+from common.bank_ids import notebook_bank_id
 from common.domain.account import Q2BankMaxResult
 from common.domain.partial_result import Q2BankMaxPartial
 from common.logging_utils import should_log_progress
@@ -25,18 +26,9 @@ from workers.common.line_splitter import parse_csv_line
 MAX_CLOSED_CLIENTS = 500
 
 
-def _normalize_bank_id(value: str) -> str:
-    value = (value or "").strip()
-    if not value:
-        return ""
-    if value.isdigit():
-        return str(int(value))
-    return value.lstrip("0") or "0"
-
-
 @dataclass
 class ClientState:
-    bank_names: dict[str, str] = field(default_factory=dict)
+    bank_names: dict[str, list[str]] = field(default_factory=dict)
     q2_results: dict[str, Q2BankMaxPartial] = field(default_factory=dict)
     q2_data_count: int = 0
     q2_expected_total: int | None = None
@@ -216,7 +208,14 @@ class BankNameJoinerWorker:
 
                 if msg_type == MessageType.DATA:
                     partial = Q2BankMaxPartialSerializer.deserialize(payload)
-                    state.q2_results[partial.bank_id] = partial
+                    bank_id = notebook_bank_id(partial.bank_id)
+                    if bank_id != partial.bank_id:
+                        partial = Q2BankMaxPartial(
+                            bank_id=bank_id,
+                            from_account=partial.from_account,
+                            amount=partial.amount,
+                        )
+                    state.q2_results[bank_id] = partial
                     state.q2_data_count += 1
                     if should_log_progress(state.q2_data_count):
                         logging.info(
@@ -265,7 +264,9 @@ class BankNameJoinerWorker:
                         return
                     state = self._state_for(client_id)
                     for bank_id, bank_name in mappings:
-                        state.bank_names.setdefault(bank_id, bank_name)
+                        bank_names = state.bank_names.setdefault(bank_id, [])
+                        if bank_name not in bank_names:
+                            bank_names.append(bank_name)
                     state.accounts_batch_count += 1
                     if should_log_progress(state.accounts_batch_count):
                         logging.info(
@@ -340,7 +341,7 @@ class BankNameJoinerWorker:
             fields = parse_csv_line(clean)
             if len(fields) <= max(bank_id_idx, bank_name_idx):
                 continue
-            bank_id = _normalize_bank_id(fields[bank_id_idx])
+            bank_id = notebook_bank_id(fields[bank_id_idx])
             bank_name = (fields[bank_name_idx] or "").strip()
             if not bank_id:
                 continue
@@ -361,21 +362,22 @@ class BankNameJoinerWorker:
         missing = 0
         emitted = 0
         for bank_id, partial in state.q2_results.items():
-            normalized = _normalize_bank_id(bank_id)
-            bank_name = state.bank_names.get(normalized, "")
-            if not bank_name:
+            bank_names = state.bank_names.get(bank_id, [])
+            if not bank_names:
                 missing += 1
-            result = Q2BankMaxResult(
-                bank_id=partial.bank_id,
-                from_account=partial.from_account,
-                bank_name=bank_name,
-                amount=partial.amount,
-            )
-            payload = Q2BankMaxResultSerializer.serialize(result)
-            output_queue.send(
-                self._packet(MessageType.DATA, client_id, payload)
-            )
-            emitted += 1
+                continue
+            for bank_name in bank_names:
+                result = Q2BankMaxResult(
+                    bank_id=partial.bank_id,
+                    from_account=partial.from_account,
+                    bank_name=bank_name,
+                    amount=partial.amount,
+                )
+                payload = Q2BankMaxResultSerializer.serialize(result)
+                output_queue.send(
+                    self._packet(MessageType.DATA, client_id, payload)
+                )
+                emitted += 1
 
         control_payload = self._control_serializer.serialize(
             ControlMessage(

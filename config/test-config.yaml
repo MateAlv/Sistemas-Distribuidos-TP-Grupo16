@@ -13,7 +13,7 @@ settings:
   filter_prefetch_count: 50
 
 workers:
-  file_splitters: 3
+  file_splitters: 4
   file_ingestors: 6
   filters:
     usd: 6

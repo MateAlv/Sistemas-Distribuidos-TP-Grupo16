@@ -38,14 +38,15 @@ def test_q2_processor_keeps_max_transaction_per_bank():
     processor.process(transaction(from_bank="001", from_account="HIGH", amount=25.0))
     processor.process(transaction(from_bank="002", from_account="OTHER", amount=7.0))
     processor.process(transaction(from_bank="001", from_account="TIE", amount=25.0))
+    processor.process(transaction(from_bank="1", from_account="PANDAS", amount=30.0))
 
-    assert processor.max_by_bank["001"] == {
-        "bank_id": "001",
-        "from_account": "HIGH",
-        "amount": 25.0,
+    assert processor.max_by_bank["1"] == {
+        "bank_id": "1",
+        "from_account": "PANDAS",
+        "amount": 30.0,
     }
-    assert processor.max_by_bank["002"] == {
-        "bank_id": "002",
+    assert processor.max_by_bank["2"] == {
+        "bank_id": "2",
         "from_account": "OTHER",
         "amount": 7.0,
     }
@@ -94,13 +95,13 @@ def test_q2_processor_emits_serialized_partials_by_bank():
         for key, payload in partials
     }
 
-    assert set(decoded_by_key) == {"001", "002"}
-    assert decoded_by_key["001"].bank_id == "001"
-    assert decoded_by_key["001"].from_account == "HIGH"
-    assert decoded_by_key["001"].amount == 25.0
-    assert decoded_by_key["002"].bank_id == "002"
-    assert decoded_by_key["002"].from_account == "OTHER"
-    assert decoded_by_key["002"].amount == 7.0
+    assert set(decoded_by_key) == {"1", "2"}
+    assert decoded_by_key["1"].bank_id == "1"
+    assert decoded_by_key["1"].from_account == "HIGH"
+    assert decoded_by_key["1"].amount == 25.0
+    assert decoded_by_key["2"].bank_id == "2"
+    assert decoded_by_key["2"].from_account == "OTHER"
+    assert decoded_by_key["2"].amount == 7.0
 
 
 def test_q2_processor_emits_single_late_transaction_partial():
@@ -113,8 +114,8 @@ def test_q2_processor_emits_single_late_transaction_partial():
     assert len(partials) == 1
     key, payload = partials[0]
     decoded = Q2BankMaxPartialSerializer.deserialize(payload)
-    assert key == "001"
-    assert decoded.bank_id == "001"
+    assert key == "1"
+    assert decoded.bank_id == "1"
     assert decoded.from_account == "ACC1"
     assert decoded.amount == 8.5
 
