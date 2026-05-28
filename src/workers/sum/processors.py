@@ -29,9 +29,10 @@ class Q2SumProcessor(SumProcessor):
             "bank_id": bank_id,
             "from_account": transaction.from_account,
             "amount": transaction.amount,
+            "row_number": int(getattr(transaction, "row_number", 0) or 0),
         }
 
-        if current is None or candidate["amount"] > current["amount"]:
+        if _is_better_q2_candidate(candidate, current):
             self.max_by_bank[bank_id] = candidate
 
     def partials(self):
@@ -47,6 +48,7 @@ class Q2SumProcessor(SumProcessor):
                     "bank_id": notebook_bank_id(transaction.from_bank),
                     "from_account": transaction.from_account,
                     "amount": transaction.amount,
+                    "row_number": int(getattr(transaction, "row_number", 0) or 0),
                 }
             )
         ]
@@ -56,11 +58,24 @@ class Q2SumProcessor(SumProcessor):
             bank_id=candidate["bank_id"],
             from_account=candidate["from_account"],
             amount=candidate["amount"],
+            row_number=candidate.get("row_number", 0),
         )
         return (
             partial.bank_id,
             Q2BankMaxPartialSerializer.serialize(partial),
         )
+
+
+def _is_better_q2_candidate(candidate, current) -> bool:
+    if current is None:
+        return True
+    if candidate["amount"] != current["amount"]:
+        return candidate["amount"] > current["amount"]
+    candidate_row = int(candidate.get("row_number", 0) or 0)
+    current_row = int(current.get("row_number", 0) or 0)
+    if candidate_row and current_row:
+        return candidate_row < current_row
+    return False
 
 
 class Q3SumProcessor(SumProcessor):

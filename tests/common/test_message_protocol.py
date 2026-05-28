@@ -16,7 +16,8 @@ def test_transaction_serialization_integrity():
         to_account="101",
         amount=50.5,
         currency="US Dollar",
-        format="Wire"
+        format="Wire",
+        row_number=42,
     )
 
     data = TransactionSerializer.serialize(tx_original)
@@ -26,6 +27,7 @@ def test_transaction_serialization_integrity():
     assert tx_recovered.amount == tx_original.amount
     assert tx_recovered.currency == tx_original.currency
     assert tx_recovered.from_bank == tx_original.from_bank
+    assert tx_recovered.row_number == tx_original.row_number
 
 
 def test_transaction_serialization_accepts_small_dataset_currency():

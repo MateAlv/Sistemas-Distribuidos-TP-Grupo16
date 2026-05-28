@@ -32,6 +32,15 @@ workers:
     linkers: 1
     detectors: 6
     min_intermediaries: 5
+  q4:
+    source_prefilters: 3
+    edge_stores: 3
+    block_joiners: 6
+    pair_reducers: 6
+    account_dedupers: 3
+    hot_pair_threshold: 1000000
+    hot_a_buckets: 16
+    hot_b_buckets: 16
 
 clients: 1
 client_accounts:

@@ -6,6 +6,7 @@ class Q2BankMaxPartial:
     bank_id: str
     from_account: str
     amount: float
+    row_number: int = 0
 
 
 @dataclass(frozen=True)

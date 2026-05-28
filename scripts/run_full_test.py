@@ -20,7 +20,7 @@ import reference_results as ref
 ROOT = Path(__file__).resolve().parents[1]
 PRETTY_LOGS = ROOT / "scripts" / "pretty_logs.py"
 
-DATASET = os.environ.get("DATASET", "LI-Small")
+DATASET = os.environ.get("DATASET", "HI-Medium")
 DATASET_ROOT = os.environ.get("DATASET_ROOT", "data/datasets")
 LOG_COLOR = os.environ.get("LOG_COLOR", "always")
 TEST_PROJECT = os.environ.get("TEST_PROJECT", "distribuidos-test")

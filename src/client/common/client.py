@@ -227,7 +227,7 @@ class Client:
             f1.write("From Bank,Account,To Bank,Account.1,Amount Paid\n")
             f2.write("From Bank,Account,Bank Name,Amount Paid\n")
             f3.write("From Bank,Account,Payment Format,Amount Paid\n")
-            f4.write("from_account,to_account\n")
+            f4.write("Bank,Account\n")
             f5.write("count\n")
 
             for line in sender.iter_result_lines(config.result_line_max_bytes):

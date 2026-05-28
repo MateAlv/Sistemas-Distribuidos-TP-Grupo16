@@ -21,13 +21,13 @@ class TransactionRowParser:
         self.header = tuple(header)
         self.columns = _resolve_transaction_columns(self.header)
 
-    def parse_line(self, line: bytes) -> Transaction:
+    def parse_line(self, line: bytes, row_number: int = 0) -> Transaction:
         clean_line = line[:-1] if line.endswith(b"\r") else line
         if not clean_line:
             raise ValueError("empty transaction line")
-        return self.parse_fields(parse_csv_line(clean_line))
+        return self.parse_fields(parse_csv_line(clean_line), row_number=row_number)
 
-    def parse_fields(self, fields: list[str]) -> Transaction:
+    def parse_fields(self, fields: list[str], row_number: int = 0) -> Transaction:
         if len(fields) != len(self.header):
             raise ValueError(
                 f"transaction row has {len(fields)} fields, expected {len(self.header)}"
@@ -43,6 +43,7 @@ class TransactionRowParser:
             amount=float(_required(fields, columns.amount)),
             currency=_required(fields, columns.currency),
             format=_required(fields, columns.format),
+            row_number=row_number,
         )
 
 

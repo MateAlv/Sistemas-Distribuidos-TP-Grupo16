@@ -11,7 +11,7 @@ class TransactionSerializer:
     FORMAT = (
         f"!{DATE_SIZE}s{BANK_SIZE}s{ACCOUNT_SIZE}s"
         f"{BANK_SIZE}s{ACCOUNT_SIZE}s"
-        f"d{CURRENCY_SIZE}s{FORMAT_SIZE}s"
+        f"d{CURRENCY_SIZE}s{FORMAT_SIZE}sQ"
     )
     SIZE = struct.calcsize(FORMAT)
 
@@ -26,7 +26,8 @@ class TransactionSerializer:
             cls._encode_fixed(tx.to_account, cls.ACCOUNT_SIZE, "to_account"),
             float(tx.amount),
             cls._encode_fixed(tx.currency, cls.CURRENCY_SIZE, "currency"),
-            cls._encode_fixed(tx.format, cls.FORMAT_SIZE, "format")
+            cls._encode_fixed(tx.format, cls.FORMAT_SIZE, "format"),
+            int(getattr(tx, "row_number", 0) or 0),
         )
 
     @classmethod
@@ -40,7 +41,8 @@ class TransactionSerializer:
             to_account=cls._decode_fixed(vals[4]),
             amount=vals[5],
             currency=cls._decode_fixed(vals[6]),
-            format=cls._decode_fixed(vals[7])
+            format=cls._decode_fixed(vals[7]),
+            row_number=vals[8],
         )
 
     @classmethod

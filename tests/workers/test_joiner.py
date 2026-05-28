@@ -151,6 +151,44 @@ def test_q2_reduces_global_max_across_shards():
     assert ctrl.expected_total == 3
 
 
+def test_q2_reduces_equal_max_by_earliest_row_across_shards():
+    worker = _make_worker(C_Q2, aggregation_amount=2)
+    out = worker.output_queue
+
+    _send_data(
+        worker,
+        4,
+        Q2BankMaxPartialSerializer.serialize(
+            Q2BankMaxPartial(
+                bank_id="BANK_X",
+                from_account="later",
+                amount=100.0,
+                row_number=20,
+            )
+        ),
+    )
+    _send_eof(worker, 4)
+    _send_data(
+        worker,
+        4,
+        Q2BankMaxPartialSerializer.serialize(
+            Q2BankMaxPartial(
+                bank_id="BANK_X",
+                from_account="earlier",
+                amount=100.0,
+                row_number=10,
+            )
+        ),
+    )
+    _send_eof(worker, 4)
+
+    result = Q2BankMaxPartialSerializer.deserialize(
+        worker.internal_protocol.unpack_packet(out.sent[0])[2]
+    )
+    assert result.from_account == "earlier"
+    assert result.row_number == 10
+
+
 # --- idempotencia ---
 
 def test_duplicate_eof_and_late_data_ignored():

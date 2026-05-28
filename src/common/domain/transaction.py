@@ -3,7 +3,8 @@ import functools
 @functools.total_ordering
 class Transaction:
     def __init__(self, date, from_bank, from_account, 
-                 to_bank, to_account, amount, currency, format):
+                 to_bank, to_account, amount, currency, format,
+                 row_number=0):
         self.date = date
         self.from_bank = from_bank
         self.from_account = from_account
@@ -12,6 +13,7 @@ class Transaction:
         self.amount = amount
         self.currency = currency
         self.format = format
+        self.row_number = int(row_number or 0)
     
     def __lt__(self, other):
         if not isinstance(other, Transaction):
@@ -27,7 +29,8 @@ class Transaction:
         return f"""
         Transaction(date={self.date}, from_account={self.from_account}, 
         to_account={self.to_account}, amount={self.amount}, 
-        currency={self.currency}, format={self.format})
+        currency={self.currency}, format={self.format},
+        row_number={self.row_number})
         """
     
     def is_in_date_range(self, start_date, end_date):

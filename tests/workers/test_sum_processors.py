@@ -18,6 +18,7 @@ def transaction(
     from_account="ACC1",
     amount=10.0,
     payment_format="ACH",
+    row_number=0,
 ) -> Transaction:
     return Transaction(
         date="2022/09/01 00:00",
@@ -28,6 +29,7 @@ def transaction(
         amount=amount,
         currency="US Dollar",
         format=payment_format,
+        row_number=row_number,
     )
 
 
@@ -44,12 +46,38 @@ def test_q2_processor_keeps_max_transaction_per_bank():
         "bank_id": "1",
         "from_account": "PANDAS",
         "amount": 30.0,
+        "row_number": 0,
     }
     assert processor.max_by_bank["2"] == {
         "bank_id": "2",
         "from_account": "OTHER",
         "amount": 7.0,
+        "row_number": 0,
     }
+
+
+def test_q2_processor_uses_earliest_row_to_break_max_ties():
+    processor = Q2SumProcessor()
+
+    processor.process(
+        transaction(
+            from_bank="001",
+            from_account="LATER",
+            amount=25.0,
+            row_number=20,
+        )
+    )
+    processor.process(
+        transaction(
+            from_bank="001",
+            from_account="EARLIER",
+            amount=25.0,
+            row_number=10,
+        )
+    )
+
+    assert processor.max_by_bank["1"]["from_account"] == "EARLIER"
+    assert processor.max_by_bank["1"]["row_number"] == 10
 
 
 def test_q3_processor_accumulates_amount_and_count_by_payment_format():
@@ -99,6 +127,7 @@ def test_q2_processor_emits_serialized_partials_by_bank():
     assert decoded_by_key["1"].bank_id == "1"
     assert decoded_by_key["1"].from_account == "HIGH"
     assert decoded_by_key["1"].amount == 25.0
+    assert decoded_by_key["1"].row_number == 0
     assert decoded_by_key["2"].bank_id == "2"
     assert decoded_by_key["2"].from_account == "OTHER"
     assert decoded_by_key["2"].amount == 7.0
@@ -118,6 +147,7 @@ def test_q2_processor_emits_single_late_transaction_partial():
     assert decoded.bank_id == "1"
     assert decoded.from_account == "ACC1"
     assert decoded.amount == 8.5
+    assert decoded.row_number == 0
 
 
 def test_q3_processor_emits_serialized_partials_by_payment_format():

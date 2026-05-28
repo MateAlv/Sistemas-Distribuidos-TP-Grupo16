@@ -130,7 +130,11 @@ class MessageMiddlewareQueueRabbitMQ(_RabbitMQBase, MessageMiddlewareQueue):
         self._queue_name = queue_name
         self._channel.queue_declare(queue=queue_name, durable=_DURABLE)
 
-    def send(self, message):
+    def send(self, message, routing_key=None):
+        if routing_key is not None:
+            raise MessageMiddlewareMessageError(
+                "queue publishers do not accept routing_key"
+            )
         try:
             self._channel.basic_publish(
                 exchange="",
@@ -173,9 +177,13 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
         self._routing_keys = routing_keys
 
     
-    def send(self, message):
+    def send(self, message, routing_key=None):
         try:
             if self._exchange_type == 'fanout':
+                if routing_key is not None:
+                    raise MessageMiddlewareMessageError(
+                        "fanout exchange publishers do not accept routing_key"
+                    )
                 self._channel.basic_publish(
                     exchange=self._exchange_name,
                     routing_key='',
@@ -184,10 +192,11 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
                 )
                 self._record_flow("publish", message, "")
             else:
-                if not self._routing_keys:
+                routing_keys = [routing_key] if routing_key is not None else self._routing_keys
+                if not routing_keys:
                     raise MessageMiddlewareMessageError("No routing keys provided")
 
-                for key in self._routing_keys:
+                for key in routing_keys:
                     self._channel.basic_publish(
                         exchange=self._exchange_name,
                         routing_key=key,

@@ -24,7 +24,7 @@ from common.middleware.middleware_rabbitmq import (
 from common.message_protocol.internal import InternalProtocol, TransactionSerializer
 from common.message_protocol.internal.common import MessageType
 from common.message_protocol.internal.partial_result_serializer import Q2BankMaxResultSerializer
-from common.message_protocol.internal.scatter_gather_serializer import ScatterGatherResultSerializer
+from common.message_protocol.internal.scatter_gather_serializer import Q4AccountIdSerializer
 from common.message_protocol.internal.aggregation_serializer import AggregationSerializer
 
 
@@ -535,12 +535,13 @@ class Gateway:
 
     @staticmethod
     def _q4_csv_lines(payload: bytes):
-        yield Gateway._q4_csv(payload)
+        for account in Q4AccountIdSerializer.deserialize_batch(payload):
+            yield f"{account.bank_id},{account.account}"
 
     @staticmethod
     def _q4_csv(payload: bytes) -> str:
-        result = ScatterGatherResultSerializer.deserialize(payload)
-        return f"{result.from_account},{result.to_account}"
+        account = Q4AccountIdSerializer.deserialize(payload)
+        return f"{account.bank_id},{account.account}"
 
     @staticmethod
     def _q5_csv_lines(payload: bytes):

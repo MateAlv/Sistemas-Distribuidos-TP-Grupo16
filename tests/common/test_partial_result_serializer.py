@@ -16,6 +16,7 @@ def test_q2_bank_max_partial_roundtrip():
         bank_id="001120",
         from_account="8006AA910",
         amount=592571.0,
+        row_number=123,
     )
 
     recovered = Q2BankMaxPartialSerializer.deserialize(

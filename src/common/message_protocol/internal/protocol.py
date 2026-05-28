@@ -15,7 +15,12 @@ def partition_for_key(key: str, partitions: int) -> int:
 def partition_for_pair(left: str, right: str, partitions: int) -> int:
     left = str(left)
     right = str(right)
-    return partition_for_key(f"{len(left)}:{left}{len(right)}:{right}", partitions)
+    return partition_for_parts((left, right), partitions)
+
+
+def partition_for_parts(parts, partitions: int) -> int:
+    key = "".join(f"{len(str(part))}:{part}" for part in parts)
+    return partition_for_key(key, partitions)
 
 
 class InternalProtocol:

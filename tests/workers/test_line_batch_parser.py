@@ -58,6 +58,7 @@ def test_line_batch_parser_uses_batch_header_order():
     assert transactions[0].amount == 12.5
     assert transactions[0].currency == "US Dollar"
     assert transactions[0].format == "Wire"
+    assert transactions[0].row_number == 2
 
 
 def test_line_batch_parser_strips_trailing_cr():
@@ -106,7 +107,9 @@ def test_line_batch_parser_emits_one_transaction_per_line():
 
     assert len(transactions) == len(batch.lines)
     assert transactions[0].from_account == "from-1"
+    assert transactions[0].row_number == 2
     assert transactions[1].from_account == "from-2"
+    assert transactions[1].row_number == 3
 
 
 def test_line_batch_parser_resolves_duplicate_account_columns():
