@@ -77,6 +77,20 @@ The shared binary DTOs live in
 Old `ScatterGatherRelation` and `ScatterGatherResult` remain in the codebase
 only for the current legacy workers. New Q4 workers should use the Q4 DTOs.
 
+Use `partition_for_parts(...)` from `common.message_protocol.internal` for
+composite keys such as `(bank, account)`, `(A, B)`, and hot-M block ids. Direct
+exchange publishers can send to a computed partition with:
+
+```text
+exchange.send(packet, routing_key=key)
+```
+
+That keeps sharding local to each emitted record and avoids one publisher
+instance per downstream partition.
+
+When this document says `hash(A)`, `hash(B)`, or `hash(account)`, the hashed
+value is the full `Q4AccountId`: bank id plus account id.
+
 ## Stage Responsibilities
 
 ### Q4 Filter
@@ -123,16 +137,20 @@ without centralizing the file.
 
 Qualified rows are routed by intermediary `M`.
 
-For each qualified `A -> M` row, preserve multiplicity by producing counted
-edge state:
+Every qualified transaction edge `source -> target` must be routed twice, once
+for each side of the self-join:
 
 ```text
-incoming[M][A] += 1
-outgoing[A][M] += 1
+IN edge:  intermediary = target, endpoint = source
+OUT edge: intermediary = source, endpoint = target
 ```
 
-Equivalently, when `A` later acts as intermediary, the row is available as an
-outgoing `M -> B` edge for `M=A`.
+The edge store preserves multiplicity by counting both views:
+
+```text
+incoming[target][source] += 1
+outgoing[source][target] += 1
+```
 
 At EOF the edge store plans each intermediary:
 
@@ -202,7 +220,7 @@ finish the threshold check.
 Account candidates are sharded by account:
 
 ```text
-routing_key = q4_account_<hash(account) % N>
+routing_key = q4_account_<hash(bank, account) % N>
 ```
 
 Each deduper emits each `Q4AccountId` once to the gateway. It may keep a set in
@@ -238,6 +256,19 @@ Use the same leader-gather pattern already used by `sum`, `aggregator`,
 
 Late data after EOF snapshot must be handled like the existing scalable
 workers: process it, flush it ahead of close, and report a delta to the leader.
+
+Good implementation references:
+
+```text
+src/workers/sum/sums.py
+src/workers/aggregator/aggregators.py
+src/workers/filter_q5_usd/filter_q5_usd.py
+src/workers/q2_bank_name_joiner/bank_name_joiner.py
+```
+
+The new Q4 workers should copy that control shape instead of inventing a local
+EOF shortcut. The data state will be different, but the ordered sequence is the
+same: snapshot, leader wait, flush order, downstream EOF, local cleanup.
 
 ## Implementation Order
 
