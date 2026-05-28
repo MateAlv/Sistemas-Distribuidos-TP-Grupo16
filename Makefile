@@ -20,7 +20,7 @@ TEST_Q4_EOF_PATTERN := gateway_eof | prefix=Q4|
 TEST_CLIENT_WAIT_TIMEOUT ?= 4600s
 TEST_SMOKE_DEADLINE_SECONDS ?= 600
 SCENARIOS_DIR := config/scenarios
-RABBIT_SCREEN_URL ?= http://localhost:15672/\#/queues
+RABBIT_SCREEN_URL ?= http://localhost:15672
 
 config:
 	$(PYTHON) $(COMPOSE_SCRIPT) --config $(MAIN_CONFIG_FILE) --output $(COMPOSE_FILE) --skip-test-output
