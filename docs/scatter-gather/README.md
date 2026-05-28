@@ -69,8 +69,8 @@ The shared binary DTOs live in
 | DTO | Purpose |
 | --- | --- |
 | `Q4AccountId` | `(bank_id, account)` identity and final result row. |
-| `Q4TransactionEdge` | Qualified transaction edge `A -> M`. |
-| `Q4CountedEdge` | Counted `IN` or `OUT` edge grouped by intermediary `M`. |
+| `Q4TransactionEdge` | Internal prefilter spool row `A -> M`. |
+| `Q4CountedEdge` | `IN` or `OUT` edge increment grouped by intermediary `M`. |
 | `Q4BlockJoinEdge` | Counted edge assigned to one hot-M join block. |
 | `Q4PairDelta` | Weighted `(A, B)` contribution, capped at 6. |
 
@@ -102,8 +102,9 @@ raw timestamp comparison:
 '2022/09/01' <= Timestamp <= '2022/09/06'
 ```
 
-The next implementation step should emit compact `Q4TransactionEdge` records
-instead of full `Transaction` rows once the new prefilter worker is wired.
+The source prefilter consumes these transaction batches, normalizes bank ids
+with notebook semantics, and stores pending rows as compact `Q4TransactionEdge`
+records on disk.
 
 ### Source Prefilter
 
@@ -133,23 +134,25 @@ Rules:
 This implements the notebook `groupby(["From Bank", "Account"]).filter(...)`
 without centralizing the file.
 
-### Edge Store
-
-Qualified rows are routed by intermediary `M`.
-
-Every qualified transaction edge `source -> target` must be routed twice, once
-for each side of the self-join:
+For every qualified transaction row, the source prefilter emits two
+`Q4CountedEdge(count=1)` records:
 
 ```text
 IN edge:  intermediary = target, endpoint = source
 OUT edge: intermediary = source, endpoint = target
 ```
 
-The edge store preserves multiplicity by counting both views:
+Both records are routed to the edge-store partition that owns their
+intermediary.
+
+### Edge Store
+
+The edge store consumes `Q4CountedEdge` records already routed by intermediary
+`M`. It preserves multiplicity by summing both views:
 
 ```text
-incoming[target][source] += 1
-outgoing[source][target] += 1
+incoming[M][A] += edge.count
+outgoing[M][B] += edge.count
 ```
 
 At EOF the edge store plans each intermediary:
