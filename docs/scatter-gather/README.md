@@ -36,9 +36,9 @@ DATE / USD filter
 ```
 
 Every stage is horizontally scalable: work is split across replicas by a hash of
-that stage's key, so no single worker ever needs the whole dataset. State that
-could grow large is capped or spilled to local temporary files, and released
-once a client finishes.
+that stage's key, so no single worker ever needs the whole dataset. The current
+implementation keeps per-client working state in RAM and releases it once a
+client finishes.
 
 ## The stages
 
@@ -51,10 +51,10 @@ Owns every transaction of a given source account (input is sharded by `A`), so i
 can apply the "sent to more than 5 distinct targets" rule exactly.
 
 For each source it counts distinct targets only **up to 6** (enough to answer
-"more than 5") and spools the source's rows to disk until the answer is known.
-When a source reaches 6 distinct targets it is marked *qualified*, its spooled
-rows are replayed downstream, and later rows stream straight through. Sources
-that never qualify are dropped at end-of-stream.
+"more than 5") and keeps the source's pending rows in memory until the answer is
+known. When a source reaches 6 distinct targets it is marked *qualified*, its
+pending rows are replayed downstream, and later rows stream straight through.
+Sources that never qualify are dropped at end-of-stream.
 
 Each qualified transaction `A → M` is forwarded as two **counted edges** keyed by
 their intermediary — one recording that `M` receives from `A`, one recording that
@@ -86,7 +86,7 @@ Owns each `(A, B)` pair (sharded by the pair) and sums the weighted
 contributions arriving from every block. As soon as a pair's total passes 5 it
 qualifies: the reducer emits its two accounts `A` and `B` and forgets the pair.
 Pairs that never reach the threshold are the bulk of the data, so this stage
-keeps memory bounded by spilling to disk and merging at end-of-stream.
+keeps only sub-threshold counters in RAM and drops them at end-of-stream.
 
 ### q4_account_deduper
 The same account can appear in many qualifying pairs. This stage (sharded by
@@ -103,7 +103,7 @@ Collects the deduplicated accounts and writes the Q4 result as `Bank,Account`.
 
 Every stage is replica-safe and uses the project's standard end-of-stream
 handshake: a worker waits for an end-of-stream signal from each of its upstream
-partitions, flushes whatever it has buffered or spooled, forwards its own
+partitions, flushes whatever it has buffered, forwards its own
 end-of-stream (carrying how much it sent to each downstream partition), and then
 releases that client's state. The `sum`, `aggregator`, and `filter_q5_usd`
 workers follow the same pattern.
@@ -116,7 +116,7 @@ The binary records live in
 | Record | Carries |
 | --- | --- |
 | `Q4AccountId` | a `(bank id, account)` identity, and the final result row |
-| `Q4TransactionEdge` | a prefilter's spooled `A → M` row |
+| `Q4TransactionEdge` | a prefilter's pending `A → M` row |
 | `Q4CountedEdge` | an incoming/outgoing edge for an intermediary `M`, with a count |
 | `Q4BlockJoinEdge` | a counted edge assigned to a specific hot-`M` join block |
 | `Q4PairDelta` | a weighted contribution to a pair `(A, B)` |

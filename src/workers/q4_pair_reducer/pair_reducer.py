@@ -1,7 +1,5 @@
-import heapq
 import logging
 import os
-import tempfile
 import threading
 from collections import defaultdict
 
@@ -41,10 +39,6 @@ Q4_PAIR_REDUCER_BATCH_BYTES = int(
 Q4_PAIR_REDUCER_BATCH_MAX_ACCOUNTS = int(
     os.environ.get("Q4_PAIR_REDUCER_BATCH_MAX_ACCOUNTS", "5000")
 )
-Q4_PAIR_REDUCER_MAX_IN_MEMORY_PAIRS = int(
-    os.environ.get("Q4_PAIR_REDUCER_MAX_IN_MEMORY_PAIRS", "1000000")
-)
-
 
 class Q4PairReducerWorker:
     """Sums weighted path contributions per (A, B) and emits account candidates."""
@@ -71,7 +65,6 @@ class Q4PairReducerWorker:
         self._lock = threading.Lock()
         self._pair_counts_by_client: dict[int, dict[tuple[str, str, str, str], int]] = {}
         self._qualified_pairs_by_client: dict[int, set[tuple[str, str, str, str]]] = {}
-        self._spill_runs_by_client: dict[int, list] = defaultdict(list)
         self._processed_by_client: dict[int, int] = {}
         self._eofs_by_client: dict[int, set[int]] = defaultdict(set)
         self._forwarded_by_partition_by_client: dict[int, dict[int, int]] = {}
@@ -171,114 +164,6 @@ class Q4PairReducerWorker:
         ):
             self._send_batch(client_id, partition, batch_payload, output)
 
-    def _spill_counts_locked(self, client_id: int) -> None:
-        counts = self._pair_counts_by_client.get(client_id)
-        if not counts:
-            return
-
-        run = tempfile.TemporaryFile()
-        for key in sorted(counts):
-            delta = Q4PairDelta(
-                source=self._source_from_key(key),
-                target=self._target_from_key(key),
-                weight=counts[key],
-            )
-            run.write(self._pair_delta_serializer.serialize(delta))
-        self._spill_runs_by_client[client_id].append(run)
-        logging.info(
-            "q4_pair_reducer_spill | id=%s | client_id=%s | pairs=%s | runs=%s",
-            ID,
-            client_id,
-            len(counts),
-            len(self._spill_runs_by_client[client_id]),
-        )
-        counts.clear()
-
-    def _maybe_spill_locked(self, client_id: int) -> None:
-        if Q4_PAIR_REDUCER_MAX_IN_MEMORY_PAIRS <= 0:
-            return
-        counts = self._pair_counts_by_client.get(client_id)
-        if counts and len(counts) >= Q4_PAIR_REDUCER_MAX_IN_MEMORY_PAIRS:
-            self._spill_counts_locked(client_id)
-
-    def _iter_spill_run(self, run):
-        run.seek(0)
-        record_size = self._pair_delta_serializer.SIZE
-        while True:
-            record = run.read(record_size)
-            if not record:
-                return
-            yield self._pair_delta_serializer.deserialize(record)
-
-    def _iter_memory_counts(self, counts: dict[tuple[str, str, str, str], int]):
-        for key in sorted(counts):
-            yield Q4PairDelta(
-                source=self._source_from_key(key),
-                target=self._target_from_key(key),
-                weight=counts[key],
-            )
-
-    def _merge_subthreshold_runs(self, client_id: int, output=None) -> int:
-        counts = self._pair_counts_by_client.get(client_id, {})
-        iterators = [
-            self._iter_spill_run(run)
-            for run in self._spill_runs_by_client.get(client_id, [])
-        ]
-        if counts:
-            iterators.append(self._iter_memory_counts(counts))
-
-        heap = []
-        for index, iterator in enumerate(iterators):
-            try:
-                delta = next(iterator)
-            except StopIteration:
-                continue
-            heapq.heappush(heap, (self._pair_key(delta.source, delta.target), index, delta))
-
-        emitted_pairs = 0
-        while heap:
-            key, index, delta = heapq.heappop(heap)
-            total = 0
-            current_key = key
-
-            while True:
-                if current_key not in self._qualified_pairs_by_client.get(client_id, set()):
-                    total = min(Q4_QUALIFY_THRESHOLD, total + int(delta.weight))
-
-                try:
-                    next_delta = next(iterators[index])
-                    heapq.heappush(
-                        heap,
-                        (
-                            self._pair_key(next_delta.source, next_delta.target),
-                            index,
-                            next_delta,
-                        ),
-                    )
-                except StopIteration:
-                    pass
-
-                if not heap or heap[0][0] != current_key:
-                    break
-                key, index, delta = heapq.heappop(heap)
-
-            if (
-                current_key not in self._qualified_pairs_by_client.get(client_id, set())
-                and total >= Q4_QUALIFY_THRESHOLD
-            ):
-                emitted_pairs += int(
-                    self._emit_qualified_pair(client_id, current_key, output)
-                )
-
-        return emitted_pairs
-
-    def _close_spill_runs(self, client_id: int) -> None:
-        for run in self._spill_runs_by_client.pop(client_id, []):
-            try:
-                run.close()
-            except Exception:
-                pass
-
     def _accept_pair_deltas(self, client_id: int, payload: bytes) -> int:
         deltas = self._pair_delta_serializer.deserialize_batch(payload)
         if not deltas:
@@ -314,7 +199,6 @@ class Q4PairReducerWorker:
                     )
                 else:
                     counts[key] = total
-                    self._maybe_spill_locked(client_id)
 
             self._processed_by_client[client_id] = (
                 self._processed_by_client.get(client_id, 0) + len(deltas)
@@ -406,13 +290,13 @@ class Q4PairReducerWorker:
         with self._lock:
             if client_id in self._closed_by_client:
                 return
-            emitted_pairs = self._merge_subthreshold_runs(client_id, output)
+            pending_pairs = len(self._pair_counts_by_client.get(client_id, {}))
             logging.info(
-                "q4_pair_reducer_final_merge | id=%s | client_id=%s | "
-                "emitted_pairs=%s",
+                "q4_pair_reducer_close_client | id=%s | client_id=%s | "
+                "pending_subthreshold_pairs=%s",
                 ID,
                 client_id,
-                emitted_pairs,
+                pending_pairs,
             )
 
         self._flush_client_buffers(client_id, output)
@@ -428,7 +312,6 @@ class Q4PairReducerWorker:
             self._forwarded_by_partition_by_client.pop(client_id, None)
             self._closed_by_client.add(client_id)
 
-        self._close_spill_runs(client_id)
         self._forward_eof_to_account_dedupers(client_id, counts_by_partition, output)
 
     def _on_message(self, raw, ack, nack):
@@ -484,5 +367,3 @@ class Q4PairReducerWorker:
                     ID,
                     e,
                 )
-        for client_id in list(self._spill_runs_by_client):
-            self._close_spill_runs(client_id)

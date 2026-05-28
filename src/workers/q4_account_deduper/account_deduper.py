@@ -1,7 +1,5 @@
-import heapq
 import logging
 import os
-import tempfile
 import threading
 from collections import defaultdict
 
@@ -41,10 +39,6 @@ Q4_ACCOUNT_DEDUPER_BATCH_BYTES = int(
 Q4_ACCOUNT_DEDUPER_BATCH_MAX_ACCOUNTS = int(
     os.environ.get("Q4_ACCOUNT_DEDUPER_BATCH_MAX_ACCOUNTS", "5000")
 )
-Q4_ACCOUNT_DEDUPER_MAX_IN_MEMORY_ACCOUNTS = int(
-    os.environ.get("Q4_ACCOUNT_DEDUPER_MAX_IN_MEMORY_ACCOUNTS", "1000000")
-)
-
 
 class Q4AccountDeduperWorker:
     """Deduplicates notebook Q4 account candidates and writes gateway batches."""
@@ -84,7 +78,6 @@ class Q4AccountDeduperWorker:
 
         self._lock = threading.Lock()
         self._accounts_by_client: dict[int, set[tuple[str, str]]] = {}
-        self._spill_runs_by_client: dict[int, list] = defaultdict(list)
         self._processed_by_client: dict[int, int] = {}
         self._eofs_by_client: dict[int, set[int]] = defaultdict(set)
         self._closed_by_client: set[int] = set()
@@ -217,83 +210,9 @@ class Q4AccountDeduperWorker:
             emitted_accounts,
         )
 
-    def _spill_accounts_locked(self, client_id: int) -> None:
-        keys = self._accounts_by_client.get(client_id)
-        if not keys:
-            return
-
-        run = tempfile.TemporaryFile()
-        for key in sorted(keys):
-            run.write(self._account_serializer.serialize(self._account_from_key(key)))
-        self._spill_runs_by_client[client_id].append(run)
-        logging.info(
-            "q4_account_deduper_spill | id=%s | client_id=%s | accounts=%s | runs=%s",
-            ID,
-            client_id,
-            len(keys),
-            len(self._spill_runs_by_client[client_id]),
-        )
-        keys.clear()
-
-    def _maybe_spill_locked(self, client_id: int) -> None:
-        if Q4_ACCOUNT_DEDUPER_MAX_IN_MEMORY_ACCOUNTS <= 0:
-            return
-        keys = self._accounts_by_client.get(client_id)
-        if keys and len(keys) >= Q4_ACCOUNT_DEDUPER_MAX_IN_MEMORY_ACCOUNTS:
-            self._spill_accounts_locked(client_id)
-
-    def _iter_spill_run(self, run):
-        run.seek(0)
-        record_size = self._account_serializer.SIZE
-        while True:
-            record = run.read(record_size)
-            if not record:
-                return
-            yield self._account_serializer.deserialize(record)
-
-    def _iter_memory_accounts(self, keys: set[tuple[str, str]]):
+    def _iter_unique_accounts(self, keys: set[tuple[str, str]]):
         for key in sorted(keys):
             yield self._account_from_key(key)
-
-    def _iter_unique_accounts(self, runs, keys: set[tuple[str, str]]):
-        iterators = [self._iter_spill_run(run) for run in runs]
-        if keys:
-            iterators.append(self._iter_memory_accounts(keys))
-
-        heap = []
-        for index, iterator in enumerate(iterators):
-            try:
-                account = next(iterator)
-            except StopIteration:
-                continue
-            heapq.heappush(heap, (self._account_key(account), index, account))
-
-        last_key = None
-        while heap:
-            key, index, account = heapq.heappop(heap)
-            if key != last_key:
-                yield account
-                last_key = key
-
-            try:
-                next_account = next(iterators[index])
-                heapq.heappush(
-                    heap,
-                    (
-                        self._account_key(next_account),
-                        index,
-                        next_account,
-                    ),
-                )
-            except StopIteration:
-                pass
-
-    def _close_spill_runs(self, runs) -> None:
-        for run in runs:
-            try:
-                run.close()
-            except Exception:
-                pass
 
     def _accept_accounts(self, client_id: int, payload: bytes) -> int:
         accounts = self._account_serializer.deserialize_batch(payload)
@@ -313,26 +232,22 @@ class Q4AccountDeduperWorker:
             keys = self._accounts_by_client.setdefault(client_id, set())
             for account in accounts:
                 keys.add(self._account_key(account))
-                self._maybe_spill_locked(client_id)
 
             self._processed_by_client[client_id] = (
                 self._processed_by_client.get(client_id, 0) + len(accounts)
             )
             processed_total = self._processed_by_client[client_id]
             unique_in_memory = len(self._accounts_by_client.get(client_id, set()))
-            run_count = len(self._spill_runs_by_client.get(client_id, []))
 
         if should_log_progress(processed_total):
             logging.info(
                 "q4_account_deduper_data_batch | id=%s | client_id=%s | "
-                "batch_size=%s | processed_total=%s | in_memory_unique=%s | "
-                "spill_runs=%s",
+                "batch_size=%s | processed_total=%s | in_memory_unique=%s",
                 ID,
                 client_id,
                 len(accounts),
                 processed_total,
                 unique_in_memory,
-                run_count,
             )
         return len(accounts)
 
@@ -380,19 +295,17 @@ class Q4AccountDeduperWorker:
             if client_id in self._closed_by_client:
                 return 0
             keys = self._accounts_by_client.pop(client_id, set())
-            runs = self._spill_runs_by_client.pop(client_id, [])
             processed_total = self._processed_by_client.pop(client_id, 0)
             self._eofs_by_client.pop(client_id, None)
             self._closed_by_client.add(client_id)
 
         emitted_accounts = 0
         try:
-            for account in self._iter_unique_accounts(runs, keys):
+            for account in self._iter_unique_accounts(keys):
                 self._append_gateway_account(client_id, account, output)
                 emitted_accounts += 1
             self._flush_gateway_buffers(client_id, output)
         finally:
-            self._close_spill_runs(runs)
             self._batcher.discard(lambda k: k == client_id)
 
         logging.info(
@@ -556,5 +469,3 @@ class Q4AccountDeduperWorker:
                 )
         if self._response_thread is not None:
             self._response_thread.join(timeout=5)
-        for runs in list(self._spill_runs_by_client.values()):
-            self._close_spill_runs(runs)

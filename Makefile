@@ -162,6 +162,11 @@ test:
 		$(if $(SG_MAPPER_WORKERS),--sg-mapper-workers $(SG_MAPPER_WORKERS)) \
 		$(if $(SG_LINKER_WORKERS),--sg-linker-workers $(SG_LINKER_WORKERS)) \
 		$(if $(SG_DETECTOR_WORKERS),--sg-detector-workers $(SG_DETECTOR_WORKERS)) \
+		$(if $(Q4_SOURCE_PREFILTER_WORKERS),--q4-source-prefilter-workers $(Q4_SOURCE_PREFILTER_WORKERS)) \
+		$(if $(Q4_EDGE_STORE_WORKERS),--q4-edge-store-workers $(Q4_EDGE_STORE_WORKERS)) \
+		$(if $(Q4_BLOCK_JOINER_WORKERS),--q4-block-joiner-workers $(Q4_BLOCK_JOINER_WORKERS)) \
+		$(if $(Q4_PAIR_REDUCER_WORKERS),--q4-pair-reducer-workers $(Q4_PAIR_REDUCER_WORKERS)) \
+		$(if $(Q4_ACCOUNT_DEDUPER_WORKERS),--q4-account-deduper-workers $(Q4_ACCOUNT_DEDUPER_WORKERS)) \
 		$(if $(Q3_BARRIER_WORKERS),--q3-barrier-workers $(Q3_BARRIER_WORKERS)) \
 		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
 		$(if $(CLIENTS),--clients $(CLIENTS)) \

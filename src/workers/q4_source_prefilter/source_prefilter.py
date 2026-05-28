@@ -1,8 +1,5 @@
-import hashlib
 import logging
 import os
-import shutil
-import tempfile
 import threading
 from dataclasses import dataclass, field
 
@@ -14,7 +11,6 @@ from common.message_protocol.internal import (
     Q4CountedEdge,
     Q4CountedEdgeSerializer,
     Q4TransactionEdge,
-    Q4TransactionEdgeSerializer,
     Q4_EDGE_INCOMING,
     Q4_EDGE_OUTGOING,
     Q4AccountId,
@@ -62,26 +58,21 @@ Q4_SOURCE_PREFILTER_BATCH_BYTES = int(
 Q4_SOURCE_PREFILTER_BATCH_MAX_EDGES = int(
     os.environ.get("Q4_SOURCE_PREFILTER_BATCH_MAX_EDGES", "5000")
 )
-Q4_SOURCE_PREFILTER_REPLAY_BATCH_EDGES = int(
-    os.environ.get("Q4_SOURCE_PREFILTER_REPLAY_BATCH_EDGES", "5000")
-)
-SPOOL_ROOT = os.environ.get("Q4_SOURCE_PREFILTER_SPOOL_DIR")
 
 
 @dataclass
 class _SourceState:
     targets: set[Q4AccountId] = field(default_factory=set)
     qualified: bool = False
-    pending_path: str | None = None
-    pending_count: int = 0
+    pending: list[Q4TransactionEdge] = field(default_factory=list)
 
 
 class Q4SourcePrefilterWorker:
     """Notebook-exact Q4 source prefilter.
 
-    The worker owns complete sources through upstream sharding. It keeps only a
-    capped target set in memory and spools pending rows to disk until a source
-    reaches six distinct targets.
+    The worker owns complete sources through upstream sharding. It keeps a capped
+    target set and the source's pending rows in memory until the source reaches
+    six distinct targets.
     """
 
     def __init__(self):
@@ -98,23 +89,12 @@ class Q4SourcePrefilterWorker:
 
         self._proto = InternalProtocol()
         self._tx_serializer = TransactionSerializer()
-        self._edge_serializer = Q4TransactionEdgeSerializer()
         self._counted_edge_serializer = Q4CountedEdgeSerializer()
         self._control_serializer = ControlMessageSerializer()
         self._batcher = BatchBuffer(
             Q4_SOURCE_PREFILTER_BATCH_BYTES,
             Q4_SOURCE_PREFILTER_BATCH_MAX_EDGES,
         )
-
-        self._spool_tmp = None
-        if SPOOL_ROOT:
-            os.makedirs(SPOOL_ROOT, exist_ok=True)
-            self._spool_root = SPOOL_ROOT
-        else:
-            self._spool_tmp = tempfile.TemporaryDirectory(
-                prefix=f"q4_source_prefilter_{ID}_"
-            )
-            self._spool_root = self._spool_tmp.name
 
         self._lock = threading.Lock()
         self._states_by_client: dict[int, dict[Q4AccountId, _SourceState]] = {}
@@ -200,25 +180,13 @@ class Q4SourcePrefilterWorker:
             ),
         )
 
-    def _spool_path(self, client_id: int, source: Q4AccountId) -> str:
-        client_dir = os.path.join(self._spool_root, str(client_id))
-        os.makedirs(client_dir, exist_ok=True)
-        digest = hashlib.sha256(
-            f"{source.bank_id}\0{source.account}".encode("utf-8")
-        ).hexdigest()
-        return os.path.join(client_dir, f"{digest}.bin")
-
     def _append_pending_edge(
         self,
         client_id: int,
         edge: Q4TransactionEdge,
         state: _SourceState,
     ) -> None:
-        if state.pending_path is None:
-            state.pending_path = self._spool_path(client_id, edge.source)
-        with open(state.pending_path, "ab") as pending:
-            pending.write(self._edge_serializer.serialize(edge))
-        state.pending_count += 1
+        state.pending.append(edge)
 
     def _replay_pending_edges(
         self,
@@ -226,26 +194,10 @@ class Q4SourcePrefilterWorker:
         state: _SourceState,
         output=None,
     ) -> int:
-        if state.pending_path is None:
-            return 0
-
         forwarded = 0
-        record_size = self._edge_serializer.SIZE
-        batch_size = max(1, Q4_SOURCE_PREFILTER_REPLAY_BATCH_EDGES) * record_size
-        with open(state.pending_path, "rb") as pending:
-            while True:
-                payload = pending.read(batch_size)
-                if not payload:
-                    break
-                for edge in self._edge_serializer.deserialize_batch(payload):
-                    forwarded += self._emit_qualified_edge(client_id, edge, output)
-
-        try:
-            os.remove(state.pending_path)
-        except FileNotFoundError:
-            pass
-        state.pending_path = None
-        state.pending_count = 0
+        for edge in state.pending:
+            forwarded += self._emit_qualified_edge(client_id, edge, output)
+        state.pending = []
         return forwarded
 
     def _emit_counted_edge(
@@ -309,9 +261,6 @@ class Q4SourcePrefilterWorker:
             lambda k: k[0] == client_id
         ):
             self._send_batch(client_id, partition, batch_payload, output)
-
-    def _discard_client_spool(self, client_id: int) -> None:
-        shutil.rmtree(os.path.join(self._spool_root, str(client_id)), ignore_errors=True)
 
     def _accept_edge_locked(
         self,
@@ -597,7 +546,6 @@ class Q4SourcePrefilterWorker:
             self._closed_by_client.add(client_id)
 
         self._flush_client_buffers(client_id, output)
-        self._discard_client_spool(client_id)
         self._forward_eof_to_edge_store(client_id, counts_by_partition, output)
 
     def _on_message(self, raw, ack, nack):
@@ -702,5 +650,3 @@ class Q4SourcePrefilterWorker:
                     ID,
                     e,
                 )
-        if self._spool_tmp is not None:
-            self._spool_tmp.cleanup()

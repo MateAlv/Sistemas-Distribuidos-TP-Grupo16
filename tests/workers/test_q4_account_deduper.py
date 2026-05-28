@@ -10,7 +10,6 @@ def _load_module(
     worker_id=0,
     pair_reducer_amount=1,
     deduper_amount=1,
-    max_accounts=1000000,
     batch_max=5000,
 ):
     monkeypatch.setenv("ID", str(worker_id))
@@ -26,10 +25,6 @@ def _load_module(
     monkeypatch.setenv("GATEWAY_Q4_QUEUE", "gateway_q4_queue")
     monkeypatch.setenv("Q4_ACCOUNT_DEDUPER_BATCH_BYTES", str(1024 * 1024))
     monkeypatch.setenv("Q4_ACCOUNT_DEDUPER_BATCH_MAX_ACCOUNTS", str(batch_max))
-    monkeypatch.setenv(
-        "Q4_ACCOUNT_DEDUPER_MAX_IN_MEMORY_ACCOUNTS",
-        str(max_accounts),
-    )
 
     module_name = "workers.q4_account_deduper.account_deduper"
     sys.modules.pop(module_name, None)
@@ -134,12 +129,13 @@ def _leader_reports(worker, output):
     return reports
 
 
-def test_account_deduper_spills_merges_and_sends_single_gateway_eof(monkeypatch):
+def test_account_deduper_deduplicates_in_memory_and_sends_single_gateway_eof(
+    monkeypatch,
+):
     module, _, _ = _load_module(
         monkeypatch,
         pair_reducer_amount=1,
         deduper_amount=1,
-        max_accounts=1,
         batch_max=2,
     )
     worker = module.Q4AccountDeduperWorker()
@@ -150,7 +146,7 @@ def test_account_deduper_spills_merges_and_sends_single_gateway_eof(monkeypatch)
     b = _account(module, "2", "B")
 
     worker._accept_accounts(client_id, _data_payload(module, [b, a, b]))
-    assert len(worker._spill_runs_by_client[client_id]) == 3
+    assert worker._accounts_by_client[client_id] == {("1", "A"), ("2", "B")}
     assert output.sent == []
 
     worker._handle_eof(

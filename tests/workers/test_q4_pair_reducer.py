@@ -11,7 +11,6 @@ def _load_module(
     worker_id=0,
     block_joiner_amount=1,
     account_partitions=3,
-    max_pairs=1000000,
 ):
     monkeypatch.setenv("ID", str(worker_id))
     monkeypatch.setenv("MOM_HOST", "mom")
@@ -23,7 +22,6 @@ def _load_module(
     monkeypatch.setenv("Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX", "q4_account_deduper")
     monkeypatch.setenv("Q4_PAIR_REDUCER_BATCH_BYTES", str(1024 * 1024))
     monkeypatch.setenv("Q4_PAIR_REDUCER_BATCH_MAX_ACCOUNTS", "5000")
-    monkeypatch.setenv("Q4_PAIR_REDUCER_MAX_IN_MEMORY_PAIRS", str(max_pairs))
 
     module_name = "workers.q4_pair_reducer.pair_reducer"
     sys.modules.pop(module_name, None)
@@ -159,12 +157,11 @@ def test_pair_reducer_emits_candidates_once_when_pair_reaches_threshold(
     assert client_id in worker._closed_by_client
 
 
-def test_pair_reducer_spills_and_merges_subthreshold_counts_at_eof(monkeypatch):
+def test_pair_reducer_keeps_subthreshold_counts_in_memory_until_eof(monkeypatch):
     module, _ = _load_module(
         monkeypatch,
         block_joiner_amount=1,
         account_partitions=3,
-        max_pairs=1,
     )
     worker = module.Q4PairReducerWorker()
     output = worker._account_deduper_output
@@ -175,17 +172,21 @@ def test_pair_reducer_spills_and_merges_subthreshold_counts_at_eof(monkeypatch):
     c = _account(module, "3", "C")
     d = _account(module, "4", "D")
 
-    for weight in (2, 2, 2):
-        worker._accept_pair_deltas(
-            client_id,
-            _data_payload(module, [_delta(module, a, b, weight)]),
-        )
     worker._accept_pair_deltas(
         client_id,
-        _data_payload(module, [_delta(module, c, d, 5)]),
+        _data_payload(
+            module,
+            [
+                _delta(module, a, b, 5),
+                _delta(module, c, d, 5),
+            ],
+        ),
     )
 
-    assert len(worker._spill_runs_by_client[client_id]) >= 3
+    assert worker._pair_counts_by_client[client_id] == {
+        ("1", "A", "2", "B"): 5,
+        ("3", "C", "4", "D"): 5,
+    }
     assert _account_data_messages(worker, module, output)[0] == []
 
     worker._handle_eof(
@@ -194,9 +195,9 @@ def test_pair_reducer_spills_and_merges_subthreshold_counts_at_eof(monkeypatch):
     )
 
     accounts, by_partition = _account_data_messages(worker, module, output)
-    assert accounts == [a, b]
-    assert sum(by_partition.values()) == 2
-    assert sum(_eof_counts(worker, output).values()) == 2
+    assert accounts == []
+    assert sum(by_partition.values()) == 0
+    assert sum(_eof_counts(worker, output).values()) == 0
     assert client_id in worker._closed_by_client
 
 

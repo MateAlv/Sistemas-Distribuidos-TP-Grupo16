@@ -19,10 +19,6 @@ def _load_module(monkeypatch, tmp_path, amount=1, worker_id=0, edge_partitions=3
     monkeypatch.setenv("Q4_SOURCE_PREFILTER_BATCH_BYTES", str(1024 * 1024))
     monkeypatch.setenv("Q4_SOURCE_PREFILTER_BATCH_MAX_EDGES", "5000")
     monkeypatch.setenv("Q4_SOURCE_PREFILTER_REPLAY_BATCH_EDGES", "3")
-    monkeypatch.setenv(
-        "Q4_SOURCE_PREFILTER_SPOOL_DIR",
-        str(tmp_path / f"spool_{worker_id}"),
-    )
 
     module_name = "workers.q4_source_prefilter.source_prefilter"
     sys.modules.pop(module_name, None)
@@ -101,7 +97,7 @@ def _eof_counts(worker, output):
     return counts
 
 
-def test_source_prefilter_replays_spooled_rows_when_source_qualifies(
+def test_source_prefilter_replays_pending_rows_when_source_qualifies(
     monkeypatch, tmp_path
 ):
     module, _ = _load_module(monkeypatch, tmp_path, amount=1, edge_partitions=4)
@@ -152,7 +148,7 @@ def test_source_prefilter_replays_spooled_rows_when_source_qualifies(
     }
 
 
-def test_source_prefilter_single_eof_discards_unqualified_spool(
+def test_source_prefilter_single_eof_discards_unqualified_pending_rows(
     monkeypatch, tmp_path
 ):
     module, _ = _load_module(monkeypatch, tmp_path, amount=1, edge_partitions=3)
@@ -166,8 +162,8 @@ def test_source_prefilter_single_eof_discards_unqualified_spool(
     ]
     worker._handle_data_packet(client_id, _payload(module, rows))
 
-    spool_client_dir = tmp_path / "spool_0" / str(client_id)
-    assert spool_client_dir.exists()
+    state = next(iter(worker._states_by_client[client_id].values()))
+    assert len(state.pending) == 5
 
     worker._handle_upstream_eof(
         client_id,
@@ -180,7 +176,7 @@ def test_source_prefilter_single_eof_discards_unqualified_spool(
         "q4_edge_store_1": 0,
         "q4_edge_store_2": 0,
     }
-    assert not spool_client_dir.exists()
+    assert client_id not in worker._states_by_client
     assert client_id in worker._closed_by_client
 
 

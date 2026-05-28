@@ -313,6 +313,85 @@ def test_date_filter_uses_notebook_q4_timestamp_bounds(monkeypatch):
     assert q4_accounts == ["included-5", "included-bound"]
 
 
+def test_date_filter_routes_q4_to_source_prefilter_exchange_with_global_eof(
+    monkeypatch,
+):
+    monkeypatch.setenv("FILTER_OUTPUT_BATCH_MAX_TX", "1")
+    monkeypatch.setenv("Q4_SOURCE_PREFILTER_INPUT_EXCHANGE", "q4_prefilter")
+    monkeypatch.setenv("Q4_SOURCE_PREFILTER_INPUT_ROUTING_PREFIX", "q4_source")
+    monkeypatch.setenv("Q4_SOURCE_PREFILTER_AMOUNT", "2")
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="DATE",
+        usd_enable_q2="0",
+        date_enable_q3="0",
+        date_enable_q4="1",
+    )
+    worker = module.FilterWorker()
+
+    txs = [
+        _tx(
+            10.0,
+            "US Dollar",
+            date="2022/09/05 23:59",
+            from_bank="001",
+            from_account="source-a",
+        ),
+        _tx(
+            20.0,
+            "US Dollar",
+            date="2022/09/06",
+            from_bank="002",
+            from_account="source-b",
+        ),
+    ]
+
+    worker._process_data_message(_data_packet(316, txs))
+
+    assert set(worker.output_queues) == {"q4_source_0", "q4_source_1"}
+    q4_accounts_by_key = {}
+    for key, output in worker.output_queues.items():
+        accounts = []
+        for packet in output.sent:
+            msg_type, _, payload = InternalProtocol.unpack_packet(packet)
+            if msg_type != MessageType.DATA:
+                continue
+            accounts.extend(
+                tx.from_account
+                for tx in TransactionSerializer.deserialize_batch(payload)
+            )
+        q4_accounts_by_key[key] = accounts
+
+    for tx in txs:
+        expected_key = worker._q4_source_prefilter_output_for_transaction(tx)
+        assert tx.from_account in q4_accounts_by_key[expected_key]
+
+    control_payload = module.message_protocol.internal.ControlMessageSerializer.serialize(
+        module.message_protocol.internal.ControlMessage(
+            sender_id=0, expected_total=2, processed_count=0
+        )
+    )
+    eof_message = InternalProtocol.create_packet(
+        msg_type=MessageType.EOF,
+        client_id_bytes=(316).to_bytes(16, byteorder="big"),
+        payload=control_payload,
+    )
+    worker._process_data_message(eof_message)
+
+    for output in worker.output_queues.values():
+        eof_packets = [
+            packet
+            for packet in output.sent
+            if InternalProtocol.unpack_packet(packet)[0] == MessageType.EOF
+        ]
+        assert len(eof_packets) == 1
+        _, _, payload = InternalProtocol.unpack_packet(eof_packets[0])
+        control = module.message_protocol.internal.ControlMessageSerializer.deserialize(
+            payload
+        )
+        assert control.expected_total == 2
+
+
 def test_eof_flushes_partial_batch_before_forwarding(monkeypatch):
     # Sin llegar al limite, una unica tx queda en el batcher hasta que el
     # EOF dispara _try_forward_single_filter_eof, que debe flushear antes
