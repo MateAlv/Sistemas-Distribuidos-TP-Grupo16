@@ -9,7 +9,6 @@ from common.message_protocol.internal import (
     InternalProtocol,
     Q4AccountId,
     Q4AccountIdSerializer,
-    Q4PairDelta,
     Q4PairDeltaSerializer,
     Q4_QUALIFY_THRESHOLD,
     partition_for_parts,

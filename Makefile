@@ -138,7 +138,7 @@ stats:
 .PHONY: stats
 
 # Dataset used by the full `make test` run and `make expected`.
-DATASET ?= LI-Small
+DATASET ?= HI-Medium
 
 # Precompute the per-dataset reference results (data/datasets/<DATASET>/expected_results/).
 # Use FORCE=1 to regenerate. The expensive Q4 graph is computed once here, not per run.

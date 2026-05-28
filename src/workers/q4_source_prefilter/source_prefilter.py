@@ -182,7 +182,6 @@ class Q4SourcePrefilterWorker:
 
     def _append_pending_edge(
         self,
-        client_id: int,
         edge: Q4TransactionEdge,
         state: _SourceState,
     ) -> None:
@@ -274,7 +273,7 @@ class Q4SourcePrefilterWorker:
         if state.qualified:
             return self._emit_qualified_edge(client_id, edge, output)
 
-        self._append_pending_edge(client_id, edge, state)
+        self._append_pending_edge(edge, state)
         if len(state.targets) < 6:
             state.targets.add(edge.target)
 
