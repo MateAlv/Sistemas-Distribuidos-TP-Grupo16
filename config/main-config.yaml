@@ -12,35 +12,32 @@ settings:
   io_timeout_seconds: 3600
 
 workers:
-  file_splitters: 1
-  file_ingestors: 1
+  file_splitters: 3
+  file_ingestors: 6
   filters:
-    usd: 1
-    q1: 1
-    date: 1
+    usd: 6
+    q1: 3
+    date: 4
+    q5_format: 3
+    q5_usd: 3
   sums:
+    q2: 4
+    q3: 6
+  aggregators:
     q2: 3
     q3: 3
-  aggregators:
-    q2: 1
-    q3: 1
+    q5: 2
   joiners:
     q2: 1
     q3: 1
-  scatter_gather:
-    mappers: 1
-    linkers: 1
-    detectors: 6
-    min_intermediaries: 5
+    q5: 1
+  q3_barrier: 2
   q4:
-    source_prefilters: 3
-    edge_stores: 3
-    block_joiners: 6
-    pair_reducers: 6
-    account_dedupers: 3
-    hot_pair_threshold: 1000000
-    hot_a_buckets: 16
-    hot_b_buckets: 16
+    filters: 6
+    sums: 4
+    joiners: 8
+    aggregators: 8
+    dedupers: 2
 
 clients: 1
 client_accounts:

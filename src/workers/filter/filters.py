@@ -38,13 +38,13 @@ SUM_Q2_QUEUE = os.environ["SUM_Q2_QUEUE"]
 FILTER_Q3_QUEUE = os.environ["FILTER_Q3_QUEUE"]
 SCATTER_GATHER_MAPPER_QUEUE = os.environ["SCATTER_GATHER_MAPPER_QUEUE"]
 FILTER_Q5_USD_QUEUE = os.environ["FILTER_Q5_USD_QUEUE"]
-Q4_SOURCE_PREFILTER_INPUT_EXCHANGE = os.getenv("Q4_SOURCE_PREFILTER_INPUT_EXCHANGE")
-Q4_SOURCE_PREFILTER_INPUT_ROUTING_PREFIX = os.getenv(
-    "Q4_SOURCE_PREFILTER_INPUT_ROUTING_PREFIX",
-    "q4_source_prefilter",
+Q4_FILTER_INPUT_EXCHANGE = os.getenv("Q4_FILTER_INPUT_EXCHANGE")
+Q4_FILTER_INPUT_ROUTING_PREFIX = os.getenv(
+    "Q4_FILTER_INPUT_ROUTING_PREFIX",
+    "q4_filter",
 )
-Q4_SOURCE_PREFILTER_AMOUNT = int(os.getenv("Q4_SOURCE_PREFILTER_AMOUNT", "1"))
-Q4_SOURCE_PREFILTER_OUTPUT = "q4_source_prefilter"
+Q4_FILTER_AMOUNT = int(os.getenv("Q4_FILTER_AMOUNT", "1"))
+Q4_FILTER_OUTPUT = "q4_filter"
 Q3_CANDIDATES_QUEUE = os.getenv("Q3_CANDIDATES_QUEUE", FILTER_Q3_QUEUE)
 # Sharding opcional de candidatos Q3 por client_id. Si Q3_CANDIDATES_EXCHANGE
 # y Q3_BARRIER_AMOUNT > 1 están seteados, el filter publica a un exchange con
@@ -55,11 +55,9 @@ Q3_CANDIDATES_ROUTING_PREFIX = os.getenv(
     "Q3_CANDIDATES_ROUTING_PREFIX", "q3_candidates"
 )
 Q3_BARRIER_AMOUNT = int(os.getenv("Q3_BARRIER_AMOUNT", "1"))
-# Cola de salida para el sum de Q3. SUM_PREFIX se conserva para compatibilidad
-# con configuraciones anteriores y para los nombres de control de Sum.
 SUM_PREFIX = os.environ["SUM_PREFIX"]
 SUM_Q3_QUEUE = os.getenv("SUM_Q3_QUEUE", SUM_PREFIX)
-# Para control en token ring
+
 FILTER_AMOUNT = int(os.environ["FILTER_AMOUNT"])
 FILTER_PREFIX = os.environ["FILTER_PREFIX"] + "_" + CONFIGURATION
 CONTROL_EXCHANGE = os.environ["FILTER_PREFIX"] + "_" + "CONTROL_EXCHANGE_" + CONFIGURATION
@@ -134,19 +132,10 @@ class FilterWorker:
         self.closed_by_client = set()
         self.control_responses_by_client = {}
         self.all_processed_by_client = {}
-        # Conteos forwardeados por output, agregados por el lider a partir de los
-        # FLUSH_ACK de cada filtro (client_id -> {output_queue: count}). El EOF
-        # downstream lleva el conteo GLOBAL por output, no el local del lider.
         self.all_forwarded_by_output_by_client = {}
         self.flushed_acks_by_client = {}
         self.first_data_logged_by_client = set()
         self.deserialized_by_client = {}
-        # Solo para el caso de un unico filtro (FILTER_AMOUNT == 1): expected_total
-        # de un EOF que llego pero todavia no se reenvia porque faltan procesar
-        # mensajes. filter_usd es un punto de fan-in (varios file_ingestors
-        # producen DATA en conexiones distintas y el EOF llega por otra), asi que
-        # no se puede confiar en el orden de llegada del EOF: hay que esperar a
-        # processed_by_client >= expected_total antes de cerrar.
         self.pending_eof_by_client = {}
 
     def _new_output_queues(self):
@@ -180,13 +169,13 @@ class FilterWorker:
                 )
         if CONFIGURATION == C_DATE:
             if DATE_ENABLE_Q4:
-                if Q4_SOURCE_PREFILTER_INPUT_EXCHANGE:
-                    for partition in range(Q4_SOURCE_PREFILTER_AMOUNT):
-                        routing_key = self._q4_source_prefilter_routing_key(partition)
+                if Q4_FILTER_INPUT_EXCHANGE:
+                    for partition in range(Q4_FILTER_AMOUNT):
+                        routing_key = self._q4_filter_routing_key(partition)
                         output_queues[routing_key] = (
                             middleware.MessageMiddlewareExchangeRabbitMQ(
                                 MOM_HOST,
-                                Q4_SOURCE_PREFILTER_INPUT_EXCHANGE,
+                                Q4_FILTER_INPUT_EXCHANGE,
                                 [routing_key],
                             )
                         )
@@ -351,31 +340,31 @@ class FilterWorker:
             self.forwarded_by_output_by_client[client_id][output_name] = 0
         self.forwarded_by_output_by_client[client_id][output_name] += 1
 
-    def _q4_source_prefilter_routing_key(self, partition: int) -> str:
-        return f"{Q4_SOURCE_PREFILTER_INPUT_ROUTING_PREFIX}_{partition}"
+    def _q4_filter_routing_key(self, partition: int) -> str:
+        return f"{Q4_FILTER_INPUT_ROUTING_PREFIX}_{partition}"
 
-    def _q4_source_prefilter_output_names(self) -> list[str]:
-        if not Q4_SOURCE_PREFILTER_INPUT_EXCHANGE:
+    def _q4_filter_output_names(self) -> list[str]:
+        if not Q4_FILTER_INPUT_EXCHANGE:
             return [SCATTER_GATHER_MAPPER_QUEUE]
         return [
-            self._q4_source_prefilter_routing_key(partition)
-            for partition in range(Q4_SOURCE_PREFILTER_AMOUNT)
+            self._q4_filter_routing_key(partition)
+            for partition in range(Q4_FILTER_AMOUNT)
         ]
 
-    def _q4_source_prefilter_output_for_transaction(
+    def _q4_filter_output_for_transaction(
         self,
         transaction: Transaction,
     ) -> str:
-        if not Q4_SOURCE_PREFILTER_INPUT_EXCHANGE:
+        if not Q4_FILTER_INPUT_EXCHANGE:
             return SCATTER_GATHER_MAPPER_QUEUE
         partition = partition_for_parts(
             (
                 notebook_bank_id(transaction.from_bank),
                 (transaction.from_account or "").strip(),
             ),
-            Q4_SOURCE_PREFILTER_AMOUNT,
+            Q4_FILTER_AMOUNT,
         )
-        return self._q4_source_prefilter_routing_key(partition)
+        return self._q4_filter_routing_key(partition)
 
     def _data_packet(self, client_id: int, payload: bytes) -> bytes:
         return self.internal_packet_serializer.create_packet(
@@ -471,7 +460,7 @@ class FilterWorker:
                 start_timestamp="2022/09/01",
                 end_timestamp="2022/09/06",
             ):
-                q4_output = self._q4_source_prefilter_output_for_transaction(
+                q4_output = self._q4_filter_output_for_transaction(
                     transaction
                 )
                 self._publish_to_queue(q4_output, client_id, transaction, output_queues)
@@ -479,8 +468,8 @@ class FilterWorker:
                     self._record_forwarded_output(
                         client_id,
                         (
-                            Q4_SOURCE_PREFILTER_OUTPUT
-                            if Q4_SOURCE_PREFILTER_INPUT_EXCHANGE
+                            Q4_FILTER_OUTPUT
+                            if Q4_FILTER_INPUT_EXCHANGE
                             else SCATTER_GATHER_MAPPER_QUEUE
                         ),
                     )
@@ -545,9 +534,9 @@ class FilterWorker:
                     client_id, Q3_CANDIDATES_QUEUE, expected_total
                 )
             if DATE_ENABLE_Q4:
-                if Q4_SOURCE_PREFILTER_INPUT_EXCHANGE:
-                    expected_total = count(Q4_SOURCE_PREFILTER_OUTPUT)
-                    for output_name in self._q4_source_prefilter_output_names():
+                if Q4_FILTER_INPUT_EXCHANGE:
+                    expected_total = count(Q4_FILTER_OUTPUT)
+                    for output_name in self._q4_filter_output_names():
                         output_queues[output_name].send(eof_packet(expected_total))
                         self._log_forwarded_eof(
                             client_id, output_name, expected_total

@@ -118,6 +118,16 @@ class MessageFlowLogger:
         return False
 
 
+_FLOW_LOGGER_SINGLETON: MessageFlowLogger | None = None
+
+
+def get_flow_logger() -> MessageFlowLogger:
+    global _FLOW_LOGGER_SINGLETON
+    if _FLOW_LOGGER_SINGLETON is None:
+        _FLOW_LOGGER_SINGLETON = MessageFlowLogger()
+    return _FLOW_LOGGER_SINGLETON
+
+
 def summarize_middleware_message(endpoint: str, message: bytes) -> MessageSummary:
     if _is_file_ingestor_endpoint(endpoint):
         summary = _summarize_external_file_message(message)
@@ -194,7 +204,7 @@ def _summarize_internal_message(message: bytes) -> MessageSummary | None:
         msg_type=msg_type.name,
         client_id=client_id,
         payload_bytes=len(payload),
-        always_log=msg_type != MessageType.DATA,
+        always_log=msg_type == MessageType.EOF,
     )
 
 

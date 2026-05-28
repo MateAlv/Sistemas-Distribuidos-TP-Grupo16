@@ -9,7 +9,7 @@ from common.message_protocol.internal import (
     InternalProtocol,
     Q4AccountId,
     Q4AccountIdSerializer,
-    Q4PairDeltaSerializer,
+    Q4PairPathsSerializer,
     Q4_QUALIFY_THRESHOLD,
     partition_for_parts,
 )
@@ -22,30 +22,30 @@ from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbi
 
 ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
-Q4_PAIR_REDUCER_EXCHANGE = os.environ["Q4_PAIR_REDUCER_EXCHANGE"]
-Q4_PAIR_REDUCER_ROUTING_PREFIX = os.environ.get(
-    "Q4_PAIR_REDUCER_ROUTING_PREFIX", "q4_pair_reducer"
+Q4_AGGREGATOR_EXCHANGE = os.environ["Q4_AGGREGATOR_EXCHANGE"]
+Q4_AGGREGATOR_ROUTING_PREFIX = os.environ.get(
+    "Q4_AGGREGATOR_ROUTING_PREFIX", "q4_aggregator"
 )
-Q4_BLOCK_JOINER_AMOUNT = int(os.environ["Q4_BLOCK_JOINER_AMOUNT"])
-Q4_ACCOUNT_DEDUPER_EXCHANGE = os.environ["Q4_ACCOUNT_DEDUPER_EXCHANGE"]
-Q4_ACCOUNT_DEDUPER_AMOUNT = int(os.environ["Q4_ACCOUNT_DEDUPER_AMOUNT"])
-Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX = os.environ.get(
-    "Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX", "q4_account_deduper"
+Q4_JOINER_AMOUNT = int(os.environ["Q4_JOINER_AMOUNT"])
+Q4_DEDUPER_EXCHANGE = os.environ["Q4_DEDUPER_EXCHANGE"]
+Q4_DEDUPER_AMOUNT = int(os.environ["Q4_DEDUPER_AMOUNT"])
+Q4_DEDUPER_ROUTING_PREFIX = os.environ.get(
+    "Q4_DEDUPER_ROUTING_PREFIX", "q4_deduper"
 )
-Q4_PAIR_REDUCER_BATCH_BYTES = int(
-    os.environ.get("Q4_PAIR_REDUCER_BATCH_BYTES", str(1024 * 1024))
+Q4_AGGREGATOR_BATCH_BYTES = int(
+    os.environ.get("Q4_AGGREGATOR_BATCH_BYTES", str(1024 * 1024))
 )
-Q4_PAIR_REDUCER_BATCH_MAX_ACCOUNTS = int(
-    os.environ.get("Q4_PAIR_REDUCER_BATCH_MAX_ACCOUNTS", "5000")
+Q4_AGGREGATOR_BATCH_MAX_ACCOUNTS = int(
+    os.environ.get("Q4_AGGREGATOR_BATCH_MAX_ACCOUNTS", "5000")
 )
 
-class Q4PairReducerWorker:
+class Q4AggregatorWorker:
     """Sums weighted path contributions per (A, B) and emits account candidates."""
 
     def __init__(self):
         self._input = MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST,
-            Q4_PAIR_REDUCER_EXCHANGE,
+            Q4_AGGREGATOR_EXCHANGE,
             [self._input_routing_key()],
             queue_name=self._input_routing_key(),
             exclusive=False,
@@ -53,12 +53,12 @@ class Q4PairReducerWorker:
         self._account_deduper_output = self._new_account_deduper_output()
 
         self._proto = InternalProtocol()
-        self._pair_delta_serializer = Q4PairDeltaSerializer()
+        self._pair_paths_serializer = Q4PairPathsSerializer()
         self._account_serializer = Q4AccountIdSerializer()
         self._control_serializer = ControlMessageSerializer()
         self._batcher = BatchBuffer(
-            Q4_PAIR_REDUCER_BATCH_BYTES,
-            Q4_PAIR_REDUCER_BATCH_MAX_ACCOUNTS,
+            Q4_AGGREGATOR_BATCH_BYTES,
+            Q4_AGGREGATOR_BATCH_MAX_ACCOUNTS,
         )
 
         self._lock = threading.Lock()
@@ -73,12 +73,12 @@ class Q4PairReducerWorker:
         self._stopped = False
 
     def _input_routing_key(self) -> str:
-        return f"{Q4_PAIR_REDUCER_ROUTING_PREFIX}_{ID}"
+        return f"{Q4_AGGREGATOR_ROUTING_PREFIX}_{ID}"
 
     def _new_account_deduper_output(self):
         return MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST,
-            Q4_ACCOUNT_DEDUPER_EXCHANGE,
+            Q4_DEDUPER_EXCHANGE,
             [],
         )
 
@@ -115,11 +115,11 @@ class Q4PairReducerWorker:
     def _account_partition(self, account: Q4AccountId) -> int:
         return partition_for_parts(
             (account.bank_id, account.account),
-            Q4_ACCOUNT_DEDUPER_AMOUNT,
+            Q4_DEDUPER_AMOUNT,
         )
 
     def _account_routing_key(self, partition: int) -> str:
-        return f"{Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX}_{partition}"
+        return f"{Q4_DEDUPER_ROUTING_PREFIX}_{partition}"
 
     def _send_batch(
         self,
@@ -163,16 +163,16 @@ class Q4PairReducerWorker:
         ):
             self._send_batch(client_id, partition, batch_payload, output)
 
-    def _accept_pair_deltas(self, client_id: int, payload: bytes) -> int:
-        deltas = self._pair_delta_serializer.deserialize_batch(payload)
-        if not deltas:
+    def _accept_pair_paths(self, client_id: int, payload: bytes) -> int:
+        batch = self._pair_paths_serializer.deserialize_batch(payload)
+        if not batch:
             return 0
 
         emitted_pairs = 0
         with self._lock:
             if client_id in self._closed_by_client:
                 logging.info(
-                    "q4_pair_reducer_message_for_closed_client | id=%s | client_id=%s",
+                    "q4_aggregator_message_for_closed_client | id=%s | client_id=%s",
                     ID,
                     client_id,
                 )
@@ -181,15 +181,15 @@ class Q4PairReducerWorker:
             counts = self._pair_counts_by_client.setdefault(client_id, {})
             qualified = self._qualified_pairs_by_client.setdefault(client_id, set())
 
-            for delta in deltas:
-                if delta.source == delta.target:
+            for pair_paths in batch:
+                if pair_paths.source == pair_paths.target:
                     continue
-                key = self._pair_key(delta.source, delta.target)
+                key = self._pair_key(pair_paths.source, pair_paths.target)
                 if key in qualified:
                     continue
                 total = min(
                     Q4_QUALIFY_THRESHOLD,
-                    counts.get(key, 0) + int(delta.weight),
+                    counts.get(key, 0) + int(pair_paths.path_count),
                 )
                 if total >= Q4_QUALIFY_THRESHOLD:
                     counts.pop(key, None)
@@ -200,21 +200,21 @@ class Q4PairReducerWorker:
                     counts[key] = total
 
             self._processed_by_client[client_id] = (
-                self._processed_by_client.get(client_id, 0) + len(deltas)
+                self._processed_by_client.get(client_id, 0) + len(batch)
             )
             processed_total = self._processed_by_client[client_id]
 
         if should_log_progress(processed_total):
             logging.info(
-                "q4_pair_reducer_data_batch | id=%s | client_id=%s | "
+                "q4_aggregator_data_batch | id=%s | client_id=%s | "
                 "batch_size=%s | processed_total=%s | emitted_pairs=%s",
                 ID,
                 client_id,
-                len(deltas),
+                len(batch),
                 processed_total,
                 emitted_pairs,
             )
-        return len(deltas)
+        return len(batch)
 
     def _handle_eof(self, client_id: int, payload: bytes) -> None:
         control = self._control_serializer.deserialize(payload)
@@ -225,7 +225,7 @@ class Q4PairReducerWorker:
                 return
             if control.sender_id in self._eofs_by_client[client_id]:
                 logging.info(
-                    "q4_pair_reducer_duplicate_eof | id=%s | client_id=%s | "
+                    "q4_aggregator_duplicate_eof | id=%s | client_id=%s | "
                     "block_joiner_id=%s",
                     ID,
                     client_id,
@@ -236,18 +236,18 @@ class Q4PairReducerWorker:
             self._eofs_by_client[client_id].add(control.sender_id)
             eof_count = len(self._eofs_by_client[client_id])
             processed_total = self._processed_by_client.get(client_id, 0)
-            if eof_count >= Q4_BLOCK_JOINER_AMOUNT:
+            if eof_count >= Q4_JOINER_AMOUNT:
                 should_emit = True
 
         logging.info(
-            "q4_pair_reducer_eof_received | id=%s | client_id=%s | "
+            "q4_aggregator_eof_received | id=%s | client_id=%s | "
             "block_joiner_id=%s | eof_count=%s | expected_eofs=%s | "
             "sender_expected_total=%s | processed_total=%s",
             ID,
             client_id,
             control.sender_id,
             eof_count,
-            Q4_BLOCK_JOINER_AMOUNT,
+            Q4_JOINER_AMOUNT,
             control.expected_total,
             processed_total,
         )
@@ -255,14 +255,14 @@ class Q4PairReducerWorker:
         if should_emit:
             self._emit_and_close_client(client_id)
 
-    def _forward_eof_to_account_dedupers(
+    def _forward_eof_to_dedupers(
         self,
         client_id: int,
         counts_by_partition: dict[int, int],
         output=None,
     ) -> None:
         output = output or self._account_deduper_output
-        for partition in range(Q4_ACCOUNT_DEDUPER_AMOUNT):
+        for partition in range(Q4_DEDUPER_AMOUNT):
             expected_total = int(counts_by_partition.get(partition, 0))
             output.send(
                 self._packet(
@@ -277,7 +277,7 @@ class Q4PairReducerWorker:
                 routing_key=self._account_routing_key(partition),
             )
             logging.info(
-                "q4_pair_reducer_forward_eof | id=%s | client_id=%s | "
+                "q4_aggregator_forward_eof | id=%s | client_id=%s | "
                 "account_deduper_partition=%s | expected_total=%s",
                 ID,
                 client_id,
@@ -291,7 +291,7 @@ class Q4PairReducerWorker:
                 return
             pending_pairs = len(self._pair_counts_by_client.get(client_id, {}))
             logging.info(
-                "q4_pair_reducer_close_client | id=%s | client_id=%s | "
+                "q4_aggregator_close_client | id=%s | client_id=%s | "
                 "pending_subthreshold_pairs=%s",
                 ID,
                 client_id,
@@ -311,33 +311,33 @@ class Q4PairReducerWorker:
             self._forwarded_by_partition_by_client.pop(client_id, None)
             self._closed_by_client.add(client_id)
 
-        self._forward_eof_to_account_dedupers(client_id, counts_by_partition, output)
+        self._forward_eof_to_dedupers(client_id, counts_by_partition, output)
 
     def _on_message(self, raw, ack, nack):
         try:
             msg_type, client_id, payload = self._proto.unpack_packet(raw)
             if msg_type == MessageType.DATA:
-                self._accept_pair_deltas(client_id, payload)
+                self._accept_pair_paths(client_id, payload)
             elif msg_type == MessageType.EOF:
                 self._handle_eof(client_id, payload)
             else:
                 raise ValueError(f"unexpected q4 pair reducer message type: {msg_type}")
             ack()
         except Exception:
-            logging.exception("q4_pair_reducer_error | id=%s", ID)
+            logging.exception("q4_aggregator_error | id=%s", ID)
             nack()
 
     def start(self) -> None:
         logging.info(
-            "q4_pair_reducer_start | id=%s | input_exchange=%s | input_key=%s | "
-            "block_joiner_amount=%s | account_deduper_exchange=%s | "
-            "account_deduper_amount=%s",
+            "q4_aggregator_start | id=%s | input_exchange=%s | input_key=%s | "
+            "joiner_amount=%s | account_deduper_exchange=%s | "
+            "deduper_amount=%s",
             ID,
-            Q4_PAIR_REDUCER_EXCHANGE,
+            Q4_AGGREGATOR_EXCHANGE,
             self._input_routing_key(),
-            Q4_BLOCK_JOINER_AMOUNT,
-            Q4_ACCOUNT_DEDUPER_EXCHANGE,
-            Q4_ACCOUNT_DEDUPER_AMOUNT,
+            Q4_JOINER_AMOUNT,
+            Q4_DEDUPER_EXCHANGE,
+            Q4_DEDUPER_AMOUNT,
         )
         try:
             if not self._stopped:
@@ -350,7 +350,7 @@ class Q4PairReducerWorker:
         if self._stopped:
             return
         self._stopped = True
-        logging.info("q4_pair_reducer_shutdown | id=%s", ID)
+        logging.info("q4_aggregator_shutdown | id=%s", ID)
         self._input.request_stop_consuming()
 
     def close(self) -> None:
@@ -362,7 +362,7 @@ class Q4PairReducerWorker:
                 resource.close()
             except Exception as e:
                 logging.warning(
-                    "q4_pair_reducer_close_error | id=%s | error=%s",
+                    "q4_aggregator_close_error | id=%s | error=%s",
                     ID,
                     e,
                 )

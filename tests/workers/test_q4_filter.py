@@ -9,18 +9,18 @@ from common.message_protocol.internal.common import MessageType
 def _load_module(monkeypatch, tmp_path, amount=1, worker_id=0, edge_partitions=3):
     monkeypatch.setenv("ID", str(worker_id))
     monkeypatch.setenv("MOM_HOST", "mom")
-    monkeypatch.setenv("INPUT_QUEUE", "q4_source_prefilter_input")
-    monkeypatch.delenv("Q4_SOURCE_PREFILTER_INPUT_EXCHANGE", raising=False)
-    monkeypatch.setenv("Q4_SOURCE_PREFILTER_AMOUNT", str(amount))
-    monkeypatch.setenv("Q4_SOURCE_PREFILTER_PREFIX", "q4_source_prefilter")
-    monkeypatch.setenv("Q4_EDGE_STORE_EXCHANGE", "q4_edge_store")
-    monkeypatch.setenv("Q4_EDGE_STORE_AMOUNT", str(edge_partitions))
-    monkeypatch.setenv("Q4_EDGE_STORE_ROUTING_PREFIX", "q4_edge_store")
-    monkeypatch.setenv("Q4_SOURCE_PREFILTER_BATCH_BYTES", str(1024 * 1024))
-    monkeypatch.setenv("Q4_SOURCE_PREFILTER_BATCH_MAX_EDGES", "5000")
-    monkeypatch.setenv("Q4_SOURCE_PREFILTER_REPLAY_BATCH_EDGES", "3")
+    monkeypatch.setenv("INPUT_QUEUE", "q4_filter_input")
+    monkeypatch.delenv("Q4_FILTER_INPUT_EXCHANGE", raising=False)
+    monkeypatch.setenv("Q4_FILTER_AMOUNT", str(amount))
+    monkeypatch.setenv("Q4_FILTER_PREFIX", "q4_filter")
+    monkeypatch.setenv("Q4_SUM_EXCHANGE", "q4_sum")
+    monkeypatch.setenv("Q4_SUM_AMOUNT", str(edge_partitions))
+    monkeypatch.setenv("Q4_SUM_ROUTING_PREFIX", "q4_sum")
+    monkeypatch.setenv("Q4_FILTER_BATCH_BYTES", str(1024 * 1024))
+    monkeypatch.setenv("Q4_FILTER_BATCH_MAX_EDGES", "5000")
+    monkeypatch.setenv("Q4_FILTER_REPLAY_BATCH_EDGES", "3")
 
-    module_name = "workers.q4_source_prefilter.source_prefilter"
+    module_name = "workers.scatter_gather.q4_filter.filters"
     sys.modules.pop(module_name, None)
     module = importlib.import_module(module_name)
 
@@ -101,7 +101,7 @@ def test_source_prefilter_replays_pending_rows_when_source_qualifies(
     monkeypatch, tmp_path
 ):
     module, _ = _load_module(monkeypatch, tmp_path, amount=1, edge_partitions=4)
-    worker = module.Q4SourcePrefilterWorker()
+    worker = module.Q4FilterWorker()
     output = worker._edge_store_output
     client_id = 17
 
@@ -141,8 +141,8 @@ def test_source_prefilter_replays_pending_rows_when_source_qualifies(
         _control_payload(worker, sender_id=0, expected_total=7),
     )
     assert _eof_counts(worker, output) == {
-        f"q4_edge_store_{partition}": by_partition.get(
-            f"q4_edge_store_{partition}", 0
+        f"q4_sum_{partition}": by_partition.get(
+            f"q4_sum_{partition}", 0
         )
         for partition in range(4)
     }
@@ -152,7 +152,7 @@ def test_source_prefilter_single_eof_discards_unqualified_pending_rows(
     monkeypatch, tmp_path
 ):
     module, _ = _load_module(monkeypatch, tmp_path, amount=1, edge_partitions=3)
-    worker = module.Q4SourcePrefilterWorker()
+    worker = module.Q4FilterWorker()
     output = worker._edge_store_output
     client_id = 21
 
@@ -172,9 +172,9 @@ def test_source_prefilter_single_eof_discards_unqualified_pending_rows(
 
     assert _counted_data_messages(worker, output)[0] == []
     assert _eof_counts(worker, output) == {
-        "q4_edge_store_0": 0,
-        "q4_edge_store_1": 0,
-        "q4_edge_store_2": 0,
+        "q4_sum_0": 0,
+        "q4_sum_1": 0,
+        "q4_sum_2": 0,
     }
     assert client_id not in worker._states_by_client
     assert client_id in worker._closed_by_client
@@ -184,7 +184,7 @@ def test_source_prefilter_multi_worker_waits_for_flush_order_and_reports_late_da
     monkeypatch, tmp_path
 ):
     module, _ = _load_module(monkeypatch, tmp_path, amount=2, worker_id=0)
-    worker = module.Q4SourcePrefilterWorker()
+    worker = module.Q4FilterWorker()
     reports = []
     monkeypatch.setattr(
         worker,
@@ -238,7 +238,7 @@ def test_source_prefilter_multi_worker_waits_for_flush_order_and_reports_late_da
 
     assert client_id in worker._closed_by_client
     assert _eof_counts(worker, worker._edge_store_output) == {
-        "q4_edge_store_0": 0,
-        "q4_edge_store_1": 0,
-        "q4_edge_store_2": 0,
+        "q4_sum_0": 0,
+        "q4_sum_1": 0,
+        "q4_sum_2": 0,
     }

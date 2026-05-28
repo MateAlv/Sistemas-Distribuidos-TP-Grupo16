@@ -17,21 +17,23 @@ def _load_module(
 ):
     monkeypatch.setenv("ID", str(worker_id))
     monkeypatch.setenv("MOM_HOST", "mom")
-    monkeypatch.setenv("Q4_EDGE_STORE_EXCHANGE", "q4_edge_store")
-    monkeypatch.setenv("Q4_EDGE_STORE_ROUTING_PREFIX", "q4_edge_store")
-    monkeypatch.setenv("Q4_SOURCE_PREFILTER_AMOUNT", str(source_amount))
-    monkeypatch.setenv("Q4_BLOCK_JOINER_EXCHANGE", "q4_block_joiner")
-    monkeypatch.setenv("Q4_BLOCK_JOINER_AMOUNT", str(block_partitions))
-    monkeypatch.setenv("Q4_BLOCK_JOINER_ROUTING_PREFIX", "q4_block_joiner")
-    monkeypatch.setenv("Q4_EDGE_STORE_BATCH_BYTES", str(1024 * 1024))
-    monkeypatch.setenv("Q4_EDGE_STORE_BATCH_MAX_EDGES", "5000")
-    monkeypatch.setenv("Q4_EDGE_STORE_HOT_PAIR_THRESHOLD", str(hot_threshold))
-    monkeypatch.setenv("Q4_EDGE_STORE_HOT_A_BUCKETS", str(a_buckets))
-    monkeypatch.setenv("Q4_EDGE_STORE_HOT_B_BUCKETS", str(b_buckets))
+    monkeypatch.setenv("Q4_SUM_EXCHANGE", "q4_sum")
+    monkeypatch.setenv("Q4_SUM_ROUTING_PREFIX", "q4_sum")
+    monkeypatch.setenv("Q4_FILTER_AMOUNT", str(source_amount))
+    monkeypatch.setenv("Q4_JOINER_EXCHANGE", "q4_joiner")
+    monkeypatch.setenv("Q4_JOINER_AMOUNT", str(block_partitions))
+    monkeypatch.setenv("Q4_JOINER_ROUTING_PREFIX", "q4_joiner")
+    monkeypatch.setenv("Q4_SUM_BATCH_BYTES", str(1024 * 1024))
+    monkeypatch.setenv("Q4_SUM_BATCH_MAX_EDGES", "5000")
 
-    module_name = "workers.q4_edge_store.edge_store"
+    module_name = "workers.scatter_gather.q4_sum.sums"
     sys.modules.pop(module_name, None)
     module = importlib.import_module(module_name)
+
+    # Hot-M planning thresholds are module constants now (no longer env-driven).
+    monkeypatch.setattr(module, "Q4_SUM_HOT_PAIR_THRESHOLD", hot_threshold)
+    monkeypatch.setattr(module, "Q4_SUM_HOT_A_BUCKETS", a_buckets)
+    monkeypatch.setattr(module, "Q4_SUM_HOT_B_BUCKETS", b_buckets)
 
     class FakeExchange:
         instances = []
@@ -107,7 +109,7 @@ def _eof_counts(worker, output):
 
 def test_edge_store_aggregates_counts_and_waits_for_all_source_eofs(monkeypatch):
     module, _ = _load_module(monkeypatch, source_amount=2, block_partitions=4)
-    worker = module.Q4EdgeStoreWorker()
+    worker = module.Q4SumWorker()
     output = worker._block_joiner_output
     client_id = 41
 
@@ -151,8 +153,8 @@ def test_edge_store_aggregates_counts_and_waits_for_all_source_eofs(monkeypatch)
         (module.Q4_EDGE_OUTGOING, b, 0, 0, 7),
     }
     assert _eof_counts(worker, output) == {
-        f"q4_block_joiner_{partition}": by_partition.get(
-            f"q4_block_joiner_{partition}", 0
+        f"q4_joiner_{partition}": by_partition.get(
+            f"q4_joiner_{partition}", 0
         )
         for partition in range(4)
     }
@@ -169,7 +171,7 @@ def test_edge_store_hot_intermediary_fans_out_to_blocks(monkeypatch):
         a_buckets=2,
         b_buckets=3,
     )
-    worker = module.Q4EdgeStoreWorker()
+    worker = module.Q4SumWorker()
     output = worker._block_joiner_output
     client_id = 42
 
@@ -231,7 +233,7 @@ def test_edge_store_hot_intermediary_fans_out_to_blocks(monkeypatch):
                 edge.a_bucket,
                 edge.b_bucket,
             )
-            assert routing_key == f"q4_block_joiner_{expected_partition}"
+            assert routing_key == f"q4_joiner_{expected_partition}"
 
     assert sum(by_partition.values()) == 10
     assert sum(_eof_counts(worker, output).values()) == 10
@@ -239,7 +241,7 @@ def test_edge_store_hot_intermediary_fans_out_to_blocks(monkeypatch):
 
 def test_edge_store_duplicate_eof_and_late_data_do_not_reemit(monkeypatch):
     module, _ = _load_module(monkeypatch, source_amount=1, block_partitions=2)
-    worker = module.Q4EdgeStoreWorker()
+    worker = module.Q4SumWorker()
     output = worker._block_joiner_output
     client_id = 43
     m = _account(module, "2", "M")

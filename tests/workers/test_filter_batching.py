@@ -317,9 +317,9 @@ def test_date_filter_routes_q4_to_source_prefilter_exchange_with_global_eof(
     monkeypatch,
 ):
     monkeypatch.setenv("FILTER_OUTPUT_BATCH_MAX_TX", "1")
-    monkeypatch.setenv("Q4_SOURCE_PREFILTER_INPUT_EXCHANGE", "q4_prefilter")
-    monkeypatch.setenv("Q4_SOURCE_PREFILTER_INPUT_ROUTING_PREFIX", "q4_source")
-    monkeypatch.setenv("Q4_SOURCE_PREFILTER_AMOUNT", "2")
+    monkeypatch.setenv("Q4_FILTER_INPUT_EXCHANGE", "q4_prefilter")
+    monkeypatch.setenv("Q4_FILTER_INPUT_ROUTING_PREFIX", "q4_source")
+    monkeypatch.setenv("Q4_FILTER_AMOUNT", "2")
     module = _import_filter_module(
         monkeypatch,
         configuration="DATE",
@@ -363,7 +363,7 @@ def test_date_filter_routes_q4_to_source_prefilter_exchange_with_global_eof(
         q4_accounts_by_key[key] = accounts
 
     for tx in txs:
-        expected_key = worker._q4_source_prefilter_output_for_transaction(tx)
+        expected_key = worker._q4_filter_output_for_transaction(tx)
         assert tx.from_account in q4_accounts_by_key[expected_key]
 
     control_payload = module.message_protocol.internal.ControlMessageSerializer.serialize(

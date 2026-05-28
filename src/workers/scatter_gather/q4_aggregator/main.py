@@ -1,12 +1,12 @@
 import logging
 import signal
 
-from edge_store import Q4EdgeStoreWorker
+from aggregator import Q4AggregatorWorker
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO)
-    worker = Q4EdgeStoreWorker()
+    worker = Q4AggregatorWorker()
     signal.signal(signal.SIGTERM, lambda *_: worker.handle_sigterm())
     try:
         worker.start()

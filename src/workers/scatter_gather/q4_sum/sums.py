@@ -7,12 +7,11 @@ from common.batch_buffer import BatchBuffer
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal import (
     InternalProtocol,
+    Q4BlockJoinEdge,
     Q4BlockJoinEdgeSerializer,
-    Q4PairDelta,
-    Q4PairDeltaSerializer,
+    Q4CountedEdgeSerializer,
     Q4_EDGE_INCOMING,
     Q4_EDGE_OUTGOING,
-    Q4_QUALIFY_THRESHOLD,
     Q4AccountId,
     partition_for_parts,
 )
@@ -25,44 +24,50 @@ from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbi
 
 ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
-Q4_BLOCK_JOINER_EXCHANGE = os.environ["Q4_BLOCK_JOINER_EXCHANGE"]
-Q4_BLOCK_JOINER_ROUTING_PREFIX = os.environ.get(
-    "Q4_BLOCK_JOINER_ROUTING_PREFIX", "q4_block_joiner"
+Q4_SUM_EXCHANGE = os.environ["Q4_SUM_EXCHANGE"]
+Q4_SUM_ROUTING_PREFIX = os.environ.get(
+    "Q4_SUM_ROUTING_PREFIX", "q4_sum"
 )
-Q4_EDGE_STORE_AMOUNT = int(os.environ["Q4_EDGE_STORE_AMOUNT"])
-Q4_PAIR_REDUCER_EXCHANGE = os.environ["Q4_PAIR_REDUCER_EXCHANGE"]
-Q4_PAIR_REDUCER_AMOUNT = int(os.environ["Q4_PAIR_REDUCER_AMOUNT"])
-Q4_PAIR_REDUCER_ROUTING_PREFIX = os.environ.get(
-    "Q4_PAIR_REDUCER_ROUTING_PREFIX", "q4_pair_reducer"
+Q4_FILTER_AMOUNT = int(os.environ.get("Q4_FILTER_AMOUNT", "1"))
+Q4_JOINER_EXCHANGE = os.environ["Q4_JOINER_EXCHANGE"]
+Q4_JOINER_AMOUNT = int(os.environ["Q4_JOINER_AMOUNT"])
+Q4_JOINER_ROUTING_PREFIX = os.environ.get(
+    "Q4_JOINER_ROUTING_PREFIX", "q4_joiner"
 )
-Q4_BLOCK_JOINER_BATCH_BYTES = int(
-    os.environ.get("Q4_BLOCK_JOINER_BATCH_BYTES", str(1024 * 1024))
+Q4_SUM_BATCH_BYTES = int(
+    os.environ.get("Q4_SUM_BATCH_BYTES", str(1024 * 1024))
 )
-Q4_BLOCK_JOINER_BATCH_MAX_DELTAS = int(
-    os.environ.get("Q4_BLOCK_JOINER_BATCH_MAX_DELTAS", "5000")
+Q4_SUM_BATCH_MAX_EDGES = int(
+    os.environ.get("Q4_SUM_BATCH_MAX_EDGES", "5000")
 )
+# Hot-M planning constants. An intermediary whose incoming×outgoing fan-out
+# exceeds the threshold is split across HOT_A_BUCKETS × HOT_B_BUCKETS join
+# blocks so a hub never lands on a single joiner.
+Q4_SUM_HOT_PAIR_THRESHOLD = 1_000_000
+Q4_SUM_HOT_A_BUCKETS = 16
+Q4_SUM_HOT_B_BUCKETS = 16
 
 
-class Q4BlockJoinerWorker:
-    """Computes weighted A->M->B contributions for one salted block shard."""
+class Q4SumWorker:
+    """Aggregates counted Q4 edges for the intermediary shard owned by this worker."""
 
     def __init__(self):
         self._input = MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST,
-            Q4_BLOCK_JOINER_EXCHANGE,
+            Q4_SUM_EXCHANGE,
             [self._input_routing_key()],
             queue_name=self._input_routing_key(),
             exclusive=False,
         )
-        self._pair_reducer_output = self._new_pair_reducer_output()
+        self._block_joiner_output = self._new_block_joiner_output()
 
         self._proto = InternalProtocol()
+        self._counted_edge_serializer = Q4CountedEdgeSerializer()
         self._block_edge_serializer = Q4BlockJoinEdgeSerializer()
-        self._pair_delta_serializer = Q4PairDeltaSerializer()
         self._control_serializer = ControlMessageSerializer()
         self._batcher = BatchBuffer(
-            Q4_BLOCK_JOINER_BATCH_BYTES,
-            Q4_BLOCK_JOINER_BATCH_MAX_DELTAS,
+            Q4_SUM_BATCH_BYTES,
+            Q4_SUM_BATCH_MAX_EDGES,
         )
 
         self._lock = threading.Lock()
@@ -75,14 +80,15 @@ class Q4BlockJoinerWorker:
 
         self._closed = False
         self._stopped = False
+        self._intermediaries_planned = 0
 
     def _input_routing_key(self) -> str:
-        return f"{Q4_BLOCK_JOINER_ROUTING_PREFIX}_{ID}"
+        return f"{Q4_SUM_ROUTING_PREFIX}_{ID}"
 
-    def _new_pair_reducer_output(self):
+    def _new_block_joiner_output(self):
         return MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST,
-            Q4_PAIR_REDUCER_EXCHANGE,
+            Q4_JOINER_EXCHANGE,
             [],
         )
 
@@ -107,24 +113,34 @@ class Q4BlockJoinerWorker:
             )
         )
 
+    def _block_routing_key(self, partition: int) -> str:
+        return f"{Q4_JOINER_ROUTING_PREFIX}_{partition}"
+
     def _account_parts(self, account: Q4AccountId):
         return (account.bank_id, account.account)
 
-    def _block_key(self, edge):
-        return (
-            edge.intermediate,
-            edge.a_bucket,
-            edge.b_bucket,
-        )
+    def _account_bucket(self, account: Q4AccountId, bucket_count: int) -> int:
+        return partition_for_parts(self._account_parts(account), bucket_count)
 
-    def _pair_partition(self, source: Q4AccountId, target: Q4AccountId) -> int:
+    def _block_partition(
+        self,
+        intermediate: Q4AccountId,
+        a_bucket: int,
+        b_bucket: int,
+    ) -> int:
         return partition_for_parts(
-            (*self._account_parts(source), *self._account_parts(target)),
-            Q4_PAIR_REDUCER_AMOUNT,
+            (*self._account_parts(intermediate), a_bucket, b_bucket),
+            Q4_JOINER_AMOUNT,
         )
 
-    def _pair_routing_key(self, partition: int) -> str:
-        return f"{Q4_PAIR_REDUCER_ROUTING_PREFIX}_{partition}"
+    def _block_plan(self, incoming_size: int, outgoing_size: int) -> tuple[int, int]:
+        estimated_pairs = incoming_size * outgoing_size
+        if estimated_pairs <= Q4_SUM_HOT_PAIR_THRESHOLD:
+            return 1, 1
+        return (
+            max(1, Q4_SUM_HOT_A_BUCKETS),
+            max(1, Q4_SUM_HOT_B_BUCKETS),
+        )
 
     def _send_batch(
         self,
@@ -133,20 +149,24 @@ class Q4BlockJoinerWorker:
         batch_payload: bytes,
         output=None,
     ) -> None:
-        output = output or self._pair_reducer_output
+        output = output or self._block_joiner_output
         output.send(
             self._packet(MessageType.DATA, client_id, batch_payload),
-            routing_key=self._pair_routing_key(partition),
+            routing_key=self._block_routing_key(partition),
         )
 
-    def _append_pair_delta(
+    def _append_block_edge(
         self,
         client_id: int,
-        delta: Q4PairDelta,
+        block_edge: Q4BlockJoinEdge,
         output=None,
     ) -> None:
-        partition = self._pair_partition(delta.source, delta.target)
-        payload = self._pair_delta_serializer.serialize(delta)
+        partition = self._block_partition(
+            block_edge.intermediate,
+            block_edge.a_bucket,
+            block_edge.b_bucket,
+        )
+        payload = self._block_edge_serializer.serialize(block_edge)
         batch_payload = self._batcher.append((client_id, partition), payload)
         counts = self._forwarded_by_partition_by_client.setdefault(client_id, {})
         counts[partition] = counts.get(partition, 0) + 1
@@ -159,33 +179,31 @@ class Q4BlockJoinerWorker:
         ):
             self._send_batch(client_id, partition, batch_payload, output)
 
-    def _accept_block_edges(self, client_id: int, payload: bytes) -> int:
-        edges = self._block_edge_serializer.deserialize_batch(payload)
+    def _accept_counted_edges(self, client_id: int, payload: bytes) -> int:
+        edges = self._counted_edge_serializer.deserialize_batch(payload)
         if not edges:
             return 0
 
         with self._lock:
             if client_id in self._closed_by_client:
                 logging.info(
-                    "q4_block_joiner_message_for_closed_client | id=%s | "
-                    "client_id=%s",
+                    "q4_sum_message_for_closed_client | id=%s | client_id=%s",
                     ID,
                     client_id,
                 )
                 return 0
 
             for edge in edges:
-                block = self._block_key(edge)
                 if edge.role == Q4_EDGE_INCOMING:
-                    self._incoming_by_client[client_id][block][edge.endpoint] += (
-                        edge.count
-                    )
+                    self._incoming_by_client[client_id][edge.intermediate][
+                        edge.endpoint
+                    ] += edge.count
                 elif edge.role == Q4_EDGE_OUTGOING:
-                    self._outgoing_by_client[client_id][block][edge.endpoint] += (
-                        edge.count
-                    )
+                    self._outgoing_by_client[client_id][edge.intermediate][
+                        edge.endpoint
+                    ] += edge.count
                 else:
-                    raise ValueError(f"unexpected Q4 block edge role: {edge.role}")
+                    raise ValueError(f"unexpected Q4 counted edge role: {edge.role}")
 
             self._processed_by_client[client_id] = (
                 self._processed_by_client.get(client_id, 0) + len(edges)
@@ -194,7 +212,7 @@ class Q4BlockJoinerWorker:
 
         if should_log_progress(processed_total):
             logging.info(
-                "q4_block_joiner_data_batch | id=%s | client_id=%s | "
+                "q4_sum_data_batch | id=%s | client_id=%s | "
                 "batch_size=%s | processed_total=%s",
                 ID,
                 client_id,
@@ -212,8 +230,8 @@ class Q4BlockJoinerWorker:
                 return
             if control.sender_id in self._eofs_by_client[client_id]:
                 logging.info(
-                    "q4_block_joiner_duplicate_eof | id=%s | client_id=%s | "
-                    "edge_store_id=%s",
+                    "q4_sum_duplicate_eof | id=%s | client_id=%s | "
+                    "source_prefilter_id=%s",
                     ID,
                     client_id,
                     control.sender_id,
@@ -223,18 +241,18 @@ class Q4BlockJoinerWorker:
             self._eofs_by_client[client_id].add(control.sender_id)
             eof_count = len(self._eofs_by_client[client_id])
             processed_total = self._processed_by_client.get(client_id, 0)
-            if eof_count >= Q4_EDGE_STORE_AMOUNT:
+            if eof_count >= Q4_FILTER_AMOUNT:
                 should_emit = True
 
         logging.info(
-            "q4_block_joiner_eof_received | id=%s | client_id=%s | "
-            "edge_store_id=%s | eof_count=%s | expected_eofs=%s | "
+            "q4_sum_eof_received | id=%s | client_id=%s | "
+            "source_prefilter_id=%s | eof_count=%s | expected_eofs=%s | "
             "sender_expected_total=%s | processed_total=%s",
             ID,
             client_id,
             control.sender_id,
             eof_count,
-            Q4_EDGE_STORE_AMOUNT,
+            Q4_FILTER_AMOUNT,
             control.expected_total,
             processed_total,
         )
@@ -242,61 +260,76 @@ class Q4BlockJoinerWorker:
         if should_emit:
             self._emit_and_close_client(client_id)
 
-    def _emit_client_pairs(self, client_id: int, output=None) -> None:
+    def _emit_client_blocks(self, client_id: int, output=None) -> None:
         incoming = self._incoming_by_client.get(client_id, {})
         outgoing = self._outgoing_by_client.get(client_id, {})
-        blocks = set(incoming) & set(outgoing)
+        intermediaries = set(incoming) & set(outgoing)
 
-        for block in blocks:
-            incoming_counts = incoming[block]
-            outgoing_counts = outgoing[block]
+        for intermediate in intermediaries:
+            incoming_counts = incoming[intermediate]
+            outgoing_counts = outgoing[intermediate]
             if not incoming_counts or not outgoing_counts:
                 continue
-
-            emitted_for_block = 0
-            for source, incoming_count in incoming_counts.items():
-                for target, outgoing_count in outgoing_counts.items():
-                    if source == target:
-                        continue
-                    weight = incoming_count * outgoing_count
-                    if weight <= 0:
-                        continue
-                    self._append_pair_delta(
+            a_buckets, b_buckets = self._block_plan(
+                len(incoming_counts),
+                len(outgoing_counts),
+            )
+            self._intermediaries_planned += 1
+            if should_log_progress(self._intermediaries_planned):
+                logging.info(
+                    "q4_sum_plan_intermediate | id=%s | client_id=%s | "
+                    "intermediate_bank=%s | intermediate_account=%s | "
+                    "incoming_endpoints=%s | outgoing_endpoints=%s | "
+                    "a_buckets=%s | b_buckets=%s",
+                    ID,
+                    client_id,
+                    intermediate.bank_id,
+                    intermediate.account,
+                    len(incoming_counts),
+                    len(outgoing_counts),
+                    a_buckets,
+                    b_buckets,
+                )
+            for endpoint, count in incoming_counts.items():
+                a_bucket = self._account_bucket(endpoint, a_buckets)
+                for b_bucket in range(b_buckets):
+                    self._append_block_edge(
                         client_id,
-                        Q4PairDelta(
-                            source=source,
-                            target=target,
-                            weight=min(weight, Q4_QUALIFY_THRESHOLD),
+                        Q4BlockJoinEdge(
+                            role=Q4_EDGE_INCOMING,
+                            intermediate=intermediate,
+                            endpoint=endpoint,
+                            a_bucket=a_bucket,
+                            b_bucket=b_bucket,
+                            count=count,
                         ),
                         output,
                     )
-                    emitted_for_block += 1
 
-            intermediate, a_bucket, b_bucket = block
-            logging.info(
-                "q4_block_joiner_emit_block | id=%s | client_id=%s | "
-                "intermediate_bank=%s | intermediate_account=%s | "
-                "a_bucket=%s | b_bucket=%s | incoming_endpoints=%s | "
-                "outgoing_endpoints=%s | pair_deltas=%s",
-                ID,
-                client_id,
-                intermediate.bank_id,
-                intermediate.account,
-                a_bucket,
-                b_bucket,
-                len(incoming_counts),
-                len(outgoing_counts),
-                emitted_for_block,
-            )
+            for endpoint, count in outgoing_counts.items():
+                b_bucket = self._account_bucket(endpoint, b_buckets)
+                for a_bucket in range(a_buckets):
+                    self._append_block_edge(
+                        client_id,
+                        Q4BlockJoinEdge(
+                            role=Q4_EDGE_OUTGOING,
+                            intermediate=intermediate,
+                            endpoint=endpoint,
+                            a_bucket=a_bucket,
+                            b_bucket=b_bucket,
+                            count=count,
+                        ),
+                        output,
+                    )
 
-    def _forward_eof_to_pair_reducers(
+    def _forward_eof_to_joiners(
         self,
         client_id: int,
         counts_by_partition: dict[int, int],
         output=None,
     ) -> None:
-        output = output or self._pair_reducer_output
-        for partition in range(Q4_PAIR_REDUCER_AMOUNT):
+        output = output or self._block_joiner_output
+        for partition in range(Q4_JOINER_AMOUNT):
             expected_total = int(counts_by_partition.get(partition, 0))
             output.send(
                 self._packet(
@@ -308,11 +341,11 @@ class Q4BlockJoinerWorker:
                         processed_count=0,
                     ),
                 ),
-                routing_key=self._pair_routing_key(partition),
+                routing_key=self._block_routing_key(partition),
             )
             logging.info(
-                "q4_block_joiner_forward_eof | id=%s | client_id=%s | "
-                "pair_reducer_partition=%s | expected_total=%s",
+                "q4_sum_forward_eof | id=%s | client_id=%s | "
+                "block_joiner_partition=%s | expected_total=%s",
                 ID,
                 client_id,
                 partition,
@@ -324,7 +357,7 @@ class Q4BlockJoinerWorker:
             if client_id in self._closed_by_client:
                 return
 
-        self._emit_client_pairs(client_id, output)
+        self._emit_client_blocks(client_id, output)
         self._flush_client_buffers(client_id, output)
 
         with self._lock:
@@ -338,33 +371,33 @@ class Q4BlockJoinerWorker:
             self._forwarded_by_partition_by_client.pop(client_id, None)
             self._closed_by_client.add(client_id)
 
-        self._forward_eof_to_pair_reducers(client_id, counts_by_partition, output)
+        self._forward_eof_to_joiners(client_id, counts_by_partition, output)
 
     def _on_message(self, raw, ack, nack):
         try:
             msg_type, client_id, payload = self._proto.unpack_packet(raw)
             if msg_type == MessageType.DATA:
-                self._accept_block_edges(client_id, payload)
+                self._accept_counted_edges(client_id, payload)
             elif msg_type == MessageType.EOF:
                 self._handle_eof(client_id, payload)
             else:
-                raise ValueError(f"unexpected q4 block joiner message type: {msg_type}")
+                raise ValueError(f"unexpected q4 edge store message type: {msg_type}")
             ack()
         except Exception:
-            logging.exception("q4_block_joiner_error | id=%s", ID)
+            logging.exception("q4_sum_error | id=%s", ID)
             nack()
 
     def start(self) -> None:
         logging.info(
-            "q4_block_joiner_start | id=%s | input_exchange=%s | input_key=%s | "
-            "edge_store_amount=%s | pair_reducer_exchange=%s | "
-            "pair_reducer_amount=%s",
+            "q4_sum_start | id=%s | input_exchange=%s | input_key=%s | "
+            "filter_amount=%s | block_joiner_exchange=%s | "
+            "joiner_amount=%s",
             ID,
-            Q4_BLOCK_JOINER_EXCHANGE,
+            Q4_SUM_EXCHANGE,
             self._input_routing_key(),
-            Q4_EDGE_STORE_AMOUNT,
-            Q4_PAIR_REDUCER_EXCHANGE,
-            Q4_PAIR_REDUCER_AMOUNT,
+            Q4_FILTER_AMOUNT,
+            Q4_JOINER_EXCHANGE,
+            Q4_JOINER_AMOUNT,
         )
         try:
             if not self._stopped:
@@ -377,19 +410,15 @@ class Q4BlockJoinerWorker:
         if self._stopped:
             return
         self._stopped = True
-        logging.info("q4_block_joiner_shutdown | id=%s", ID)
+        logging.info("q4_sum_shutdown | id=%s", ID)
         self._input.request_stop_consuming()
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        for resource in (self._input, self._pair_reducer_output):
+        for resource in (self._input, self._block_joiner_output):
             try:
                 resource.close()
             except Exception as e:
-                logging.warning(
-                    "q4_block_joiner_close_error | id=%s | error=%s",
-                    ID,
-                    e,
-                )
+                logging.warning("q4_sum_close_error | id=%s | error=%s", ID, e)

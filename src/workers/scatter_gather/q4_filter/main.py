@@ -1,12 +1,12 @@
 import logging
 import signal
 
-from block_joiner import Q4BlockJoinerWorker
+from filters import Q4FilterWorker
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO)
-    worker = Q4BlockJoinerWorker()
+    worker = Q4FilterWorker()
     signal.signal(signal.SIGTERM, lambda *_: worker.handle_sigterm())
     try:
         worker.start()

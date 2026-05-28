@@ -52,10 +52,10 @@ class Q4BlockJoinEdge:
 
 
 @dataclass(frozen=True)
-class Q4PairDelta:
+class Q4PairPaths:
     source: Q4AccountId
     target: Q4AccountId
-    weight: int
+    path_count: int
 
 
 class ScatterGatherRelationSerializer:
@@ -267,37 +267,37 @@ class Q4BlockJoinEdgeSerializer:
         return _deserialize_batch(cls, data, "Q4 block join edge")
 
 
-class Q4PairDeltaSerializer:
+class Q4PairPathsSerializer:
     FORMAT = f"!{Q4AccountIdSerializer.SIZE}s{Q4AccountIdSerializer.SIZE}sQ"
     SIZE = struct.calcsize(FORMAT)
 
     @classmethod
-    def serialize(cls, delta: Q4PairDelta) -> bytes:
+    def serialize(cls, pair_paths: Q4PairPaths) -> bytes:
         return struct.pack(
             cls.FORMAT,
-            Q4AccountIdSerializer.serialize(delta.source),
-            Q4AccountIdSerializer.serialize(delta.target),
-            min(int(delta.weight), Q4_QUALIFY_THRESHOLD),
+            Q4AccountIdSerializer.serialize(pair_paths.source),
+            Q4AccountIdSerializer.serialize(pair_paths.target),
+            min(int(pair_paths.path_count), Q4_QUALIFY_THRESHOLD),
         )
 
     @classmethod
-    def deserialize(cls, data: bytes) -> Q4PairDelta:
+    def deserialize(cls, data: bytes) -> Q4PairPaths:
         if len(data) != cls.SIZE:
-            raise ValueError(f"invalid Q4 pair delta size: {len(data)}")
-        source, target, weight = struct.unpack(cls.FORMAT, data)
-        return Q4PairDelta(
+            raise ValueError(f"invalid Q4 pair paths size: {len(data)}")
+        source, target, path_count = struct.unpack(cls.FORMAT, data)
+        return Q4PairPaths(
             source=Q4AccountIdSerializer.deserialize(source),
             target=Q4AccountIdSerializer.deserialize(target),
-            weight=weight,
+            path_count=path_count,
         )
 
     @classmethod
-    def serialize_batch(cls, deltas: list[Q4PairDelta]) -> bytes:
-        return b"".join(cls.serialize(delta) for delta in deltas)
+    def serialize_batch(cls, items: list[Q4PairPaths]) -> bytes:
+        return b"".join(cls.serialize(item) for item in items)
 
     @classmethod
-    def deserialize_batch(cls, data: bytes) -> list[Q4PairDelta]:
-        return _deserialize_batch(cls, data, "Q4 pair delta")
+    def deserialize_batch(cls, data: bytes) -> list[Q4PairPaths]:
+        return _deserialize_batch(cls, data, "Q4 pair paths")
 
 
 def _encode_fixed(value, size: int, field_name: str) -> bytes:

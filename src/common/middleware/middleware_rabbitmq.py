@@ -4,7 +4,11 @@ import pika
 import uuid
 import time
 import threading
-from common.logging_utils import MessageFlowLogger
+from common.logging_utils import get_flow_logger
+
+for _pika_logger in ("pika", "pika.adapters", "pika.connection", "pika.channel"):
+    logging.getLogger(_pika_logger).setLevel(logging.WARNING)
+
 from .middleware import (
     MessageMiddlewareQueue, 
     MessageMiddlewareExchange, 
@@ -31,7 +35,7 @@ class _RabbitMQBase:
         self._channel = None
         self._user_callback = None
         self._queue_name = None
-        self._flow_logger = MessageFlowLogger()
+        self._flow_logger = get_flow_logger()
         try:
             self._connection = pika.BlockingConnection(
                 pika.ConnectionParameters(

@@ -54,32 +54,29 @@ ACCOUNTS_LINE_BATCH_QUEUE = "accounts_line_batch_queue"
 SG_MAPPER_QUEUE = "scatter_gather_mapper_queue"
 SG_LINKER_EXCHANGE = "sg_linker_exchange"
 SG_DETECTOR_EXCHANGE = "sg_detector_exchange"
-Q4_SOURCE_PREFILTER_INPUT_EXCHANGE = "q4_source_prefilter_input_exchange"
-Q4_SOURCE_PREFILTER_ROUTING_PREFIX = "q4_source_prefilter"
-Q4_EDGE_STORE_EXCHANGE = "q4_edge_store_exchange"
-Q4_EDGE_STORE_ROUTING_PREFIX = "q4_edge_store"
-Q4_BLOCK_JOINER_EXCHANGE = "q4_block_joiner_exchange"
-Q4_BLOCK_JOINER_ROUTING_PREFIX = "q4_block_joiner"
-Q4_PAIR_REDUCER_EXCHANGE = "q4_pair_reducer_exchange"
-Q4_PAIR_REDUCER_ROUTING_PREFIX = "q4_pair_reducer"
-Q4_ACCOUNT_DEDUPER_EXCHANGE = "q4_account_deduper_exchange"
-Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX = "q4_account_deduper"
-Q4_ACCOUNT_DEDUPER_RESPONSE_QUEUE_PREFIX = "q4_account_deduper_response"
-
-# Q3 sharding: exchanges direct + routing key por shard de barrier.
-# Cada barrier ID consume su queue bindeada al routing key "{prefix}_{ID}".
+Q4_FILTER_INPUT_EXCHANGE = "q4_filter_input_exchange"
+Q4_FILTER_ROUTING_PREFIX = "q4_filter"
+Q4_SUM_EXCHANGE = "q4_sum_exchange"
+Q4_SUM_ROUTING_PREFIX = "q4_sum"
+Q4_JOINER_EXCHANGE = "q4_joiner_exchange"
+Q4_JOINER_ROUTING_PREFIX = "q4_joiner"
+Q4_AGGREGATOR_EXCHANGE = "q4_aggregator_exchange"
+Q4_AGGREGATOR_ROUTING_PREFIX = "q4_aggregator"
+Q4_DEDUPER_EXCHANGE = "q4_deduper_exchange"
+Q4_DEDUPER_ROUTING_PREFIX = "q4_deduper"
+Q4_DEDUPER_RESPONSE_QUEUE_PREFIX = "q4_deduper_response"
 Q3_AVERAGES_EXCHANGE = "q3_averages_exchange"
 Q3_CANDIDATES_EXCHANGE = "q3_candidates_exchange"
 Q3_AVERAGES_ROUTING_PREFIX = "q3_averages"
 Q3_CANDIDATES_ROUTING_PREFIX = "q3_candidates"
 OBSERVABILITY_DEFAULTS = {
     "FLOW_LOG_ENABLED": "1",
-    "FLOW_LOG_EVERY_MESSAGES": "100",
-    "FLOW_LOG_EVERY_BYTES": str(8 * 1024 * 1024),
+    "FLOW_LOG_EVERY_MESSAGES": "100000",
+    "FLOW_LOG_EVERY_BYTES": str(2 * 1024 * 1024 * 1024),
     "FLOW_LOG_FIRST_MESSAGES": "1",
-    "WORKER_LOG_EVERY_MESSAGES": "100",
-    "CHUNK_LOG_EVERY": "100",
-    "RESULT_LOG_EVERY": "100",
+    "WORKER_LOG_EVERY_MESSAGES": "100000",
+    "CHUNK_LOG_EVERY": "10000",
+    "RESULT_LOG_EVERY": "100000",
 }
 
 
@@ -97,11 +94,11 @@ def main() -> int:
             args.sg_mapper_workers,
             args.sg_linker_workers,
             args.sg_detector_workers,
-            args.q4_source_prefilter_workers,
-            args.q4_edge_store_workers,
-            args.q4_block_joiner_workers,
-            args.q4_pair_reducer_workers,
-            args.q4_account_deduper_workers,
+            args.q4_filter_workers,
+            args.q4_sum_workers,
+            args.q4_joiner_workers,
+            args.q4_aggregator_workers,
+            args.q4_deduper_workers,
             clients=args.clients,
             q3_barrier_workers=args.q3_barrier_workers,
         )
@@ -146,11 +143,11 @@ def parse_args():
     parser.add_argument("--sg-mapper-workers", type=int, default=None, help="Override scatter-gather mapper worker count.")
     parser.add_argument("--sg-linker-workers", type=int, default=None, help="Override scatter-gather linker worker count.")
     parser.add_argument("--sg-detector-workers", type=int, default=None, help="Override scatter-gather detector worker count.")
-    parser.add_argument("--q4-source-prefilter-workers", type=int, default=None, help="Override Q4 source prefilter worker count.")
-    parser.add_argument("--q4-edge-store-workers", type=int, default=None, help="Override Q4 edge store worker count.")
-    parser.add_argument("--q4-block-joiner-workers", type=int, default=None, help="Override Q4 block joiner worker count.")
-    parser.add_argument("--q4-pair-reducer-workers", type=int, default=None, help="Override Q4 pair reducer worker count.")
-    parser.add_argument("--q4-account-deduper-workers", type=int, default=None, help="Override Q4 account deduper worker count.")
+    parser.add_argument("--q4-filter-workers", type=int, default=None, help="Override Q4 source prefilter worker count.")
+    parser.add_argument("--q4-sum-workers", type=int, default=None, help="Override Q4 edge store worker count.")
+    parser.add_argument("--q4-joiner-workers", type=int, default=None, help="Override Q4 block joiner worker count.")
+    parser.add_argument("--q4-aggregator-workers", type=int, default=None, help="Override Q4 pair reducer worker count.")
+    parser.add_argument("--q4-deduper-workers", type=int, default=None, help="Override Q4 account deduper worker count.")
     parser.add_argument("--q3-barrier-workers", type=int, default=None, help="Override q3_barrier worker count (sharded by client_id).")
     parser.add_argument("--prefetch", type=int, default=None, help="PREFETCH_COUNT for filter/sum services.")
     parser.add_argument("--clients", type=int, default=None, help="Number of client containers to spawn. Each gets a distinct client_id sharing the first configured dataset.")
@@ -174,11 +171,11 @@ def preset_config(
     sg_mapper_workers: int | None = None,
     sg_linker_workers: int | None = None,
     sg_detector_workers: int | None = None,
-    q4_source_prefilter_workers: int | None = None,
-    q4_edge_store_workers: int | None = None,
-    q4_block_joiner_workers: int | None = None,
-    q4_pair_reducer_workers: int | None = None,
-    q4_account_deduper_workers: int | None = None,
+    q4_filter_workers: int | None = None,
+    q4_sum_workers: int | None = None,
+    q4_joiner_workers: int | None = None,
+    q4_aggregator_workers: int | None = None,
+    q4_deduper_workers: int | None = None,
     clients: int | None = None,
     q3_barrier_workers: int | None = None,
 ) -> dict:
@@ -246,29 +243,29 @@ def preset_config(
                 "min_intermediaries": 5,
             },
             "q4": {
-                "source_prefilters": (
-                    q4_source_prefilter_workers
-                    if q4_source_prefilter_workers is not None
+                "filters": (
+                    q4_filter_workers
+                    if q4_filter_workers is not None
                     else 1
                 ),
-                "edge_stores": (
-                    q4_edge_store_workers
-                    if q4_edge_store_workers is not None
+                "sums": (
+                    q4_sum_workers
+                    if q4_sum_workers is not None
                     else 1
                 ),
-                "block_joiners": (
-                    q4_block_joiner_workers
-                    if q4_block_joiner_workers is not None
+                "joiners": (
+                    q4_joiner_workers
+                    if q4_joiner_workers is not None
                     else 1
                 ),
-                "pair_reducers": (
-                    q4_pair_reducer_workers
-                    if q4_pair_reducer_workers is not None
+                "aggregators": (
+                    q4_aggregator_workers
+                    if q4_aggregator_workers is not None
                     else 1
                 ),
-                "account_dedupers": (
-                    q4_account_deduper_workers
-                    if q4_account_deduper_workers is not None
+                "dedupers": (
+                    q4_deduper_workers
+                    if q4_deduper_workers is not None
                     else 1
                 ),
             },
@@ -302,16 +299,16 @@ def apply_cli_overrides(config: dict, args, path: Path) -> None:
         scatter_gather["linkers"] = args.sg_linker_workers
     if args.sg_detector_workers is not None:
         scatter_gather["detectors"] = args.sg_detector_workers
-    if args.q4_source_prefilter_workers is not None:
-        q4["source_prefilters"] = args.q4_source_prefilter_workers
-    if args.q4_edge_store_workers is not None:
-        q4["edge_stores"] = args.q4_edge_store_workers
-    if args.q4_block_joiner_workers is not None:
-        q4["block_joiners"] = args.q4_block_joiner_workers
-    if args.q4_pair_reducer_workers is not None:
-        q4["pair_reducers"] = args.q4_pair_reducer_workers
-    if args.q4_account_deduper_workers is not None:
-        q4["account_dedupers"] = args.q4_account_deduper_workers
+    if args.q4_filter_workers is not None:
+        q4["filters"] = args.q4_filter_workers
+    if args.q4_sum_workers is not None:
+        q4["sums"] = args.q4_sum_workers
+    if args.q4_joiner_workers is not None:
+        q4["joiners"] = args.q4_joiner_workers
+    if args.q4_aggregator_workers is not None:
+        q4["aggregators"] = args.q4_aggregator_workers
+    if args.q4_deduper_workers is not None:
+        q4["dedupers"] = args.q4_deduper_workers
     if args.q3_barrier_workers is not None:
         workers["q3_barrier"] = args.q3_barrier_workers
     if args.prefetch is not None:
@@ -390,11 +387,11 @@ def validate_config(config: dict, path: Path) -> None:
         "workers.scatter_gather.mappers": get_nested(workers, "scatter_gather.mappers", 1),
         "workers.scatter_gather.linkers": get_nested(workers, "scatter_gather.linkers", 1),
         "workers.scatter_gather.detectors": get_nested(workers, "scatter_gather.detectors", 1),
-        "workers.q4.source_prefilters": get_nested(workers, "q4.source_prefilters", 1),
-        "workers.q4.edge_stores": get_nested(workers, "q4.edge_stores", 1),
-        "workers.q4.block_joiners": get_nested(workers, "q4.block_joiners", 1),
-        "workers.q4.pair_reducers": get_nested(workers, "q4.pair_reducers", 1),
-        "workers.q4.account_dedupers": get_nested(workers, "q4.account_dedupers", 1),
+        "workers.q4.filters": get_nested(workers, "q4.filters", 1),
+        "workers.q4.sums": get_nested(workers, "q4.sums", 1),
+        "workers.q4.joiners": get_nested(workers, "q4.joiners", 1),
+        "workers.q4.aggregators": get_nested(workers, "q4.aggregators", 1),
+        "workers.q4.dedupers": get_nested(workers, "q4.dedupers", 1),
     }
     for key, value in positive_counts.items():
         if int(value) <= 0:
@@ -455,15 +452,14 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
         "sg_mapper": int(get_nested(workers, "scatter_gather.mappers", 1)),
         "sg_linker": int(get_nested(workers, "scatter_gather.linkers", 1)),
         "sg_detector": int(get_nested(workers, "scatter_gather.detectors", 1)),
-        "q4_source_prefilter": int(get_nested(workers, "q4.source_prefilters", 1)),
-        "q4_edge_store": int(get_nested(workers, "q4.edge_stores", 1)),
-        "q4_block_joiner": int(get_nested(workers, "q4.block_joiners", 1)),
-        "q4_pair_reducer": int(get_nested(workers, "q4.pair_reducers", 1)),
-        "q4_account_deduper": int(get_nested(workers, "q4.account_dedupers", 1)),
+        "q4_filter": int(get_nested(workers, "q4.filters", 1)),
+        "q4_sum": int(get_nested(workers, "q4.sums", 1)),
+        "q4_joiner": int(get_nested(workers, "q4.joiners", 1)),
+        "q4_aggregator": int(get_nested(workers, "q4.aggregators", 1)),
+        "q4_deduper": int(get_nested(workers, "q4.dedupers", 1)),
         "q3_barrier": int(workers.get("q3_barrier", 1)),
     }
     min_intermediaries = int(get_nested(workers, "scatter_gather.min_intermediaries", 5))
-    q4_settings = get_nested(workers, "q4", {})
 
     services = {}
     services["rabbitmq"] = rabbitmq_service(expose_ports)
@@ -500,7 +496,7 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 transaction_exchange=TRANSACTION_EXCHANGE if configuration == "USD" else None,
                 enabled_queries=enabled_queries,
                 q3_barrier_amount=counts["q3_barrier"],
-                q4_source_prefilter_amount=counts["q4_source_prefilter"],
+                q4_filter_amount=counts["q4_filter"],
             )
 
     if q5_enabled:
@@ -514,7 +510,7 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 transaction_exchange=TRANSACTION_EXCHANGE,
                 enabled_queries=enabled_queries,
                 q3_barrier_amount=counts["q3_barrier"],
-                q4_source_prefilter_amount=counts["q4_source_prefilter"],
+                q4_filter_amount=counts["q4_filter"],
             )
 
         services["rates_service"] = rates_service()
@@ -637,43 +633,40 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
         )
 
     if q4_enabled:
-        for index in range(counts["q4_source_prefilter"]):
-            services[f"q4_source_prefilter_{index}"] = q4_source_prefilter_service(
+        for index in range(counts["q4_filter"]):
+            services[f"q4_filter_{index}"] = q4_filter_service(
                 index=index,
-                amount=counts["q4_source_prefilter"],
-                edge_store_amount=counts["q4_edge_store"],
+                amount=counts["q4_filter"],
+                sum_amount=counts["q4_sum"],
                 settings=settings,
             )
-        for index in range(counts["q4_edge_store"]):
-            services[f"q4_edge_store_{index}"] = q4_edge_store_service(
+        for index in range(counts["q4_sum"]):
+            services[f"q4_sum_{index}"] = q4_sum_service(
                 index=index,
-                source_prefilter_amount=counts["q4_source_prefilter"],
-                block_joiner_amount=counts["q4_block_joiner"],
-                settings=settings,
-                q4_settings=q4_settings,
-            )
-        for index in range(counts["q4_block_joiner"]):
-            services[f"q4_block_joiner_{index}"] = q4_block_joiner_service(
-                index=index,
-                edge_store_amount=counts["q4_edge_store"],
-                pair_reducer_amount=counts["q4_pair_reducer"],
+                filter_amount=counts["q4_filter"],
+                joiner_amount=counts["q4_joiner"],
                 settings=settings,
             )
-        for index in range(counts["q4_pair_reducer"]):
-            services[f"q4_pair_reducer_{index}"] = q4_pair_reducer_service(
+        for index in range(counts["q4_joiner"]):
+            services[f"q4_joiner_{index}"] = q4_joiner_service(
                 index=index,
-                block_joiner_amount=counts["q4_block_joiner"],
-                account_deduper_amount=counts["q4_account_deduper"],
+                sum_amount=counts["q4_sum"],
+                aggregator_amount=counts["q4_aggregator"],
                 settings=settings,
-                q4_settings=q4_settings,
             )
-        for index in range(counts["q4_account_deduper"]):
-            services[f"q4_account_deduper_{index}"] = q4_account_deduper_service(
+        for index in range(counts["q4_aggregator"]):
+            services[f"q4_aggregator_{index}"] = q4_aggregator_service(
                 index=index,
-                pair_reducer_amount=counts["q4_pair_reducer"],
-                account_deduper_amount=counts["q4_account_deduper"],
+                joiner_amount=counts["q4_joiner"],
+                deduper_amount=counts["q4_deduper"],
                 settings=settings,
-                q4_settings=q4_settings,
+            )
+        for index in range(counts["q4_deduper"]):
+            services[f"q4_deduper_{index}"] = q4_deduper_service(
+                index=index,
+                aggregator_amount=counts["q4_aggregator"],
+                deduper_amount=counts["q4_deduper"],
+                settings=settings,
             )
 
     client_dependencies = [
@@ -809,7 +802,7 @@ def filter_service(
     transaction_exchange: str | None = None,
     enabled_queries: set[str] | None = None,
     q3_barrier_amount: int = 1,
-    q4_source_prefilter_amount: int = 1,
+    q4_filter_amount: int = 1,
 ) -> dict:
     enabled_queries = enabled_queries or {"q1", "q2", "q3", "q4", "q5"}
     environment = [
@@ -840,9 +833,9 @@ def filter_service(
     ]
     if "q4" in enabled_queries:
         environment.extend([
-            f"Q4_SOURCE_PREFILTER_AMOUNT={q4_source_prefilter_amount}",
-            f"Q4_SOURCE_PREFILTER_INPUT_EXCHANGE={Q4_SOURCE_PREFILTER_INPUT_EXCHANGE}",
-            f"Q4_SOURCE_PREFILTER_INPUT_ROUTING_PREFIX={Q4_SOURCE_PREFILTER_ROUTING_PREFIX}",
+            f"Q4_FILTER_AMOUNT={q4_filter_amount}",
+            f"Q4_FILTER_INPUT_EXCHANGE={Q4_FILTER_INPUT_EXCHANGE}",
+            f"Q4_FILTER_INPUT_ROUTING_PREFIX={Q4_FILTER_ROUTING_PREFIX}",
         ])
     # Sharded mode: el filter_date publica candidates al exchange con routing
     # key por client_id en lugar de la queue compartida.
@@ -1026,10 +1019,10 @@ def q3_barrier_service(
     )
 
 
-def q4_source_prefilter_service(
+def q4_filter_service(
     index: int,
     amount: int,
-    edge_store_amount: int,
+    sum_amount: int,
     settings: dict,
 ) -> dict:
     environment = [
@@ -1037,62 +1030,58 @@ def q4_source_prefilter_service(
         f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
         f"MOM_HOST={MOM_HOST}",
         "PYTHONUNBUFFERED=1",
-        f"Q4_SOURCE_PREFILTER_AMOUNT={amount}",
-        f"Q4_SOURCE_PREFILTER_INPUT_EXCHANGE={Q4_SOURCE_PREFILTER_INPUT_EXCHANGE}",
-        f"Q4_SOURCE_PREFILTER_INPUT_ROUTING_PREFIX={Q4_SOURCE_PREFILTER_ROUTING_PREFIX}",
-        f"Q4_SOURCE_PREFILTER_PREFIX={Q4_SOURCE_PREFILTER_ROUTING_PREFIX}",
-        f"Q4_EDGE_STORE_EXCHANGE={Q4_EDGE_STORE_EXCHANGE}",
-        f"Q4_EDGE_STORE_AMOUNT={edge_store_amount}",
-        f"Q4_EDGE_STORE_ROUTING_PREFIX={Q4_EDGE_STORE_ROUTING_PREFIX}",
+        f"Q4_FILTER_AMOUNT={amount}",
+        f"Q4_FILTER_INPUT_EXCHANGE={Q4_FILTER_INPUT_EXCHANGE}",
+        f"Q4_FILTER_INPUT_ROUTING_PREFIX={Q4_FILTER_ROUTING_PREFIX}",
+        f"Q4_FILTER_PREFIX={Q4_FILTER_ROUTING_PREFIX}",
+        f"Q4_SUM_EXCHANGE={Q4_SUM_EXCHANGE}",
+        f"Q4_SUM_AMOUNT={sum_amount}",
+        f"Q4_SUM_ROUTING_PREFIX={Q4_SUM_ROUTING_PREFIX}",
     ]
     prefetch = settings.get("filter_prefetch_count")
     if prefetch is not None:
         environment.append(f"PREFETCH_COUNT={prefetch}")
 
     return base_service(
-        "workers/q4_source_prefilter/Dockerfile",
+        "workers/scatter_gather/q4_filter/Dockerfile",
         depends_on=depends_on_rabbitmq(),
         environment=environment,
     )
 
 
-def q4_edge_store_service(
+def q4_sum_service(
     index: int,
-    source_prefilter_amount: int,
-    block_joiner_amount: int,
+    filter_amount: int,
+    joiner_amount: int,
     settings: dict,
-    q4_settings: dict,
 ) -> dict:
     environment = [
         f"ID={index}",
         f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
         f"MOM_HOST={MOM_HOST}",
         "PYTHONUNBUFFERED=1",
-        f"Q4_EDGE_STORE_EXCHANGE={Q4_EDGE_STORE_EXCHANGE}",
-        f"Q4_EDGE_STORE_ROUTING_PREFIX={Q4_EDGE_STORE_ROUTING_PREFIX}",
-        f"Q4_SOURCE_PREFILTER_AMOUNT={source_prefilter_amount}",
-        f"Q4_BLOCK_JOINER_EXCHANGE={Q4_BLOCK_JOINER_EXCHANGE}",
-        f"Q4_BLOCK_JOINER_AMOUNT={block_joiner_amount}",
-        f"Q4_BLOCK_JOINER_ROUTING_PREFIX={Q4_BLOCK_JOINER_ROUTING_PREFIX}",
-        f"Q4_EDGE_STORE_HOT_PAIR_THRESHOLD={q4_settings.get('hot_pair_threshold', 1000000)}",
-        f"Q4_EDGE_STORE_HOT_A_BUCKETS={q4_settings.get('hot_a_buckets', 16)}",
-        f"Q4_EDGE_STORE_HOT_B_BUCKETS={q4_settings.get('hot_b_buckets', 16)}",
+        f"Q4_SUM_EXCHANGE={Q4_SUM_EXCHANGE}",
+        f"Q4_SUM_ROUTING_PREFIX={Q4_SUM_ROUTING_PREFIX}",
+        f"Q4_FILTER_AMOUNT={filter_amount}",
+        f"Q4_JOINER_EXCHANGE={Q4_JOINER_EXCHANGE}",
+        f"Q4_JOINER_AMOUNT={joiner_amount}",
+        f"Q4_JOINER_ROUTING_PREFIX={Q4_JOINER_ROUTING_PREFIX}",
     ]
     prefetch = settings.get("filter_prefetch_count")
     if prefetch is not None:
         environment.append(f"PREFETCH_COUNT={prefetch}")
 
     return base_service(
-        "workers/q4_edge_store/Dockerfile",
+        "workers/scatter_gather/q4_sum/Dockerfile",
         depends_on=depends_on_rabbitmq(),
         environment=environment,
     )
 
 
-def q4_block_joiner_service(
+def q4_joiner_service(
     index: int,
-    edge_store_amount: int,
-    pair_reducer_amount: int,
+    sum_amount: int,
+    aggregator_amount: int,
     settings: dict,
 ) -> dict:
     environment = [
@@ -1100,71 +1089,69 @@ def q4_block_joiner_service(
         f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
         f"MOM_HOST={MOM_HOST}",
         "PYTHONUNBUFFERED=1",
-        f"Q4_BLOCK_JOINER_EXCHANGE={Q4_BLOCK_JOINER_EXCHANGE}",
-        f"Q4_BLOCK_JOINER_ROUTING_PREFIX={Q4_BLOCK_JOINER_ROUTING_PREFIX}",
-        f"Q4_EDGE_STORE_AMOUNT={edge_store_amount}",
-        f"Q4_PAIR_REDUCER_EXCHANGE={Q4_PAIR_REDUCER_EXCHANGE}",
-        f"Q4_PAIR_REDUCER_AMOUNT={pair_reducer_amount}",
-        f"Q4_PAIR_REDUCER_ROUTING_PREFIX={Q4_PAIR_REDUCER_ROUTING_PREFIX}",
+        f"Q4_JOINER_EXCHANGE={Q4_JOINER_EXCHANGE}",
+        f"Q4_JOINER_ROUTING_PREFIX={Q4_JOINER_ROUTING_PREFIX}",
+        f"Q4_SUM_AMOUNT={sum_amount}",
+        f"Q4_AGGREGATOR_EXCHANGE={Q4_AGGREGATOR_EXCHANGE}",
+        f"Q4_AGGREGATOR_AMOUNT={aggregator_amount}",
+        f"Q4_AGGREGATOR_ROUTING_PREFIX={Q4_AGGREGATOR_ROUTING_PREFIX}",
     ]
     prefetch = settings.get("filter_prefetch_count")
     if prefetch is not None:
         environment.append(f"PREFETCH_COUNT={prefetch}")
 
     return base_service(
-        "workers/q4_block_joiner/Dockerfile",
+        "workers/scatter_gather/q4_joiner/Dockerfile",
         depends_on=depends_on_rabbitmq(),
         environment=environment,
     )
 
 
-def q4_pair_reducer_service(
+def q4_aggregator_service(
     index: int,
-    block_joiner_amount: int,
-    account_deduper_amount: int,
+    joiner_amount: int,
+    deduper_amount: int,
     settings: dict,
-    q4_settings: dict,
 ) -> dict:
     environment = [
         f"ID={index}",
         f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
         f"MOM_HOST={MOM_HOST}",
         "PYTHONUNBUFFERED=1",
-        f"Q4_PAIR_REDUCER_EXCHANGE={Q4_PAIR_REDUCER_EXCHANGE}",
-        f"Q4_PAIR_REDUCER_ROUTING_PREFIX={Q4_PAIR_REDUCER_ROUTING_PREFIX}",
-        f"Q4_BLOCK_JOINER_AMOUNT={block_joiner_amount}",
-        f"Q4_ACCOUNT_DEDUPER_EXCHANGE={Q4_ACCOUNT_DEDUPER_EXCHANGE}",
-        f"Q4_ACCOUNT_DEDUPER_AMOUNT={account_deduper_amount}",
-        f"Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX={Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX}",
+        f"Q4_AGGREGATOR_EXCHANGE={Q4_AGGREGATOR_EXCHANGE}",
+        f"Q4_AGGREGATOR_ROUTING_PREFIX={Q4_AGGREGATOR_ROUTING_PREFIX}",
+        f"Q4_JOINER_AMOUNT={joiner_amount}",
+        f"Q4_DEDUPER_EXCHANGE={Q4_DEDUPER_EXCHANGE}",
+        f"Q4_DEDUPER_AMOUNT={deduper_amount}",
+        f"Q4_DEDUPER_ROUTING_PREFIX={Q4_DEDUPER_ROUTING_PREFIX}",
     ]
     prefetch = settings.get("filter_prefetch_count")
     if prefetch is not None:
         environment.append(f"PREFETCH_COUNT={prefetch}")
 
     return base_service(
-        "workers/q4_pair_reducer/Dockerfile",
+        "workers/scatter_gather/q4_aggregator/Dockerfile",
         depends_on=depends_on_rabbitmq(),
         environment=environment,
     )
 
 
-def q4_account_deduper_service(
+def q4_deduper_service(
     index: int,
-    pair_reducer_amount: int,
-    account_deduper_amount: int,
+    aggregator_amount: int,
+    deduper_amount: int,
     settings: dict,
-    q4_settings: dict,
 ) -> dict:
     environment = [
         f"ID={index}",
         f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
         f"MOM_HOST={MOM_HOST}",
         "PYTHONUNBUFFERED=1",
-        f"Q4_ACCOUNT_DEDUPER_EXCHANGE={Q4_ACCOUNT_DEDUPER_EXCHANGE}",
-        f"Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX={Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX}",
-        f"Q4_PAIR_REDUCER_AMOUNT={pair_reducer_amount}",
-        f"Q4_ACCOUNT_DEDUPER_AMOUNT={account_deduper_amount}",
-        f"Q4_ACCOUNT_DEDUPER_RESPONSE_QUEUE_PREFIX={Q4_ACCOUNT_DEDUPER_RESPONSE_QUEUE_PREFIX}",
+        f"Q4_DEDUPER_EXCHANGE={Q4_DEDUPER_EXCHANGE}",
+        f"Q4_DEDUPER_ROUTING_PREFIX={Q4_DEDUPER_ROUTING_PREFIX}",
+        f"Q4_AGGREGATOR_AMOUNT={aggregator_amount}",
+        f"Q4_DEDUPER_AMOUNT={deduper_amount}",
+        f"Q4_DEDUPER_RESPONSE_QUEUE_PREFIX={Q4_DEDUPER_RESPONSE_QUEUE_PREFIX}",
         f"GATEWAY_Q4_QUEUE={GATEWAY_Q4_QUEUE}",
     ]
     prefetch = settings.get("filter_prefetch_count")
@@ -1172,7 +1159,7 @@ def q4_account_deduper_service(
         environment.append(f"PREFETCH_COUNT={prefetch}")
 
     return base_service(
-        "workers/q4_account_deduper/Dockerfile",
+        "workers/scatter_gather/q4_deduper/Dockerfile",
         depends_on=depends_on_rabbitmq(),
         environment=environment,
     )

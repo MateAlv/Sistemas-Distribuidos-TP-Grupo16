@@ -3,6 +3,7 @@ import threading
 from dataclasses import dataclass
 
 from common.domain.transaction import Transaction
+from common.logging_utils import should_log_progress
 from common.message_protocol.external.types import file_type_name
 from common.message_protocol.internal import (
     InternalProtocol,
@@ -54,6 +55,7 @@ class FileIngestor:
         self._leader_processed_by_client: dict[int, int] = {}
         self._leader_forwarded_by_client: dict[int, int] = {}
         self._leader_expected_by_client: dict[int, int] = {}
+        self._batches_consumed = 0
 
     @property
     def _response_queue_name(self) -> str:
@@ -146,21 +148,24 @@ class FileIngestor:
             self._processed_by_client[client_id] = (
                 self._processed_by_client.get(client_id, 0) + forwarded
             )
+            self._batches_consumed += 1
+            batch_count = self._batches_consumed
             pending = self._pending_eof_by_client.get(client_id)
 
-        logging.info(
-            "file_ingestor_line_batch | id=%s | client_id=%s | file_type=%s | "
-            "path=%s | batch_id=%s | first_line_number=%s | lines=%s | "
-            "transactions_sent=%s",
-            self._config.id,
-            client_id,
-            file_type_name(batch.file_type),
-            batch.rel_path,
-            batch.batch_id,
-            batch.first_line_number,
-            len(batch.lines),
-            forwarded,
-        )
+        if should_log_progress(batch_count):
+            logging.info(
+                "file_ingestor_line_batch | id=%s | client_id=%s | file_type=%s | "
+                "path=%s | batch_id=%s | first_line_number=%s | lines=%s | "
+                "transactions_sent=%s",
+                self._config.id,
+                client_id,
+                file_type_name(batch.file_type),
+                batch.rel_path,
+                batch.batch_id,
+                batch.first_line_number,
+                len(batch.lines),
+                forwarded,
+            )
 
         if pending is not None and forwarded:
             _, leader_id = pending

@@ -8,25 +8,25 @@ def _load_module(
     monkeypatch,
     *,
     worker_id=0,
-    pair_reducer_amount=1,
+    aggregator_amount=1,
     deduper_amount=1,
     batch_max=5000,
 ):
     monkeypatch.setenv("ID", str(worker_id))
     monkeypatch.setenv("MOM_HOST", "mom")
-    monkeypatch.setenv("Q4_ACCOUNT_DEDUPER_EXCHANGE", "q4_account_deduper")
-    monkeypatch.setenv("Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX", "q4_account_deduper")
-    monkeypatch.setenv("Q4_PAIR_REDUCER_AMOUNT", str(pair_reducer_amount))
-    monkeypatch.setenv("Q4_ACCOUNT_DEDUPER_AMOUNT", str(deduper_amount))
+    monkeypatch.setenv("Q4_DEDUPER_EXCHANGE", "q4_deduper")
+    monkeypatch.setenv("Q4_DEDUPER_ROUTING_PREFIX", "q4_deduper")
+    monkeypatch.setenv("Q4_AGGREGATOR_AMOUNT", str(aggregator_amount))
+    monkeypatch.setenv("Q4_DEDUPER_AMOUNT", str(deduper_amount))
     monkeypatch.setenv(
-        "Q4_ACCOUNT_DEDUPER_RESPONSE_QUEUE_PREFIX",
-        "q4_account_deduper_response",
+        "Q4_DEDUPER_RESPONSE_QUEUE_PREFIX",
+        "q4_deduper_response",
     )
     monkeypatch.setenv("GATEWAY_Q4_QUEUE", "gateway_q4_queue")
-    monkeypatch.setenv("Q4_ACCOUNT_DEDUPER_BATCH_BYTES", str(1024 * 1024))
-    monkeypatch.setenv("Q4_ACCOUNT_DEDUPER_BATCH_MAX_ACCOUNTS", str(batch_max))
+    monkeypatch.setenv("Q4_DEDUPER_BATCH_BYTES", str(1024 * 1024))
+    monkeypatch.setenv("Q4_DEDUPER_BATCH_MAX_ACCOUNTS", str(batch_max))
 
-    module_name = "workers.q4_account_deduper.account_deduper"
+    module_name = "workers.scatter_gather.q4_deduper.deduper"
     sys.modules.pop(module_name, None)
     module = importlib.import_module(module_name)
 
@@ -134,11 +134,11 @@ def test_account_deduper_deduplicates_in_memory_and_sends_single_gateway_eof(
 ):
     module, _, _ = _load_module(
         monkeypatch,
-        pair_reducer_amount=1,
+        aggregator_amount=1,
         deduper_amount=1,
         batch_max=2,
     )
-    worker = module.Q4AccountDeduperWorker()
+    worker = module.Q4DeduperWorker()
     output = worker._gateway_output
     client_id = 71
 
@@ -173,10 +173,10 @@ def test_account_deduper_waits_for_all_pair_reducer_eofs_and_reports_leader(
     module, _, _ = _load_module(
         monkeypatch,
         worker_id=1,
-        pair_reducer_amount=2,
+        aggregator_amount=2,
         deduper_amount=3,
     )
-    worker = module.Q4AccountDeduperWorker()
+    worker = module.Q4DeduperWorker()
     gateway_output = worker._gateway_output
     leader_output = worker._leader_output
     client_id = 72
@@ -208,10 +208,10 @@ def test_account_deduper_leader_sends_one_gateway_eof_after_all_reports(
     module, _, _ = _load_module(
         monkeypatch,
         worker_id=0,
-        pair_reducer_amount=1,
+        aggregator_amount=1,
         deduper_amount=3,
     )
-    worker = module.Q4AccountDeduperWorker()
+    worker = module.Q4DeduperWorker()
     output = worker._gateway_eof_output
     client_id = 73
 

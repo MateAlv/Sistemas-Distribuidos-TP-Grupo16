@@ -27,11 +27,11 @@ normalized the way the reference notebook reads it (see
 
 ```text
 DATE / USD filter
-  → q4_source_prefilter   (sharded by source account A)
-  → q4_edge_store         (sharded by intermediary account M)
-  → q4_block_joiner       (one shard per join block; splits hot M)
-  → q4_pair_reducer       (sharded by the pair (A, B))
-  → q4_account_deduper    (sharded by account)
+  → q4_filter   (sharded by source account A)
+  → q4_sum         (sharded by intermediary account M)
+  → q4_joiner       (one shard per join block; splits hot M)
+  → q4_aggregator       (sharded by the pair (A, B))
+  → q4_deduper    (sharded by account)
   → gateway               (writes Bank,Account)
 ```
 
@@ -46,7 +46,7 @@ client finishes.
 The shared filter forwards the USD transactions inside the Q4 date window. This
 is Q4's only input; nothing downstream re-reads the source file.
 
-### q4_source_prefilter
+### q4_filter
 Owns every transaction of a given source account (input is sharded by `A`), so it
 can apply the "sent to more than 5 distinct targets" rule exactly.
 
@@ -60,7 +60,7 @@ Each qualified transaction `A → M` is forwarded as two **counted edges** keyed
 their intermediary — one recording that `M` receives from `A`, one recording that
 `A` sends to `M`. Emitting both views is what lets the next stage rebuild paths.
 
-### q4_edge_store
+### q4_sum
 Collects counted edges for the intermediary accounts it owns (sharded by `M`) and
 sums their counts into `incoming[M]` (who sends into `M`) and `outgoing[M]` (who
 `M` sends to).
@@ -71,9 +71,9 @@ huge (think an account with thousands of counterparties) — is split into a gri
 of smaller blocks so the join can be spread across many workers instead of
 crushing one.
 
-### q4_block_joiner
+### q4_joiner
 Runs the actual `A → M → B` join for one block. For each `(A, B)` reachable
-through the block it computes the path weight `count(A→M) × count(M→B)`, skips
+through the block it computes the path path_count `count(A→M) × count(M→B)`, skips
 `A == B`, and emits a weighted contribution for the pair. Weights are capped at 6,
 since "more than 5" is all that matters.
 
@@ -81,14 +81,14 @@ Splitting hot intermediaries into blocks here is what stops the pattern's worst
 case — a single hub producing an enormous number of pairs — from landing on one
 worker.
 
-### q4_pair_reducer
+### q4_aggregator
 Owns each `(A, B)` pair (sharded by the pair) and sums the weighted
 contributions arriving from every block. As soon as a pair's total passes 5 it
 qualifies: the reducer emits its two accounts `A` and `B` and forgets the pair.
 Pairs that never reach the threshold are the bulk of the data, so this stage
 keeps only sub-threshold counters in RAM and drops them at end-of-stream.
 
-### q4_account_deduper
+### q4_deduper
 The same account can appear in many qualifying pairs. This stage (sharded by
 account) emits each account only once, producing the final unique-account list.
 It emits accounts to the gateway in `Q4AccountId` batches. Since the gateway
@@ -119,4 +119,4 @@ The binary records live in
 | `Q4TransactionEdge` | a prefilter's pending `A → M` row |
 | `Q4CountedEdge` | an incoming/outgoing edge for an intermediary `M`, with a count |
 | `Q4BlockJoinEdge` | a counted edge assigned to a specific hot-`M` join block |
-| `Q4PairDelta` | a weighted contribution to a pair `(A, B)` |
+| `Q4PairPaths` | a weighted contribution to a pair `(A, B)` |

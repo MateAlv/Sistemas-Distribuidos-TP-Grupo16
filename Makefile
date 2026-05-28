@@ -20,7 +20,7 @@ TEST_Q4_EOF_PATTERN := gateway_eof | prefix=Q4|
 TEST_CLIENT_WAIT_TIMEOUT ?= 4600s
 TEST_SMOKE_DEADLINE_SECONDS ?= 600
 SCENARIOS_DIR := config/scenarios
-RABBIT_SCREEN_URL ?= http://localhost:15672/\#/queues
+RABBIT_SCREEN_URL ?= http://localhost:15672
 
 config:
 	$(PYTHON) $(COMPOSE_SCRIPT) --config $(MAIN_CONFIG_FILE) --output $(COMPOSE_FILE) --skip-test-output
@@ -153,6 +153,7 @@ expected:
 # Parametrize like the test-qN targets, e.g.:
 #   DATASET=HI-Medium CLIENTS=2 USD_WORKERS=4 PREFETCH_COUNT=50 make test
 test:
+	@echo ">>> regenerating $(TEST_COMPOSE_FILE) from $(TEST_CONFIG_FILE)"
 	$(PYTHON) $(COMPOSE_SCRIPT) --config $(TEST_CONFIG_FILE) \
 		$(if $(DATASET),--dataset $(DATASET)) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
@@ -162,11 +163,11 @@ test:
 		$(if $(SG_MAPPER_WORKERS),--sg-mapper-workers $(SG_MAPPER_WORKERS)) \
 		$(if $(SG_LINKER_WORKERS),--sg-linker-workers $(SG_LINKER_WORKERS)) \
 		$(if $(SG_DETECTOR_WORKERS),--sg-detector-workers $(SG_DETECTOR_WORKERS)) \
-		$(if $(Q4_SOURCE_PREFILTER_WORKERS),--q4-source-prefilter-workers $(Q4_SOURCE_PREFILTER_WORKERS)) \
-		$(if $(Q4_EDGE_STORE_WORKERS),--q4-edge-store-workers $(Q4_EDGE_STORE_WORKERS)) \
-		$(if $(Q4_BLOCK_JOINER_WORKERS),--q4-block-joiner-workers $(Q4_BLOCK_JOINER_WORKERS)) \
-		$(if $(Q4_PAIR_REDUCER_WORKERS),--q4-pair-reducer-workers $(Q4_PAIR_REDUCER_WORKERS)) \
-		$(if $(Q4_ACCOUNT_DEDUPER_WORKERS),--q4-account-deduper-workers $(Q4_ACCOUNT_DEDUPER_WORKERS)) \
+		$(if $(Q4_FILTER_WORKERS),--q4-filter-workers $(Q4_FILTER_WORKERS)) \
+		$(if $(Q4_SUM_WORKERS),--q4-sum-workers $(Q4_SUM_WORKERS)) \
+		$(if $(Q4_JOINER_WORKERS),--q4-joiner-workers $(Q4_JOINER_WORKERS)) \
+		$(if $(Q4_AGGREGATOR_WORKERS),--q4-aggregator-workers $(Q4_AGGREGATOR_WORKERS)) \
+		$(if $(Q4_DEDUPER_WORKERS),--q4-deduper-workers $(Q4_DEDUPER_WORKERS)) \
 		$(if $(Q3_BARRIER_WORKERS),--q3-barrier-workers $(Q3_BARRIER_WORKERS)) \
 		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
 		$(if $(CLIENTS),--clients $(CLIENTS)) \
