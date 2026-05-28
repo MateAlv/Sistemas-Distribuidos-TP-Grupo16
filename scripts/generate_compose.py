@@ -65,21 +65,18 @@ Q4_AGGREGATOR_ROUTING_PREFIX = "q4_aggregator"
 Q4_DEDUPER_EXCHANGE = "q4_deduper_exchange"
 Q4_DEDUPER_ROUTING_PREFIX = "q4_deduper"
 Q4_DEDUPER_RESPONSE_QUEUE_PREFIX = "q4_deduper_response"
-
-# Q3 sharding: exchanges direct + routing key por shard de barrier.
-# Cada barrier ID consume su queue bindeada al routing key "{prefix}_{ID}".
 Q3_AVERAGES_EXCHANGE = "q3_averages_exchange"
 Q3_CANDIDATES_EXCHANGE = "q3_candidates_exchange"
 Q3_AVERAGES_ROUTING_PREFIX = "q3_averages"
 Q3_CANDIDATES_ROUTING_PREFIX = "q3_candidates"
 OBSERVABILITY_DEFAULTS = {
     "FLOW_LOG_ENABLED": "1",
-    "FLOW_LOG_EVERY_MESSAGES": "100",
-    "FLOW_LOG_EVERY_BYTES": str(8 * 1024 * 1024),
+    "FLOW_LOG_EVERY_MESSAGES": "10000",
+    "FLOW_LOG_EVERY_BYTES": str(256 * 1024 * 1024),
     "FLOW_LOG_FIRST_MESSAGES": "1",
-    "WORKER_LOG_EVERY_MESSAGES": "100",
-    "CHUNK_LOG_EVERY": "100",
-    "RESULT_LOG_EVERY": "100",
+    "WORKER_LOG_EVERY_MESSAGES": "10000",
+    "CHUNK_LOG_EVERY": "1000",
+    "RESULT_LOG_EVERY": "10000",
 }
 
 

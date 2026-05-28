@@ -153,6 +153,7 @@ expected:
 # Parametrize like the test-qN targets, e.g.:
 #   DATASET=HI-Medium CLIENTS=2 USD_WORKERS=4 PREFETCH_COUNT=50 make test
 test:
+	@echo ">>> regenerating $(TEST_COMPOSE_FILE) from $(TEST_CONFIG_FILE)"
 	$(PYTHON) $(COMPOSE_SCRIPT) --config $(TEST_CONFIG_FILE) \
 		$(if $(DATASET),--dataset $(DATASET)) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
