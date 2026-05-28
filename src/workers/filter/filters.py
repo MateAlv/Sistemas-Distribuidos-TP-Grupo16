@@ -55,11 +55,9 @@ Q3_CANDIDATES_ROUTING_PREFIX = os.getenv(
     "Q3_CANDIDATES_ROUTING_PREFIX", "q3_candidates"
 )
 Q3_BARRIER_AMOUNT = int(os.getenv("Q3_BARRIER_AMOUNT", "1"))
-# Cola de salida para el sum de Q3. SUM_PREFIX se conserva para compatibilidad
-# con configuraciones anteriores y para los nombres de control de Sum.
 SUM_PREFIX = os.environ["SUM_PREFIX"]
 SUM_Q3_QUEUE = os.getenv("SUM_Q3_QUEUE", SUM_PREFIX)
-# Para control en token ring
+
 FILTER_AMOUNT = int(os.environ["FILTER_AMOUNT"])
 FILTER_PREFIX = os.environ["FILTER_PREFIX"] + "_" + CONFIGURATION
 CONTROL_EXCHANGE = os.environ["FILTER_PREFIX"] + "_" + "CONTROL_EXCHANGE_" + CONFIGURATION
@@ -134,19 +132,10 @@ class FilterWorker:
         self.closed_by_client = set()
         self.control_responses_by_client = {}
         self.all_processed_by_client = {}
-        # Conteos forwardeados por output, agregados por el lider a partir de los
-        # FLUSH_ACK de cada filtro (client_id -> {output_queue: count}). El EOF
-        # downstream lleva el conteo GLOBAL por output, no el local del lider.
         self.all_forwarded_by_output_by_client = {}
         self.flushed_acks_by_client = {}
         self.first_data_logged_by_client = set()
         self.deserialized_by_client = {}
-        # Solo para el caso de un unico filtro (FILTER_AMOUNT == 1): expected_total
-        # de un EOF que llego pero todavia no se reenvia porque faltan procesar
-        # mensajes. filter_usd es un punto de fan-in (varios file_ingestors
-        # producen DATA en conexiones distintas y el EOF llega por otra), asi que
-        # no se puede confiar en el orden de llegada del EOF: hay que esperar a
-        # processed_by_client >= expected_total antes de cerrar.
         self.pending_eof_by_client = {}
 
     def _new_output_queues(self):
