@@ -5,6 +5,10 @@ import uuid
 import time
 import threading
 from common.logging_utils import MessageFlowLogger
+
+for _pika_logger in ("pika", "pika.adapters", "pika.connection", "pika.channel"):
+    logging.getLogger(_pika_logger).setLevel(logging.WARNING)
+
 from .middleware import (
     MessageMiddlewareQueue, 
     MessageMiddlewareExchange, 

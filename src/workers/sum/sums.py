@@ -66,6 +66,7 @@ class SumWorker:
         self.response_thread = None
         self.closed = False
         self._stopped = False
+        self._partials_forwarded = 0
 
     def _new_output_exchanges(self):
         return [
@@ -128,18 +129,20 @@ class SumWorker:
         exchanges[index].send(
             self._packet(MessageType.DATA, client_id, payload)
         )
-        logging.info(
-            "sum_forward_partial | configuration=%s | id=%s | client_id=%s | "
-            "partition_key=%s | aggregation_index=%s | routing_key=%s | "
-            "payload_bytes=%s",
-            CONFIGURATION,
-            ID,
-            client_id,
-            partition_key,
-            index,
-            f"{AGGREGATION_PREFIX}_{index}",
-            len(payload),
-        )
+        self._partials_forwarded += 1
+        if should_log_progress(self._partials_forwarded):
+            logging.info(
+                "sum_forward_partial | configuration=%s | id=%s | client_id=%s | "
+                "partition_key=%s | aggregation_index=%s | routing_key=%s | "
+                "payload_bytes=%s",
+                CONFIGURATION,
+                ID,
+                client_id,
+                partition_key,
+                index,
+                f"{AGGREGATION_PREFIX}_{index}",
+                len(payload),
+            )
 
     def _forward_eof_to_aggregators(
         self,

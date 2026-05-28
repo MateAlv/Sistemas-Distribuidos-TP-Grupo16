@@ -1,6 +1,7 @@
 import logging
 from dataclasses import dataclass, field
 
+from common.logging_utils import should_log_progress
 from common.message_protocol.external import FileChunk, FileEof
 from common.message_protocol.external.types import (
     FILE_TYPE_ACCOUNTS,
@@ -189,21 +190,22 @@ class FileSplitter:
         state.chunks_received += 1
         self._chunks_received += 1
 
-        logging.info(
-            "file_splitter_chunk | id=%s | client_id=%s | file_type=%s | path=%s | "
-            "offset=%s | payload_bytes=%s | complete_lines=%s | pending_bytes=%s | "
-            "file_chunks=%s | chunks_received=%s",
-            self._config.id,
-            key.client_id,
-            file_type_name(state.file_type),
-            key.rel_path,
-            chunk.offset(),
-            chunk.payload_size(),
-            len(complete_lines),
-            state.splitter.pending_size(),
-            state.chunks_received,
-            self._chunks_received,
-        )
+        if should_log_progress(self._chunks_received):
+            logging.info(
+                "file_splitter_chunk | id=%s | client_id=%s | file_type=%s | path=%s | "
+                "offset=%s | payload_bytes=%s | complete_lines=%s | pending_bytes=%s | "
+                "file_chunks=%s | chunks_received=%s",
+                self._config.id,
+                key.client_id,
+                file_type_name(state.file_type),
+                key.rel_path,
+                chunk.offset(),
+                chunk.payload_size(),
+                len(complete_lines),
+                state.splitter.pending_size(),
+                state.chunks_received,
+                self._chunks_received,
+            )
 
     def _handle_file_eof(self, eof: FileEof) -> None:
         key = FileKey(client_id=eof.client_id(), rel_path=eof.path())
@@ -387,20 +389,21 @@ class FileSplitter:
         state.data_lines_emitted += len(batch.lines)
         state.batches_emitted += 1
 
-        logging.info(
-            "file_splitter_batch | id=%s | client_id=%s | file_type=%s | path=%s | "
-            "batch_id=%s | first_line_number=%s | lines=%s | bytes=%s | "
-            "expected_total=%s",
-            self._config.id,
-            key.client_id,
-            file_type_name(state.file_type),
-            key.rel_path,
-            batch.batch_id,
-            batch.first_line_number,
-            len(batch.lines),
-            len(message),
-            state.data_lines_emitted,
-        )
+        if should_log_progress(state.batches_emitted):
+            logging.info(
+                "file_splitter_batch | id=%s | client_id=%s | file_type=%s | path=%s | "
+                "batch_id=%s | first_line_number=%s | lines=%s | bytes=%s | "
+                "expected_total=%s",
+                self._config.id,
+                key.client_id,
+                file_type_name(state.file_type),
+                key.rel_path,
+                batch.batch_id,
+                batch.first_line_number,
+                len(batch.lines),
+                len(message),
+                state.data_lines_emitted,
+            )
 
         state.batch_id += 1
         state.batch_lines.clear()
