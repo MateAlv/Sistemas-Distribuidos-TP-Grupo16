@@ -234,6 +234,12 @@ The reducer must be spillable. When its in-memory map reaches a configured
 limit, flush sorted `(A, B, count)` runs to disk. At EOF, merge the runs and
 finish the threshold check.
 
+Each pair reducer is a shard. It waits for one EOF from every
+`q4_block_joiner` worker for the client, merges any spilled sub-threshold pair
+runs, emits `Q4AccountId` candidates for every pair whose accumulated weight is
+at least `6`, then sends EOF to every account-deduper partition with the number
+of account candidates it emitted to that partition.
+
 ### Account Deduper
 
 Account candidates are sharded by account:
@@ -296,9 +302,10 @@ same: snapshot, leader wait, flush order, downstream EOF, local cleanup.
 3. Implement source-prefilter workers and tests.
 4. Implement edge-store workers with block planning.
 5. Implement block-joiner workers and tests.
-6. Implement pair reducer and account deduper.
-7. Switch gateway/client to the Q4 account result contract.
-8. Pass synthetic and LI-Mini end-to-end Q4.
-9. Tune hot-M bucket configuration.
-10. Add spill paths for pair reducers and account dedupers.
-11. Run LI-Small and then larger datasets.
+6. Implement pair-reducer workers with spill and tests.
+7. Implement account-deduper workers.
+8. Switch gateway/client to the Q4 account result contract.
+9. Pass synthetic and LI-Mini end-to-end Q4.
+10. Tune hot-M bucket configuration.
+11. Add spill path for account dedupers.
+12. Run LI-Small and then larger datasets.
