@@ -116,9 +116,6 @@ class AggregatorWorker:
             )
             data_count = self.data_count_by_client[client_id]
             if client_id in self.pending_eof_by_client:
-                # DATA que llego despues del EOF (carrera entre el EOF del Sum y
-                # los partials, que viajan por conexiones distintas): reportar el
-                # delta para que el conteo del lider alcance expected_total.
                 report_delta = 1
 
         if should_log_progress(data_count):
@@ -173,8 +170,7 @@ class AggregatorWorker:
         self._report_to_leader(client_id, snapshot)
 
     def _report_to_leader(self, client_id: int, data_count: int) -> None:
-        # Conexion efimera por reporte, igual que el Sum (canales pika no se
-        # comparten entre threads).
+
         response_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST,
             f"{AGGREGATION_RESPONSE_QUEUE_PREFIX}_{LEADER_ID}",
