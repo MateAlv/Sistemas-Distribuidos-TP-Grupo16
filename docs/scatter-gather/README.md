@@ -164,6 +164,17 @@ estimated_pairs = in_size * out_size
 ```
 
 Small `M` values use one block. Hot `M` values are split into block joins.
+The edge store emits `Q4BlockJoinEdge` records to the block-joiner partition
+that owns `(M, a_bucket, b_bucket)`.
+
+The hot-M threshold and bucket counts are controlled by
+`Q4_EDGE_STORE_HOT_PAIR_THRESHOLD`, `Q4_EDGE_STORE_HOT_A_BUCKETS`, and
+`Q4_EDGE_STORE_HOT_B_BUCKETS`.
+
+Each edge-store worker is a shard, not a replica. It must wait for one EOF from
+every `q4_source_prefilter` worker for the client, then flush its planned block
+edges and send EOF to every block-joiner partition with the number of block
+edges it emitted to that partition.
 
 ### Hot-M Block Join
 
@@ -278,10 +289,10 @@ same: snapshot, leader wait, flush order, downstream EOF, local cleanup.
 1. Keep the notebook-exact Q4 reference and LI-Mini fixture as validation.
 2. Add the new Q4 DTOs and dynamic routing helper.
 3. Implement source-prefilter workers and tests.
-4. Implement edge-store workers without hot-M salting.
+4. Implement edge-store workers with block planning.
 5. Implement pair reducer and account deduper.
 6. Switch gateway/client to the Q4 account result contract.
 7. Pass synthetic and LI-Mini end-to-end Q4.
-8. Add hot-M block planning and block joiners.
+8. Tune hot-M bucket configuration and block joiners.
 9. Add spill paths for pair reducers and account dedupers.
 10. Run LI-Small and then larger datasets.
