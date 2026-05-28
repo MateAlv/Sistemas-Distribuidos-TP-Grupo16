@@ -34,3 +34,17 @@ def test_q4_csv_lines_match_account_candidate_contract():
     )
 
     assert list(Gateway._q4_csv_lines(payload)) == ["991001,Q4NBA"]
+
+
+def test_q4_csv_lines_accept_batched_account_candidates():
+    payload = Q4AccountIdSerializer.serialize_batch(
+        [
+            Q4AccountId(bank_id="991001", account="Q4NBA"),
+            Q4AccountId(bank_id="991002", account="Q4NBB"),
+        ]
+    )
+
+    assert list(Gateway._q4_csv_lines(payload)) == [
+        "991001,Q4NBA",
+        "991002,Q4NBB",
+    ]

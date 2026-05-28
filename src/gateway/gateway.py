@@ -535,7 +535,8 @@ class Gateway:
 
     @staticmethod
     def _q4_csv_lines(payload: bytes):
-        yield Gateway._q4_csv(payload)
+        for account in Q4AccountIdSerializer.deserialize_batch(payload):
+            yield f"{account.bank_id},{account.account}"
 
     @staticmethod
     def _q4_csv(payload: bytes) -> str:
