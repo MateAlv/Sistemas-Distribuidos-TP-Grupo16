@@ -80,6 +80,7 @@ class Q4SumWorker:
 
         self._closed = False
         self._stopped = False
+        self._intermediaries_planned = 0
 
     def _input_routing_key(self) -> str:
         return f"{Q4_SUM_ROUTING_PREFIX}_{ID}"
@@ -273,20 +274,22 @@ class Q4SumWorker:
                 len(incoming_counts),
                 len(outgoing_counts),
             )
-            logging.info(
-                "q4_sum_plan_intermediate | id=%s | client_id=%s | "
-                "intermediate_bank=%s | intermediate_account=%s | "
-                "incoming_endpoints=%s | outgoing_endpoints=%s | "
-                "a_buckets=%s | b_buckets=%s",
-                ID,
-                client_id,
-                intermediate.bank_id,
-                intermediate.account,
-                len(incoming_counts),
-                len(outgoing_counts),
-                a_buckets,
-                b_buckets,
-            )
+            self._intermediaries_planned += 1
+            if should_log_progress(self._intermediaries_planned):
+                logging.info(
+                    "q4_sum_plan_intermediate | id=%s | client_id=%s | "
+                    "intermediate_bank=%s | intermediate_account=%s | "
+                    "incoming_endpoints=%s | outgoing_endpoints=%s | "
+                    "a_buckets=%s | b_buckets=%s",
+                    ID,
+                    client_id,
+                    intermediate.bank_id,
+                    intermediate.account,
+                    len(incoming_counts),
+                    len(outgoing_counts),
+                    a_buckets,
+                    b_buckets,
+                )
             for endpoint, count in incoming_counts.items():
                 a_bucket = self._account_bucket(endpoint, a_buckets)
                 for b_bucket in range(b_buckets):
