@@ -208,6 +208,11 @@ If `weight > 5`, the pair already qualifies from this one intermediary. The
 joiner can emit a capped `Q4PairDelta(A, B, 6)`. Otherwise it emits
 `Q4PairDelta(A, B, weight)`.
 
+Each block-joiner worker is also a shard. It waits for one EOF from every
+`q4_edge_store` worker for the client, emits all `Q4PairDelta` records routed by
+full `(A, B)`, then sends EOF to every pair-reducer partition with the number of
+deltas it emitted to that partition.
+
 ### Pair Reducer
 
 Pair reducers are sharded by `(A, B)`:
@@ -290,9 +295,10 @@ same: snapshot, leader wait, flush order, downstream EOF, local cleanup.
 2. Add the new Q4 DTOs and dynamic routing helper.
 3. Implement source-prefilter workers and tests.
 4. Implement edge-store workers with block planning.
-5. Implement pair reducer and account deduper.
-6. Switch gateway/client to the Q4 account result contract.
-7. Pass synthetic and LI-Mini end-to-end Q4.
-8. Tune hot-M bucket configuration and block joiners.
-9. Add spill paths for pair reducers and account dedupers.
-10. Run LI-Small and then larger datasets.
+5. Implement block-joiner workers and tests.
+6. Implement pair reducer and account deduper.
+7. Switch gateway/client to the Q4 account result contract.
+8. Pass synthetic and LI-Mini end-to-end Q4.
+9. Tune hot-M bucket configuration.
+10. Add spill paths for pair reducers and account dedupers.
+11. Run LI-Small and then larger datasets.
