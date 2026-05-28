@@ -220,6 +220,9 @@ class Q4FilterWorker:
         edge: Q4TransactionEdge,
         output=None,
     ) -> int:
+        """One qualified transaction A->M becomes two counted edges keyed by the
+        intermediary: an IN edge (M receives from A) and an OUT edge (A sends to M).
+        Both are routed to the q4_sum partition that owns their intermediary."""
         self._emit_counted_edge(
             client_id,
             Q4CountedEdge(
@@ -267,6 +270,10 @@ class Q4FilterWorker:
         edge: Q4TransactionEdge,
         output=None,
     ) -> int:
+        """The source gate. If the source A is already qualified, emit the edge
+        downstream now. Otherwise add the target to A's distinct-target set (capped
+        at 6) and stash the edge. On the 6th distinct target A becomes qualified
+        and its stashed edges are replayed. Caller must hold self._lock."""
         states = self._states_by_client.setdefault(client_id, {})
         state = states.setdefault(edge.source, _SourceState())
 
@@ -285,6 +292,10 @@ class Q4FilterWorker:
         return self._replay_pending_edges(client_id, state, output)
 
     def _handle_data_packet(self, client_id: int, payload: bytes, output=None) -> None:
+        """Main data path. Deserialize the batch of transactions, run each one
+        through the source gate, and bookkeep processed/forwarded counts. If an
+        upstream EOF is already pending for this client, flush late data and
+        report this delta to the leader."""
         transactions = self._tx_serializer.deserialize_batch(payload)
         if not transactions:
             return
@@ -341,6 +352,10 @@ class Q4FilterWorker:
             self._try_forward_single_worker_eof(client_id, output)
 
     def _handle_upstream_eof(self, client_id: int, payload: bytes) -> None:
+        """Upstream told us 'no more data for this client'. In a single-worker
+        deployment we close right away once our processed count catches up.
+        In a multi-worker deployment we snapshot our counts and report to the
+        leader, which will broadcast a flush order once every shard reports in."""
         control = self._control_serializer.deserialize(payload)
         expected_total = control.expected_total
 
@@ -388,6 +403,8 @@ class Q4FilterWorker:
         )
 
     def _try_forward_single_worker_eof(self, client_id: int, output=None) -> None:
+        """Single-shard close gate. If our processed count has reached the upstream's
+        expected total, we have everything for this client: flush and close."""
         with self._lock:
             pending = self._pending_eof_by_client.get(client_id)
             if pending is None or client_id in self._closed_by_client:
@@ -405,6 +422,8 @@ class Q4FilterWorker:
         processed_count: int,
         forwarded_count: int,
     ) -> None:
+        """Send this shard's processed/forwarded snapshot to the leader's response
+        queue. Used during the multi-worker EOF agreement."""
         response_queue = MessageMiddlewareQueueRabbitMQ(
             MOM_HOST,
             f"{RESPONSE_QUEUE_PREFIX}_{leader_id}",
@@ -425,6 +444,8 @@ class Q4FilterWorker:
             response_queue.close()
 
     def _send_flush_order(self, client_id: int) -> None:
+        """Leader-only. Broadcast 'everyone, you can close this client now' on the
+        control exchange. All shards (including the leader) react to it."""
         if self._control_sender is None:
             raise RuntimeError("q4 source prefilter control sender is not configured")
         self._control_sender.send(
@@ -436,6 +457,9 @@ class Q4FilterWorker:
         )
 
     def _handle_leader_report(self, message: bytes, ack, nack) -> None:
+        """Leader-only. Receive one shard's PROCESSED_ANSWER, accumulate the totals,
+        and once every shard has reported in (and the processed total reached the
+        upstream's expected total) broadcast the flush order."""
         try:
             msg_type, client_id, payload = self._proto.unpack_packet(message)
             if msg_type != MessageType.PROCESSED_ANSWER:
@@ -484,6 +508,8 @@ class Q4FilterWorker:
             nack()
 
     def _handle_flush_order(self, message: bytes, ack, nack, output=None) -> None:
+        """Control consumer callback. The leader said it's safe to close this
+        client: drop our state and forward EOF to every q4_sum partition."""
         try:
             msg_type, client_id, _ = self._proto.unpack_packet(message)
             if msg_type != MessageType.FLUSH_ORDER:
@@ -503,6 +529,8 @@ class Q4FilterWorker:
         counts_by_partition: dict[int, int],
         output=None,
     ) -> None:
+        """Send one EOF to every q4_sum partition. Each EOF carries the count of
+        records we shipped to that partition so q4_sum knows when it has them all."""
         output = output or self._edge_store_output
         for partition in range(Q4_SUM_AMOUNT):
             expected_total = int(counts_by_partition.get(partition, 0))
@@ -528,6 +556,9 @@ class Q4FilterWorker:
             )
 
     def _flush_and_close_client(self, client_id: int, output=None) -> None:
+        """End-of-client cleanup. Drop all per-client state (sources still in
+        pending purgatory get discarded), flush any batched edges, and send EOF
+        to every q4_sum partition with per-partition record counts."""
         with self._lock:
             if client_id in self._closed_by_client:
                 return

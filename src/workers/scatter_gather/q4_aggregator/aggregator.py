@@ -149,6 +149,9 @@ class Q4AggregatorWorker:
             self._send_batch(client_id, partition, batch_payload, output)
 
     def _emit_qualified_pair(self, client_id: int, key, output=None) -> bool:
+        """A pair (A, B) just crossed the threshold. Mark it qualified (so future
+        contributions are ignored) and emit both accounts A and B as account
+        candidates to the deduper. Returns False if the pair was already qualified."""
         qualified = self._qualified_pairs_by_client.setdefault(client_id, set())
         if key in qualified:
             return False
@@ -164,6 +167,9 @@ class Q4AggregatorWorker:
             self._send_batch(client_id, partition, batch_payload, output)
 
     def _accept_pair_paths(self, client_id: int, payload: bytes) -> int:
+        """Main data path. For each Q4PairPaths, add its path_count to the running
+        total for (A, B). Skip A == B and already-qualified pairs. The moment a
+        total crosses the threshold, emit account candidates and forget the pair."""
         batch = self._pair_paths_serializer.deserialize_batch(payload)
         if not batch:
             return 0
@@ -217,6 +223,8 @@ class Q4AggregatorWorker:
         return len(batch)
 
     def _handle_eof(self, client_id: int, payload: bytes) -> None:
+        """Count one EOF from one joiner shard. Once every joiner has sent us its
+        EOF for this client, no more contributions can arrive → close the client."""
         control = self._control_serializer.deserialize(payload)
         should_emit = False
 
@@ -261,6 +269,8 @@ class Q4AggregatorWorker:
         counts_by_partition: dict[int, int],
         output=None,
     ) -> None:
+        """Send one EOF to every deduper partition, each carrying how many account
+        candidates we sent that deduper so it knows when we're done."""
         output = output or self._account_deduper_output
         for partition in range(Q4_DEDUPER_AMOUNT):
             expected_total = int(counts_by_partition.get(partition, 0))
@@ -286,6 +296,9 @@ class Q4AggregatorWorker:
             )
 
     def _emit_and_close_client(self, client_id: int, output=None) -> None:
+        """End-of-client. Sub-threshold pair counters get dropped (noise), batched
+        account candidates are flushed, per-client state is freed, and EOF is
+        forwarded to every deduper partition."""
         with self._lock:
             if client_id in self._closed_by_client:
                 return

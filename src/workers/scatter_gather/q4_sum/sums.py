@@ -134,6 +134,9 @@ class Q4SumWorker:
         )
 
     def _block_plan(self, incoming_size: int, outgoing_size: int) -> tuple[int, int]:
+        """Decide how to slice M's grid. Small fan-out (incoming x outgoing) → one
+        block (1, 1). Above the hot-pair threshold → split into a
+        HOT_A_BUCKETS x HOT_B_BUCKETS grid so the join can run on many joiners."""
         estimated_pairs = incoming_size * outgoing_size
         if estimated_pairs <= Q4_SUM_HOT_PAIR_THRESHOLD:
             return 1, 1
@@ -180,6 +183,9 @@ class Q4SumWorker:
             self._send_batch(client_id, partition, batch_payload, output)
 
     def _accept_counted_edges(self, client_id: int, payload: bytes) -> int:
+        """Main data path. For each counted edge, sum its count into either
+        incoming[M][endpoint] or outgoing[M][endpoint]. Nothing is emitted yet —
+        we only do bookkeeping while data flows in."""
         edges = self._counted_edge_serializer.deserialize_batch(payload)
         if not edges:
             return 0
@@ -222,6 +228,8 @@ class Q4SumWorker:
         return len(edges)
 
     def _handle_eof(self, client_id: int, payload: bytes) -> None:
+        """Count one EOF from one q4_filter shard. Once every q4_filter shard has
+        sent us its EOF for this client, we have everything → plan and emit."""
         control = self._control_serializer.deserialize(payload)
         should_emit = False
 
@@ -261,6 +269,10 @@ class Q4SumWorker:
             self._emit_and_close_client(client_id)
 
     def _emit_client_blocks(self, client_id: int, output=None) -> None:
+        """For every M that has both incoming and outgoing, pick a block plan and
+        scatter records to the joiners. Each A in incoming[M] goes to every column
+        of its row (b_buckets copies); each B in outgoing[M] goes to every row of
+        its column (a_buckets copies). No pairing happens here — that's the joiner."""
         incoming = self._incoming_by_client.get(client_id, {})
         outgoing = self._outgoing_by_client.get(client_id, {})
         intermediaries = set(incoming) & set(outgoing)
@@ -328,6 +340,8 @@ class Q4SumWorker:
         counts_by_partition: dict[int, int],
         output=None,
     ) -> None:
+        """Send one EOF to every joiner partition. Each EOF carries how many
+        block-edge records we sent that joiner so it knows when it has them all."""
         output = output or self._block_joiner_output
         for partition in range(Q4_JOINER_AMOUNT):
             expected_total = int(counts_by_partition.get(partition, 0))
@@ -353,6 +367,8 @@ class Q4SumWorker:
             )
 
     def _emit_and_close_client(self, client_id: int, output=None) -> None:
+        """End-of-client. Plan + scatter all blocks, flush batched buffers, drop
+        per-client state, then forward EOF to every joiner partition."""
         with self._lock:
             if client_id in self._closed_by_client:
                 return

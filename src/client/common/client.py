@@ -230,7 +230,7 @@ class Client:
             f4.write("Bank,Account\n")
             f5.write("count\n")
 
-            for line in sender.iter_result_lines(config.result_line_max_bytes):
+            for line in sender.iter_result_lines(config.result_line_max_bytes): #corregir codigo repetido lol
                 if line.startswith("Q2|"):
                     data = line[3:]
                     counts["q2"] += 1
