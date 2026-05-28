@@ -194,7 +194,7 @@ def _summarize_internal_message(message: bytes) -> MessageSummary | None:
         msg_type=msg_type.name,
         client_id=client_id,
         payload_bytes=len(payload),
-        always_log=msg_type != MessageType.DATA,
+        always_log=msg_type == MessageType.EOF,
     )
 
 

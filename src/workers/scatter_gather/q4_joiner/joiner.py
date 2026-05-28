@@ -75,6 +75,7 @@ class Q4JoinerWorker:
 
         self._closed = False
         self._stopped = False
+        self._blocks_emitted = 0
 
     def _input_routing_key(self) -> str:
         return f"{Q4_JOINER_ROUTING_PREFIX}_{ID}"
@@ -272,22 +273,24 @@ class Q4JoinerWorker:
                     )
                     emitted_for_block += 1
 
-            intermediate, a_bucket, b_bucket = block
-            logging.info(
-                "q4_joiner_emit_block | id=%s | client_id=%s | "
-                "intermediate_bank=%s | intermediate_account=%s | "
-                "a_bucket=%s | b_bucket=%s | incoming_endpoints=%s | "
-                "outgoing_endpoints=%s | pair_pathss=%s",
-                ID,
-                client_id,
-                intermediate.bank_id,
-                intermediate.account,
-                a_bucket,
-                b_bucket,
-                len(incoming_counts),
-                len(outgoing_counts),
-                emitted_for_block,
-            )
+            self._blocks_emitted += 1
+            if should_log_progress(self._blocks_emitted):
+                intermediate, a_bucket, b_bucket = block
+                logging.info(
+                    "q4_joiner_emit_block | id=%s | client_id=%s | "
+                    "intermediate_bank=%s | intermediate_account=%s | "
+                    "a_bucket=%s | b_bucket=%s | incoming_endpoints=%s | "
+                    "outgoing_endpoints=%s | pair_pathss=%s",
+                    ID,
+                    client_id,
+                    intermediate.bank_id,
+                    intermediate.account,
+                    a_bucket,
+                    b_bucket,
+                    len(incoming_counts),
+                    len(outgoing_counts),
+                    emitted_for_block,
+                )
 
     def _forward_eof_to_aggregators(
         self,
