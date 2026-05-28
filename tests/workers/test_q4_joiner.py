@@ -9,21 +9,21 @@ def _load_module(
     monkeypatch,
     *,
     worker_id=0,
-    edge_store_amount=1,
+    sum_amount=1,
     pair_partitions=4,
 ):
     monkeypatch.setenv("ID", str(worker_id))
     monkeypatch.setenv("MOM_HOST", "mom")
-    monkeypatch.setenv("Q4_BLOCK_JOINER_EXCHANGE", "q4_block_joiner")
-    monkeypatch.setenv("Q4_BLOCK_JOINER_ROUTING_PREFIX", "q4_block_joiner")
-    monkeypatch.setenv("Q4_EDGE_STORE_AMOUNT", str(edge_store_amount))
-    monkeypatch.setenv("Q4_PAIR_REDUCER_EXCHANGE", "q4_pair_reducer")
-    monkeypatch.setenv("Q4_PAIR_REDUCER_AMOUNT", str(pair_partitions))
-    monkeypatch.setenv("Q4_PAIR_REDUCER_ROUTING_PREFIX", "q4_pair_reducer")
-    monkeypatch.setenv("Q4_BLOCK_JOINER_BATCH_BYTES", str(1024 * 1024))
-    monkeypatch.setenv("Q4_BLOCK_JOINER_BATCH_MAX_DELTAS", "5000")
+    monkeypatch.setenv("Q4_JOINER_EXCHANGE", "q4_joiner")
+    monkeypatch.setenv("Q4_JOINER_ROUTING_PREFIX", "q4_joiner")
+    monkeypatch.setenv("Q4_SUM_AMOUNT", str(sum_amount))
+    monkeypatch.setenv("Q4_AGGREGATOR_EXCHANGE", "q4_aggregator")
+    monkeypatch.setenv("Q4_AGGREGATOR_AMOUNT", str(pair_partitions))
+    monkeypatch.setenv("Q4_AGGREGATOR_ROUTING_PREFIX", "q4_aggregator")
+    monkeypatch.setenv("Q4_JOINER_BATCH_BYTES", str(1024 * 1024))
+    monkeypatch.setenv("Q4_JOINER_BATCH_MAX_DELTAS", "5000")
 
-    module_name = "workers.q4_block_joiner.block_joiner"
+    module_name = "workers.scatter_gather.q4_joiner.joiner"
     sys.modules.pop(module_name, None)
     module = importlib.import_module(module_name)
 
@@ -84,7 +84,7 @@ def _pair_data_messages(worker, module, output):
         msg_type, _, payload = worker._proto.unpack_packet(packet)
         if msg_type != MessageType.DATA:
             continue
-        batch = module.Q4PairDeltaSerializer.deserialize_batch(payload)
+        batch = module.Q4PairPathsSerializer.deserialize_batch(payload)
         deltas.extend(batch)
         by_partition[routing_key] = by_partition.get(routing_key, 0) + len(batch)
     return deltas, by_partition
@@ -101,11 +101,11 @@ def _eof_counts(worker, output):
     return counts
 
 
-def test_block_joiner_waits_for_all_eofs_and_emits_weighted_pair_deltas(
+def test_block_joiner_waits_for_all_eofs_and_emits_weighted_pair_pathss(
     monkeypatch,
 ):
-    module, _ = _load_module(monkeypatch, edge_store_amount=2, pair_partitions=5)
-    worker = module.Q4BlockJoinerWorker()
+    module, _ = _load_module(monkeypatch, sum_amount=2, pair_partitions=5)
+    worker = module.Q4JoinerWorker()
     output = worker._pair_reducer_output
     client_id = 51
 
@@ -158,14 +158,14 @@ def test_block_joiner_waits_for_all_eofs_and_emits_weighted_pair_deltas(
 
     deltas, by_partition = _pair_data_messages(worker, module, output)
     assert {
-        (delta.source, delta.target, delta.weight)
+        (delta.source, delta.target, delta.path_count)
         for delta in deltas
     } == {
         (a, b, module.Q4_QUALIFY_THRESHOLD),
         (c, d, 4),
     }
     assert (a, a, module.Q4_QUALIFY_THRESHOLD) not in {
-        (delta.source, delta.target, delta.weight)
+        (delta.source, delta.target, delta.path_count)
         for delta in deltas
     }
 
@@ -173,13 +173,13 @@ def test_block_joiner_waits_for_all_eofs_and_emits_weighted_pair_deltas(
         msg_type, _, payload = worker._proto.unpack_packet(packet)
         if msg_type != MessageType.DATA:
             continue
-        for delta in module.Q4PairDeltaSerializer.deserialize_batch(payload):
+        for delta in module.Q4PairPathsSerializer.deserialize_batch(payload):
             expected_partition = worker._pair_partition(delta.source, delta.target)
-            assert routing_key == f"q4_pair_reducer_{expected_partition}"
+            assert routing_key == f"q4_aggregator_{expected_partition}"
 
     assert _eof_counts(worker, output) == {
-        f"q4_pair_reducer_{partition}": by_partition.get(
-            f"q4_pair_reducer_{partition}", 0
+        f"q4_aggregator_{partition}": by_partition.get(
+            f"q4_aggregator_{partition}", 0
         )
         for partition in range(5)
     }
@@ -187,8 +187,8 @@ def test_block_joiner_waits_for_all_eofs_and_emits_weighted_pair_deltas(
 
 
 def test_block_joiner_does_not_join_edges_from_different_blocks(monkeypatch):
-    module, _ = _load_module(monkeypatch, edge_store_amount=1, pair_partitions=3)
-    worker = module.Q4BlockJoinerWorker()
+    module, _ = _load_module(monkeypatch, sum_amount=1, pair_partitions=3)
+    worker = module.Q4JoinerWorker()
     output = worker._pair_reducer_output
     client_id = 52
 
@@ -229,15 +229,15 @@ def test_block_joiner_does_not_join_edges_from_different_blocks(monkeypatch):
 
     assert _pair_data_messages(worker, module, output)[0] == []
     assert _eof_counts(worker, output) == {
-        "q4_pair_reducer_0": 0,
-        "q4_pair_reducer_1": 0,
-        "q4_pair_reducer_2": 0,
+        "q4_aggregator_0": 0,
+        "q4_aggregator_1": 0,
+        "q4_aggregator_2": 0,
     }
 
 
 def test_block_joiner_duplicate_eof_and_late_data_do_not_reemit(monkeypatch):
-    module, _ = _load_module(monkeypatch, edge_store_amount=1, pair_partitions=2)
-    worker = module.Q4BlockJoinerWorker()
+    module, _ = _load_module(monkeypatch, sum_amount=1, pair_partitions=2)
+    worker = module.Q4JoinerWorker()
     output = worker._pair_reducer_output
     client_id = 53
 

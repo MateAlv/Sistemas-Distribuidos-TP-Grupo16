@@ -33,11 +33,11 @@ workers:
     detectors: 2
     min_intermediaries: 5
   q4:
-    source_prefilters: 2
-    edge_stores: 2
-    block_joiners: 4
-    pair_reducers: 4
-    account_dedupers: 2
+    filters: 2
+    sums: 2
+    joiners: 4
+    aggregators: 4
+    dedupers: 2
 
 clients: 3
 client_accounts:

@@ -14,8 +14,8 @@ from common.message_protocol.internal.scatter_gather_serializer import (
     Q4BlockJoinEdgeSerializer,
     Q4CountedEdge,
     Q4CountedEdgeSerializer,
-    Q4PairDelta,
-    Q4PairDeltaSerializer,
+    Q4PairPaths,
+    Q4PairPathsSerializer,
     Q4TransactionEdge,
     Q4TransactionEdgeSerializer,
 )
@@ -90,21 +90,21 @@ def test_q4_block_join_edge_roundtrip():
     assert recovered == original
 
 
-def test_q4_pair_delta_caps_weight_at_threshold():
-    original = Q4PairDelta(
+def test_q4_pair_paths_caps_weight_at_threshold():
+    original = Q4PairPaths(
         source=account("1", "A"),
         target=account("3", "B"),
-        weight=99,
+        path_count=99,
     )
 
-    recovered = Q4PairDeltaSerializer.deserialize(
-        Q4PairDeltaSerializer.serialize(original)
+    recovered = Q4PairPathsSerializer.deserialize(
+        Q4PairPathsSerializer.serialize(original)
     )
 
-    assert recovered == Q4PairDelta(
+    assert recovered == Q4PairPaths(
         source=account("1", "A"),
         target=account("3", "B"),
-        weight=Q4_QUALIFY_THRESHOLD,
+        path_count=Q4_QUALIFY_THRESHOLD,
     )
 
 

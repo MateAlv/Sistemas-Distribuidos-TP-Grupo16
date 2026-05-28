@@ -121,9 +121,9 @@ services:
     - USD_ENABLE_DATE=1
     - DATE_ENABLE_Q3=1
     - DATE_ENABLE_Q4=1
-    - Q4_SOURCE_PREFILTER_AMOUNT=3
-    - Q4_SOURCE_PREFILTER_INPUT_EXCHANGE=q4_source_prefilter_input_exchange
-    - Q4_SOURCE_PREFILTER_INPUT_ROUTING_PREFIX=q4_source_prefilter
+    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
     - TRANSACTION_EXCHANGE=transaction_fanout_exchange
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
@@ -164,9 +164,9 @@ services:
     - USD_ENABLE_DATE=1
     - DATE_ENABLE_Q3=1
     - DATE_ENABLE_Q4=1
-    - Q4_SOURCE_PREFILTER_AMOUNT=3
-    - Q4_SOURCE_PREFILTER_INPUT_EXCHANGE=q4_source_prefilter_input_exchange
-    - Q4_SOURCE_PREFILTER_INPUT_ROUTING_PREFIX=q4_source_prefilter
+    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -206,9 +206,9 @@ services:
     - USD_ENABLE_DATE=1
     - DATE_ENABLE_Q3=1
     - DATE_ENABLE_Q4=1
-    - Q4_SOURCE_PREFILTER_AMOUNT=3
-    - Q4_SOURCE_PREFILTER_INPUT_EXCHANGE=q4_source_prefilter_input_exchange
-    - Q4_SOURCE_PREFILTER_INPUT_ROUTING_PREFIX=q4_source_prefilter
+    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -248,9 +248,9 @@ services:
     - USD_ENABLE_DATE=1
     - DATE_ENABLE_Q3=1
     - DATE_ENABLE_Q4=1
-    - Q4_SOURCE_PREFILTER_AMOUNT=3
-    - Q4_SOURCE_PREFILTER_INPUT_EXCHANGE=q4_source_prefilter_input_exchange
-    - Q4_SOURCE_PREFILTER_INPUT_ROUTING_PREFIX=q4_source_prefilter
+    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
     - TRANSACTION_EXCHANGE=transaction_fanout_exchange
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
@@ -640,10 +640,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_source_prefilter_0:
+  q4_filter_0:
     build:
       context: ./src/
-      dockerfile: workers/q4_source_prefilter/Dockerfile
+      dockerfile: workers/scatter_gather/q4_filter/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -652,13 +652,13 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_SOURCE_PREFILTER_AMOUNT=3
-    - Q4_SOURCE_PREFILTER_INPUT_EXCHANGE=q4_source_prefilter_input_exchange
-    - Q4_SOURCE_PREFILTER_INPUT_ROUTING_PREFIX=q4_source_prefilter
-    - Q4_SOURCE_PREFILTER_PREFIX=q4_source_prefilter
-    - Q4_EDGE_STORE_EXCHANGE=q4_edge_store_exchange
-    - Q4_EDGE_STORE_AMOUNT=3
-    - Q4_EDGE_STORE_ROUTING_PREFIX=q4_edge_store
+    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q4_FILTER_PREFIX=q4_filter
+    - Q4_SUM_EXCHANGE=q4_sum_exchange
+    - Q4_SUM_AMOUNT=3
+    - Q4_SUM_ROUTING_PREFIX=q4_sum
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -666,10 +666,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_source_prefilter_1:
+  q4_filter_1:
     build:
       context: ./src/
-      dockerfile: workers/q4_source_prefilter/Dockerfile
+      dockerfile: workers/scatter_gather/q4_filter/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -678,13 +678,13 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_SOURCE_PREFILTER_AMOUNT=3
-    - Q4_SOURCE_PREFILTER_INPUT_EXCHANGE=q4_source_prefilter_input_exchange
-    - Q4_SOURCE_PREFILTER_INPUT_ROUTING_PREFIX=q4_source_prefilter
-    - Q4_SOURCE_PREFILTER_PREFIX=q4_source_prefilter
-    - Q4_EDGE_STORE_EXCHANGE=q4_edge_store_exchange
-    - Q4_EDGE_STORE_AMOUNT=3
-    - Q4_EDGE_STORE_ROUTING_PREFIX=q4_edge_store
+    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q4_FILTER_PREFIX=q4_filter
+    - Q4_SUM_EXCHANGE=q4_sum_exchange
+    - Q4_SUM_AMOUNT=3
+    - Q4_SUM_ROUTING_PREFIX=q4_sum
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -692,10 +692,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_source_prefilter_2:
+  q4_filter_2:
     build:
       context: ./src/
-      dockerfile: workers/q4_source_prefilter/Dockerfile
+      dockerfile: workers/scatter_gather/q4_filter/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -704,13 +704,13 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_SOURCE_PREFILTER_AMOUNT=3
-    - Q4_SOURCE_PREFILTER_INPUT_EXCHANGE=q4_source_prefilter_input_exchange
-    - Q4_SOURCE_PREFILTER_INPUT_ROUTING_PREFIX=q4_source_prefilter
-    - Q4_SOURCE_PREFILTER_PREFIX=q4_source_prefilter
-    - Q4_EDGE_STORE_EXCHANGE=q4_edge_store_exchange
-    - Q4_EDGE_STORE_AMOUNT=3
-    - Q4_EDGE_STORE_ROUTING_PREFIX=q4_edge_store
+    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q4_FILTER_PREFIX=q4_filter
+    - Q4_SUM_EXCHANGE=q4_sum_exchange
+    - Q4_SUM_AMOUNT=3
+    - Q4_SUM_ROUTING_PREFIX=q4_sum
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -718,10 +718,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_edge_store_0:
+  q4_sum_0:
     build:
       context: ./src/
-      dockerfile: workers/q4_edge_store/Dockerfile
+      dockerfile: workers/scatter_gather/q4_sum/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -730,15 +730,15 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_EDGE_STORE_EXCHANGE=q4_edge_store_exchange
-    - Q4_EDGE_STORE_ROUTING_PREFIX=q4_edge_store
-    - Q4_SOURCE_PREFILTER_AMOUNT=3
-    - Q4_BLOCK_JOINER_EXCHANGE=q4_block_joiner_exchange
-    - Q4_BLOCK_JOINER_AMOUNT=6
-    - Q4_BLOCK_JOINER_ROUTING_PREFIX=q4_block_joiner
-    - Q4_EDGE_STORE_HOT_PAIR_THRESHOLD=1000000
-    - Q4_EDGE_STORE_HOT_A_BUCKETS=16
-    - Q4_EDGE_STORE_HOT_B_BUCKETS=16
+    - Q4_SUM_EXCHANGE=q4_sum_exchange
+    - Q4_SUM_ROUTING_PREFIX=q4_sum
+    - Q4_FILTER_AMOUNT=3
+    - Q4_JOINER_EXCHANGE=q4_joiner_exchange
+    - Q4_JOINER_AMOUNT=6
+    - Q4_JOINER_ROUTING_PREFIX=q4_joiner
+    - Q4_SUM_HOT_PAIR_THRESHOLD=1000000
+    - Q4_SUM_HOT_A_BUCKETS=16
+    - Q4_SUM_HOT_B_BUCKETS=16
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -746,10 +746,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_edge_store_1:
+  q4_sum_1:
     build:
       context: ./src/
-      dockerfile: workers/q4_edge_store/Dockerfile
+      dockerfile: workers/scatter_gather/q4_sum/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -758,15 +758,15 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_EDGE_STORE_EXCHANGE=q4_edge_store_exchange
-    - Q4_EDGE_STORE_ROUTING_PREFIX=q4_edge_store
-    - Q4_SOURCE_PREFILTER_AMOUNT=3
-    - Q4_BLOCK_JOINER_EXCHANGE=q4_block_joiner_exchange
-    - Q4_BLOCK_JOINER_AMOUNT=6
-    - Q4_BLOCK_JOINER_ROUTING_PREFIX=q4_block_joiner
-    - Q4_EDGE_STORE_HOT_PAIR_THRESHOLD=1000000
-    - Q4_EDGE_STORE_HOT_A_BUCKETS=16
-    - Q4_EDGE_STORE_HOT_B_BUCKETS=16
+    - Q4_SUM_EXCHANGE=q4_sum_exchange
+    - Q4_SUM_ROUTING_PREFIX=q4_sum
+    - Q4_FILTER_AMOUNT=3
+    - Q4_JOINER_EXCHANGE=q4_joiner_exchange
+    - Q4_JOINER_AMOUNT=6
+    - Q4_JOINER_ROUTING_PREFIX=q4_joiner
+    - Q4_SUM_HOT_PAIR_THRESHOLD=1000000
+    - Q4_SUM_HOT_A_BUCKETS=16
+    - Q4_SUM_HOT_B_BUCKETS=16
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -774,10 +774,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_edge_store_2:
+  q4_sum_2:
     build:
       context: ./src/
-      dockerfile: workers/q4_edge_store/Dockerfile
+      dockerfile: workers/scatter_gather/q4_sum/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -786,15 +786,15 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_EDGE_STORE_EXCHANGE=q4_edge_store_exchange
-    - Q4_EDGE_STORE_ROUTING_PREFIX=q4_edge_store
-    - Q4_SOURCE_PREFILTER_AMOUNT=3
-    - Q4_BLOCK_JOINER_EXCHANGE=q4_block_joiner_exchange
-    - Q4_BLOCK_JOINER_AMOUNT=6
-    - Q4_BLOCK_JOINER_ROUTING_PREFIX=q4_block_joiner
-    - Q4_EDGE_STORE_HOT_PAIR_THRESHOLD=1000000
-    - Q4_EDGE_STORE_HOT_A_BUCKETS=16
-    - Q4_EDGE_STORE_HOT_B_BUCKETS=16
+    - Q4_SUM_EXCHANGE=q4_sum_exchange
+    - Q4_SUM_ROUTING_PREFIX=q4_sum
+    - Q4_FILTER_AMOUNT=3
+    - Q4_JOINER_EXCHANGE=q4_joiner_exchange
+    - Q4_JOINER_AMOUNT=6
+    - Q4_JOINER_ROUTING_PREFIX=q4_joiner
+    - Q4_SUM_HOT_PAIR_THRESHOLD=1000000
+    - Q4_SUM_HOT_A_BUCKETS=16
+    - Q4_SUM_HOT_B_BUCKETS=16
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -802,10 +802,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_block_joiner_0:
+  q4_joiner_0:
     build:
       context: ./src/
-      dockerfile: workers/q4_block_joiner/Dockerfile
+      dockerfile: workers/scatter_gather/q4_joiner/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -814,12 +814,12 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_BLOCK_JOINER_EXCHANGE=q4_block_joiner_exchange
-    - Q4_BLOCK_JOINER_ROUTING_PREFIX=q4_block_joiner
-    - Q4_EDGE_STORE_AMOUNT=3
-    - Q4_PAIR_REDUCER_EXCHANGE=q4_pair_reducer_exchange
-    - Q4_PAIR_REDUCER_AMOUNT=6
-    - Q4_PAIR_REDUCER_ROUTING_PREFIX=q4_pair_reducer
+    - Q4_JOINER_EXCHANGE=q4_joiner_exchange
+    - Q4_JOINER_ROUTING_PREFIX=q4_joiner
+    - Q4_SUM_AMOUNT=3
+    - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
+    - Q4_AGGREGATOR_AMOUNT=6
+    - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -827,10 +827,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_block_joiner_1:
+  q4_joiner_1:
     build:
       context: ./src/
-      dockerfile: workers/q4_block_joiner/Dockerfile
+      dockerfile: workers/scatter_gather/q4_joiner/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -839,12 +839,12 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_BLOCK_JOINER_EXCHANGE=q4_block_joiner_exchange
-    - Q4_BLOCK_JOINER_ROUTING_PREFIX=q4_block_joiner
-    - Q4_EDGE_STORE_AMOUNT=3
-    - Q4_PAIR_REDUCER_EXCHANGE=q4_pair_reducer_exchange
-    - Q4_PAIR_REDUCER_AMOUNT=6
-    - Q4_PAIR_REDUCER_ROUTING_PREFIX=q4_pair_reducer
+    - Q4_JOINER_EXCHANGE=q4_joiner_exchange
+    - Q4_JOINER_ROUTING_PREFIX=q4_joiner
+    - Q4_SUM_AMOUNT=3
+    - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
+    - Q4_AGGREGATOR_AMOUNT=6
+    - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -852,10 +852,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_block_joiner_2:
+  q4_joiner_2:
     build:
       context: ./src/
-      dockerfile: workers/q4_block_joiner/Dockerfile
+      dockerfile: workers/scatter_gather/q4_joiner/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -864,12 +864,12 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_BLOCK_JOINER_EXCHANGE=q4_block_joiner_exchange
-    - Q4_BLOCK_JOINER_ROUTING_PREFIX=q4_block_joiner
-    - Q4_EDGE_STORE_AMOUNT=3
-    - Q4_PAIR_REDUCER_EXCHANGE=q4_pair_reducer_exchange
-    - Q4_PAIR_REDUCER_AMOUNT=6
-    - Q4_PAIR_REDUCER_ROUTING_PREFIX=q4_pair_reducer
+    - Q4_JOINER_EXCHANGE=q4_joiner_exchange
+    - Q4_JOINER_ROUTING_PREFIX=q4_joiner
+    - Q4_SUM_AMOUNT=3
+    - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
+    - Q4_AGGREGATOR_AMOUNT=6
+    - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -877,10 +877,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_block_joiner_3:
+  q4_joiner_3:
     build:
       context: ./src/
-      dockerfile: workers/q4_block_joiner/Dockerfile
+      dockerfile: workers/scatter_gather/q4_joiner/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -889,12 +889,12 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_BLOCK_JOINER_EXCHANGE=q4_block_joiner_exchange
-    - Q4_BLOCK_JOINER_ROUTING_PREFIX=q4_block_joiner
-    - Q4_EDGE_STORE_AMOUNT=3
-    - Q4_PAIR_REDUCER_EXCHANGE=q4_pair_reducer_exchange
-    - Q4_PAIR_REDUCER_AMOUNT=6
-    - Q4_PAIR_REDUCER_ROUTING_PREFIX=q4_pair_reducer
+    - Q4_JOINER_EXCHANGE=q4_joiner_exchange
+    - Q4_JOINER_ROUTING_PREFIX=q4_joiner
+    - Q4_SUM_AMOUNT=3
+    - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
+    - Q4_AGGREGATOR_AMOUNT=6
+    - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -902,10 +902,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_block_joiner_4:
+  q4_joiner_4:
     build:
       context: ./src/
-      dockerfile: workers/q4_block_joiner/Dockerfile
+      dockerfile: workers/scatter_gather/q4_joiner/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -914,12 +914,12 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_BLOCK_JOINER_EXCHANGE=q4_block_joiner_exchange
-    - Q4_BLOCK_JOINER_ROUTING_PREFIX=q4_block_joiner
-    - Q4_EDGE_STORE_AMOUNT=3
-    - Q4_PAIR_REDUCER_EXCHANGE=q4_pair_reducer_exchange
-    - Q4_PAIR_REDUCER_AMOUNT=6
-    - Q4_PAIR_REDUCER_ROUTING_PREFIX=q4_pair_reducer
+    - Q4_JOINER_EXCHANGE=q4_joiner_exchange
+    - Q4_JOINER_ROUTING_PREFIX=q4_joiner
+    - Q4_SUM_AMOUNT=3
+    - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
+    - Q4_AGGREGATOR_AMOUNT=6
+    - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -927,10 +927,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_block_joiner_5:
+  q4_joiner_5:
     build:
       context: ./src/
-      dockerfile: workers/q4_block_joiner/Dockerfile
+      dockerfile: workers/scatter_gather/q4_joiner/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -939,12 +939,12 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_BLOCK_JOINER_EXCHANGE=q4_block_joiner_exchange
-    - Q4_BLOCK_JOINER_ROUTING_PREFIX=q4_block_joiner
-    - Q4_EDGE_STORE_AMOUNT=3
-    - Q4_PAIR_REDUCER_EXCHANGE=q4_pair_reducer_exchange
-    - Q4_PAIR_REDUCER_AMOUNT=6
-    - Q4_PAIR_REDUCER_ROUTING_PREFIX=q4_pair_reducer
+    - Q4_JOINER_EXCHANGE=q4_joiner_exchange
+    - Q4_JOINER_ROUTING_PREFIX=q4_joiner
+    - Q4_SUM_AMOUNT=3
+    - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
+    - Q4_AGGREGATOR_AMOUNT=6
+    - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -952,10 +952,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_pair_reducer_0:
+  q4_aggregator_0:
     build:
       context: ./src/
-      dockerfile: workers/q4_pair_reducer/Dockerfile
+      dockerfile: workers/scatter_gather/q4_aggregator/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -964,12 +964,12 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_PAIR_REDUCER_EXCHANGE=q4_pair_reducer_exchange
-    - Q4_PAIR_REDUCER_ROUTING_PREFIX=q4_pair_reducer
-    - Q4_BLOCK_JOINER_AMOUNT=6
-    - Q4_ACCOUNT_DEDUPER_EXCHANGE=q4_account_deduper_exchange
-    - Q4_ACCOUNT_DEDUPER_AMOUNT=3
-    - Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX=q4_account_deduper
+    - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
+    - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
+    - Q4_JOINER_AMOUNT=6
+    - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
+    - Q4_DEDUPER_AMOUNT=3
+    - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -977,10 +977,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_pair_reducer_1:
+  q4_aggregator_1:
     build:
       context: ./src/
-      dockerfile: workers/q4_pair_reducer/Dockerfile
+      dockerfile: workers/scatter_gather/q4_aggregator/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -989,12 +989,12 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_PAIR_REDUCER_EXCHANGE=q4_pair_reducer_exchange
-    - Q4_PAIR_REDUCER_ROUTING_PREFIX=q4_pair_reducer
-    - Q4_BLOCK_JOINER_AMOUNT=6
-    - Q4_ACCOUNT_DEDUPER_EXCHANGE=q4_account_deduper_exchange
-    - Q4_ACCOUNT_DEDUPER_AMOUNT=3
-    - Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX=q4_account_deduper
+    - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
+    - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
+    - Q4_JOINER_AMOUNT=6
+    - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
+    - Q4_DEDUPER_AMOUNT=3
+    - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -1002,10 +1002,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_pair_reducer_2:
+  q4_aggregator_2:
     build:
       context: ./src/
-      dockerfile: workers/q4_pair_reducer/Dockerfile
+      dockerfile: workers/scatter_gather/q4_aggregator/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -1014,12 +1014,12 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_PAIR_REDUCER_EXCHANGE=q4_pair_reducer_exchange
-    - Q4_PAIR_REDUCER_ROUTING_PREFIX=q4_pair_reducer
-    - Q4_BLOCK_JOINER_AMOUNT=6
-    - Q4_ACCOUNT_DEDUPER_EXCHANGE=q4_account_deduper_exchange
-    - Q4_ACCOUNT_DEDUPER_AMOUNT=3
-    - Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX=q4_account_deduper
+    - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
+    - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
+    - Q4_JOINER_AMOUNT=6
+    - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
+    - Q4_DEDUPER_AMOUNT=3
+    - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -1027,10 +1027,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_pair_reducer_3:
+  q4_aggregator_3:
     build:
       context: ./src/
-      dockerfile: workers/q4_pair_reducer/Dockerfile
+      dockerfile: workers/scatter_gather/q4_aggregator/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -1039,12 +1039,12 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_PAIR_REDUCER_EXCHANGE=q4_pair_reducer_exchange
-    - Q4_PAIR_REDUCER_ROUTING_PREFIX=q4_pair_reducer
-    - Q4_BLOCK_JOINER_AMOUNT=6
-    - Q4_ACCOUNT_DEDUPER_EXCHANGE=q4_account_deduper_exchange
-    - Q4_ACCOUNT_DEDUPER_AMOUNT=3
-    - Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX=q4_account_deduper
+    - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
+    - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
+    - Q4_JOINER_AMOUNT=6
+    - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
+    - Q4_DEDUPER_AMOUNT=3
+    - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -1052,10 +1052,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_pair_reducer_4:
+  q4_aggregator_4:
     build:
       context: ./src/
-      dockerfile: workers/q4_pair_reducer/Dockerfile
+      dockerfile: workers/scatter_gather/q4_aggregator/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -1064,12 +1064,12 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_PAIR_REDUCER_EXCHANGE=q4_pair_reducer_exchange
-    - Q4_PAIR_REDUCER_ROUTING_PREFIX=q4_pair_reducer
-    - Q4_BLOCK_JOINER_AMOUNT=6
-    - Q4_ACCOUNT_DEDUPER_EXCHANGE=q4_account_deduper_exchange
-    - Q4_ACCOUNT_DEDUPER_AMOUNT=3
-    - Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX=q4_account_deduper
+    - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
+    - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
+    - Q4_JOINER_AMOUNT=6
+    - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
+    - Q4_DEDUPER_AMOUNT=3
+    - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -1077,10 +1077,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_pair_reducer_5:
+  q4_aggregator_5:
     build:
       context: ./src/
-      dockerfile: workers/q4_pair_reducer/Dockerfile
+      dockerfile: workers/scatter_gather/q4_aggregator/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -1089,12 +1089,12 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_PAIR_REDUCER_EXCHANGE=q4_pair_reducer_exchange
-    - Q4_PAIR_REDUCER_ROUTING_PREFIX=q4_pair_reducer
-    - Q4_BLOCK_JOINER_AMOUNT=6
-    - Q4_ACCOUNT_DEDUPER_EXCHANGE=q4_account_deduper_exchange
-    - Q4_ACCOUNT_DEDUPER_AMOUNT=3
-    - Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX=q4_account_deduper
+    - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
+    - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
+    - Q4_JOINER_AMOUNT=6
+    - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
+    - Q4_DEDUPER_AMOUNT=3
+    - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
     - FLOW_LOG_EVERY_BYTES=8388608
@@ -1102,10 +1102,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_account_deduper_0:
+  q4_deduper_0:
     build:
       context: ./src/
-      dockerfile: workers/q4_account_deduper/Dockerfile
+      dockerfile: workers/scatter_gather/q4_deduper/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -1114,11 +1114,11 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_ACCOUNT_DEDUPER_EXCHANGE=q4_account_deduper_exchange
-    - Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX=q4_account_deduper
-    - Q4_PAIR_REDUCER_AMOUNT=6
-    - Q4_ACCOUNT_DEDUPER_AMOUNT=3
-    - Q4_ACCOUNT_DEDUPER_RESPONSE_QUEUE_PREFIX=q4_account_deduper_response
+    - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
+    - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
+    - Q4_AGGREGATOR_AMOUNT=6
+    - Q4_DEDUPER_AMOUNT=3
+    - Q4_DEDUPER_RESPONSE_QUEUE_PREFIX=q4_deduper_response
     - GATEWAY_Q4_QUEUE=gateway_q4_results_queue
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
@@ -1127,10 +1127,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_account_deduper_1:
+  q4_deduper_1:
     build:
       context: ./src/
-      dockerfile: workers/q4_account_deduper/Dockerfile
+      dockerfile: workers/scatter_gather/q4_deduper/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -1139,11 +1139,11 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_ACCOUNT_DEDUPER_EXCHANGE=q4_account_deduper_exchange
-    - Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX=q4_account_deduper
-    - Q4_PAIR_REDUCER_AMOUNT=6
-    - Q4_ACCOUNT_DEDUPER_AMOUNT=3
-    - Q4_ACCOUNT_DEDUPER_RESPONSE_QUEUE_PREFIX=q4_account_deduper_response
+    - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
+    - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
+    - Q4_AGGREGATOR_AMOUNT=6
+    - Q4_DEDUPER_AMOUNT=3
+    - Q4_DEDUPER_RESPONSE_QUEUE_PREFIX=q4_deduper_response
     - GATEWAY_Q4_QUEUE=gateway_q4_results_queue
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
@@ -1152,10 +1152,10 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100
     - CHUNK_LOG_EVERY=100
     - RESULT_LOG_EVERY=100
-  q4_account_deduper_2:
+  q4_deduper_2:
     build:
       context: ./src/
-      dockerfile: workers/q4_account_deduper/Dockerfile
+      dockerfile: workers/scatter_gather/q4_deduper/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -1164,11 +1164,11 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_ACCOUNT_DEDUPER_EXCHANGE=q4_account_deduper_exchange
-    - Q4_ACCOUNT_DEDUPER_ROUTING_PREFIX=q4_account_deduper
-    - Q4_PAIR_REDUCER_AMOUNT=6
-    - Q4_ACCOUNT_DEDUPER_AMOUNT=3
-    - Q4_ACCOUNT_DEDUPER_RESPONSE_QUEUE_PREFIX=q4_account_deduper_response
+    - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
+    - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
+    - Q4_AGGREGATOR_AMOUNT=6
+    - Q4_DEDUPER_AMOUNT=3
+    - Q4_DEDUPER_RESPONSE_QUEUE_PREFIX=q4_deduper_response
     - GATEWAY_Q4_QUEUE=gateway_q4_results_queue
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100
@@ -1205,27 +1205,27 @@ services:
     - q3_barrier_0
     - aggregation_q5_0
     - join_q5
-    - q4_source_prefilter_0
-    - q4_source_prefilter_1
-    - q4_source_prefilter_2
-    - q4_edge_store_0
-    - q4_edge_store_1
-    - q4_edge_store_2
-    - q4_block_joiner_0
-    - q4_block_joiner_1
-    - q4_block_joiner_2
-    - q4_block_joiner_3
-    - q4_block_joiner_4
-    - q4_block_joiner_5
-    - q4_pair_reducer_0
-    - q4_pair_reducer_1
-    - q4_pair_reducer_2
-    - q4_pair_reducer_3
-    - q4_pair_reducer_4
-    - q4_pair_reducer_5
-    - q4_account_deduper_0
-    - q4_account_deduper_1
-    - q4_account_deduper_2
+    - q4_filter_0
+    - q4_filter_1
+    - q4_filter_2
+    - q4_sum_0
+    - q4_sum_1
+    - q4_sum_2
+    - q4_joiner_0
+    - q4_joiner_1
+    - q4_joiner_2
+    - q4_joiner_3
+    - q4_joiner_4
+    - q4_joiner_5
+    - q4_aggregator_0
+    - q4_aggregator_1
+    - q4_aggregator_2
+    - q4_aggregator_3
+    - q4_aggregator_4
+    - q4_aggregator_5
+    - q4_deduper_0
+    - q4_deduper_1
+    - q4_deduper_2
     environment:
     - ACCOUNTS_FILE=LI-Small_accounts.csv
     - TRANSACTIONS_FILE=LI-Small_Trans.csv
