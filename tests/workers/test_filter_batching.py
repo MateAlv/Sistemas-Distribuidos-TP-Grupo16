@@ -258,6 +258,61 @@ def test_date_filter_uses_notebook_q3_timestamp_bounds(monkeypatch):
     assert candidate_accounts == ["start", "end"]
 
 
+def test_date_filter_uses_notebook_q4_timestamp_bounds(monkeypatch):
+    monkeypatch.setenv("FILTER_OUTPUT_BATCH_MAX_TX", "1")
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="DATE",
+        usd_enable_q2="0",
+        date_enable_q3="0",
+        date_enable_q4="1",
+    )
+    worker = module.FilterWorker()
+
+    worker._process_data_message(
+        _data_packet(
+            315,
+            [
+                _tx(
+                    10.0,
+                    "US Dollar",
+                    date="2022/09/05 23:59",
+                    from_account="included-5",
+                ),
+                _tx(
+                    20.0,
+                    "US Dollar",
+                    date="2022/09/06",
+                    from_account="included-bound",
+                ),
+                _tx(
+                    30.0,
+                    "US Dollar",
+                    date="2022/09/06 00:00",
+                    from_account="excluded-time",
+                ),
+                _tx(
+                    40.0,
+                    "US Dollar",
+                    date="2022/08/31 23:59",
+                    from_account="excluded-before",
+                ),
+            ],
+        )
+    )
+
+    q4_sent = worker.output_queues["sg_mapper_queue"].sent
+    assert len(q4_sent) == 2
+
+    q4_accounts = []
+    for packet in q4_sent:
+        _, _, payload = InternalProtocol.unpack_packet(packet)
+        q4_accounts.extend(
+            tx.from_account for tx in TransactionSerializer.deserialize_batch(payload)
+        )
+    assert q4_accounts == ["included-5", "included-bound"]
+
+
 def test_eof_flushes_partial_batch_before_forwarding(monkeypatch):
     # Sin llegar al limite, una unica tx queda en el batcher hasta que el
     # EOF dispara _try_forward_single_filter_eof, que debe flushear antes

@@ -420,7 +420,11 @@ class FilterWorker:
                 with self.lock:
                     self._record_forwarded_output(client_id, Q3_CANDIDATES_QUEUE)
                 sent = True
-            if DATE_ENABLE_Q4 and self._filter_transaction(transaction, start_date="2022-09-01", end_date="2022-09-05"):
+            if DATE_ENABLE_Q4 and self._filter_transaction_by_raw_timestamp(
+                transaction,
+                start_timestamp="2022/09/01",
+                end_timestamp="2022/09/06",
+            ):
                 self._publish_to_queue(SCATTER_GATHER_MAPPER_QUEUE, client_id, transaction, output_queues)
                 with self.lock:
                     self._record_forwarded_output(client_id, SCATTER_GATHER_MAPPER_QUEUE)
@@ -527,7 +531,7 @@ class FilterWorker:
     def _filter_transaction_by_raw_timestamp(
         transaction: Transaction, start_timestamp: str, end_timestamp: str
     ) -> bool:
-        # Q3 follows the notebook's direct string comparison on Timestamp.
+        # Notebook query windows compare the raw Timestamp string directly.
         timestamp = transaction.date.strip()
         return start_timestamp <= timestamp <= end_timestamp
     
