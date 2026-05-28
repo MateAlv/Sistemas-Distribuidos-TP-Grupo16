@@ -463,7 +463,6 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
         "q3_barrier": int(workers.get("q3_barrier", 1)),
     }
     min_intermediaries = int(get_nested(workers, "scatter_gather.min_intermediaries", 5))
-    q4_settings = get_nested(workers, "q4", {})
 
     services = {}
     services["rabbitmq"] = rabbitmq_service(expose_ports)
@@ -650,7 +649,6 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 filter_amount=counts["q4_filter"],
                 joiner_amount=counts["q4_joiner"],
                 settings=settings,
-                q4_settings=q4_settings,
             )
         for index in range(counts["q4_joiner"]):
             services[f"q4_joiner_{index}"] = q4_joiner_service(
@@ -665,7 +663,6 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 joiner_amount=counts["q4_joiner"],
                 deduper_amount=counts["q4_deduper"],
                 settings=settings,
-                q4_settings=q4_settings,
             )
         for index in range(counts["q4_deduper"]):
             services[f"q4_deduper_{index}"] = q4_deduper_service(
@@ -673,7 +670,6 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 aggregator_amount=counts["q4_aggregator"],
                 deduper_amount=counts["q4_deduper"],
                 settings=settings,
-                q4_settings=q4_settings,
             )
 
     client_dependencies = [
@@ -1061,7 +1057,6 @@ def q4_sum_service(
     filter_amount: int,
     joiner_amount: int,
     settings: dict,
-    q4_settings: dict,
 ) -> dict:
     environment = [
         f"ID={index}",
@@ -1074,9 +1069,6 @@ def q4_sum_service(
         f"Q4_JOINER_EXCHANGE={Q4_JOINER_EXCHANGE}",
         f"Q4_JOINER_AMOUNT={joiner_amount}",
         f"Q4_JOINER_ROUTING_PREFIX={Q4_JOINER_ROUTING_PREFIX}",
-        f"Q4_SUM_HOT_PAIR_THRESHOLD={q4_settings.get('hot_pair_threshold', 1000000)}",
-        f"Q4_SUM_HOT_A_BUCKETS={q4_settings.get('hot_a_buckets', 16)}",
-        f"Q4_SUM_HOT_B_BUCKETS={q4_settings.get('hot_b_buckets', 16)}",
     ]
     prefetch = settings.get("filter_prefetch_count")
     if prefetch is not None:
@@ -1123,7 +1115,6 @@ def q4_aggregator_service(
     joiner_amount: int,
     deduper_amount: int,
     settings: dict,
-    q4_settings: dict,
 ) -> dict:
     environment = [
         f"ID={index}",
@@ -1153,7 +1144,6 @@ def q4_deduper_service(
     aggregator_amount: int,
     deduper_amount: int,
     settings: dict,
-    q4_settings: dict,
 ) -> dict:
     environment = [
         f"ID={index}",

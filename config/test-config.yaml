@@ -39,9 +39,6 @@ workers:
     joiners: 6
     aggregators: 6
     dedupers: 3
-    hot_pair_threshold: 1000000
-    hot_a_buckets: 16
-    hot_b_buckets: 16
   q3_barrier: 3
 
 clients: 2

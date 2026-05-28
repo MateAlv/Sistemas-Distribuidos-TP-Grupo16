@@ -40,11 +40,12 @@ Q4_SUM_BATCH_BYTES = int(
 Q4_SUM_BATCH_MAX_EDGES = int(
     os.environ.get("Q4_SUM_BATCH_MAX_EDGES", "5000")
 )
-Q4_SUM_HOT_PAIR_THRESHOLD = int(
-    os.environ.get("Q4_SUM_HOT_PAIR_THRESHOLD", "1000000")
-)
-Q4_SUM_HOT_A_BUCKETS = int(os.environ.get("Q4_SUM_HOT_A_BUCKETS", "16"))
-Q4_SUM_HOT_B_BUCKETS = int(os.environ.get("Q4_SUM_HOT_B_BUCKETS", "16"))
+# Hot-M planning constants. An intermediary whose incoming×outgoing fan-out
+# exceeds the threshold is split across HOT_A_BUCKETS × HOT_B_BUCKETS join
+# blocks so a hub never lands on a single joiner.
+Q4_SUM_HOT_PAIR_THRESHOLD = 1_000_000
+Q4_SUM_HOT_A_BUCKETS = 16
+Q4_SUM_HOT_B_BUCKETS = 16
 
 
 class Q4SumWorker:

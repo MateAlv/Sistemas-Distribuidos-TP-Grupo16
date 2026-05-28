@@ -25,13 +25,15 @@ def _load_module(
     monkeypatch.setenv("Q4_JOINER_ROUTING_PREFIX", "q4_joiner")
     monkeypatch.setenv("Q4_SUM_BATCH_BYTES", str(1024 * 1024))
     monkeypatch.setenv("Q4_SUM_BATCH_MAX_EDGES", "5000")
-    monkeypatch.setenv("Q4_SUM_HOT_PAIR_THRESHOLD", str(hot_threshold))
-    monkeypatch.setenv("Q4_SUM_HOT_A_BUCKETS", str(a_buckets))
-    monkeypatch.setenv("Q4_SUM_HOT_B_BUCKETS", str(b_buckets))
 
     module_name = "workers.scatter_gather.q4_sum.sums"
     sys.modules.pop(module_name, None)
     module = importlib.import_module(module_name)
+
+    # Hot-M planning thresholds are module constants now (no longer env-driven).
+    monkeypatch.setattr(module, "Q4_SUM_HOT_PAIR_THRESHOLD", hot_threshold)
+    monkeypatch.setattr(module, "Q4_SUM_HOT_A_BUCKETS", a_buckets)
+    monkeypatch.setattr(module, "Q4_SUM_HOT_B_BUCKETS", b_buckets)
 
     class FakeExchange:
         instances = []
