@@ -1,120 +1,253 @@
-# Q4 Scatter-Gather Overview
+# Q4 Distributed Scatter-Gather Plan
 
-This document summarizes the protocol described in `docs/diseño-informe.pdf`
-for Query 4. It is intentionally limited to the pipeline shape and the
-responsibility of each stage.
+This document describes the new Query 4 architecture. It replaces the old
+distinct-intermediary pair detector with a notebook-exact distributed join.
 
-## Query
+## Notebook Semantics
 
-Query 4 works over USD transactions in the range
-`[2022-09-01, 2022-09-05]`.
-
-The transaction stream is treated as a directed graph:
+Query 4 uses USD transactions whose raw `Timestamp` string satisfies:
 
 ```text
-A -> M -> B
+'2022/09/01' <= Timestamp <= '2022/09/06'
 ```
 
-`M` is the intermediate account. A result is emitted for a pair `(A, B)` when
-there are at least 5 distinct intermediate accounts `M` connecting that same
-origin and destination:
+Because the notebook compares strings directly, rows such as
+`2022/09/06 00:00` are outside the Q4 window.
+
+Account identity is always:
 
 ```text
-A -> M1 -> B
-A -> M2 -> B
-A -> M3 -> B
-A -> M4 -> B
-A -> M5 -> B
+(notebook_bank_id(bank), account)
 ```
 
-The count is over distinct intermediate accounts for the same `(A, B)` pair.
+The query is:
+
+```text
+T  = Q4-window USD transactions
+Tq = rows in T whose source A=(From Bank, Account)
+     sent to more than 5 distinct targets M=(To Bank, Account.1)
+
+pairs = Tq as A->M joined with Tq as M->B
+drop A == B
+group by (A, B)
+keep groups with path-row count > 5
+
+output unique accounts from every qualifying A and B
+```
+
+The count is row-combination multiplicity, not distinct intermediaries:
+
+```text
+weight(A, B, M) = count(A->M) * count(M->B)
+pair_count(A, B) = sum_M weight(A, B, M)
+qualifies iff pair_count(A, B) > 5
+```
+
+Weights are non-negative, so workers may cap accumulated counts at `6`.
 
 ## Pipeline
 
 ```text
-Date-range filter
-  -> Scatter-Gather Mapper
-  -> Scatter-Gather Linker
-  -> Scatter-Gather Detector, partitioned by (A, B)
-  -> Gateway
+DATE/USD Q4 filter
+  -> q4_source_prefilter, sharded by source A
+  -> q4_edge_store, sharded by intermediary M
+  -> q4_block_joiner, salted by hot M blocks
+  -> q4_pair_reducer, sharded by (A, B)
+  -> q4_account_deduper, sharded by account
+  -> gateway
 ```
 
-The design report uses these stage names:
+Every stage streams records. No stage should load the full input file in
+memory. Large per-client state must either be capped, compacted, or spilled to
+local temporary files and released when the client finishes.
 
-| Stage | Name |
+## Message Contracts
+
+The shared binary DTOs live in
+`common.message_protocol.internal.scatter_gather_serializer`.
+
+| DTO | Purpose |
 | --- | --- |
-| Mapper | `SGM` |
-| Linker | `SGL` |
-| Detector | `SGD` |
+| `Q4AccountId` | `(bank_id, account)` identity and final result row. |
+| `Q4TransactionEdge` | Qualified transaction edge `A -> M`. |
+| `Q4CountedEdge` | Counted `IN` or `OUT` edge grouped by intermediary `M`. |
+| `Q4BlockJoinEdge` | Counted edge assigned to one hot-M join block. |
+| `Q4PairDelta` | Weighted `(A, B)` contribution, capped at 6. |
+
+Old `ScatterGatherRelation` and `ScatterGatherResult` remain in the codebase
+only for the current legacy workers. New Q4 workers should use the Q4 DTOs.
 
 ## Stage Responsibilities
 
-### Date-Range Filter
+### Q4 Filter
 
-The Q4 branch starts after the shared date-range filter. This filter sends the
-transactions in the Q4 time window to the scatter-gather branch.
-
-### Scatter-Gather Mapper
-
-The mapper receives filtered transactions and routes them by the candidate
-intermediate account `M`.
-
-For a transaction `X -> Y`, the mapper has to preserve both possible roles:
+The existing DATE filter should forward only Q4-window rows using the notebook
+raw timestamp comparison:
 
 ```text
-X -> Y can be an incoming edge to M=Y
-X -> Y can be an outgoing edge from M=X
+'2022/09/01' <= Timestamp <= '2022/09/06'
 ```
 
-The mapper routes these records so every edge involving the same candidate `M`
-is processed by the same linker partition. This is the shuffle by `hash(M)`
-described in the design report.
+The next implementation step should emit compact `Q4TransactionEdge` records
+instead of full `Transaction` rows once the new prefilter worker is wired.
 
-### Scatter-Gather Linker
+### Source Prefilter
 
-Each linker owns a partition of intermediate accounts. For each `M`, it links
-incoming and outgoing edges into relations of the form:
+Input is sharded by source account:
 
 ```text
-A -> M -> B
+routing_key = q4_prefilter_<hash(A) % N>
 ```
 
-The linker keeps the state needed to join incoming and outgoing edges per `M`.
-When it can form a distinct relation `(A, M, B)`, it forwards that row to the
-detector partition selected by `hash(A, B)`. It should forward rows as early as
-possible once the relation is known.
-
-### Scatter-Gather Detector
-
-Each detector owns a partition of `(A, B)` pairs. It receives distinct
-`(A, M, B)` rows from the linker, grouped by `hash(A, B)`, and counts how many
-different intermediate accounts were observed for each pair:
+Each worker owns complete state for its sources. For every source `A`, it keeps:
 
 ```text
-count(distinct M for A, B) >= 5
+distinct_targets_capped_at_6
+qualified_flag
+pending_rows_spool
 ```
 
-When the detector reaches the threshold for a pair `(A, B)`, it marks that pair
-as scatter-gather and sends `(A, B)` to the gateway immediately. It only needs
-to remember which pairs were already emitted so the same result is not sent more
-than once.
+Rules:
 
-## Current Gap
+1. Count distinct targets only up to 6.
+2. Before `A` qualifies, append rows for `A` to a local per-client spool.
+3. When `A` reaches 6 distinct targets, mark it qualified and replay its
+   pending rows downstream.
+4. After `A` qualifies, stream its later rows immediately.
+5. At EOF, discard pending rows for sources that never qualified.
 
-At the design level, the missing Q4 work is the implementation of the three
-scatter-gather stages and their wiring into the running pipeline.
+This implements the notebook `groupby(["From Bank", "Account"]).filter(...)`
+without centralizing the file.
 
-In the current repository:
+### Edge Store
 
-| Area | State |
-| --- | --- |
-| Q4 constants | Present |
-| Scatter-gather worker directory | Present, but empty |
-| Date filter output to Q4 branch | Present |
-| Mapper, Linker, Detector logic | Missing |
-| Runtime wiring for Q4 services | Missing |
-| Gateway result handling for Q4 | Missing |
+Qualified rows are routed by intermediary `M`.
 
-So the design is not far off as a protocol. The code is still before the Q4
-implementation: the filtered transactions can reach the mapper queue, but the
-scatter-gather branch itself is not implemented yet.
+For each qualified `A -> M` row, preserve multiplicity by producing counted
+edge state:
+
+```text
+incoming[M][A] += 1
+outgoing[A][M] += 1
+```
+
+Equivalently, when `A` later acts as intermediary, the row is available as an
+outgoing `M -> B` edge for `M=A`.
+
+At EOF the edge store plans each intermediary:
+
+```text
+in_size = number of A endpoints for M
+out_size = number of B endpoints for M
+estimated_pairs = in_size * out_size
+```
+
+Small `M` values use one block. Hot `M` values are split into block joins.
+
+### Hot-M Block Join
+
+For hot intermediaries, do not route all of `M` to one worker. Split the join:
+
+```text
+a_bucket = hash(A) % SA
+b_bucket = hash(B) % SB
+block = (M, a_bucket, b_bucket)
+```
+
+Correct fan-out is:
+
+```text
+incoming A for hot M -> every block (M, a_bucket(A), *)
+outgoing B for hot M -> every block (M, *, b_bucket(B))
+```
+
+This duplicates the smaller side across a bounded number of blocks, but it
+distributes the Cartesian product for skewed intermediaries.
+
+Each block joiner computes:
+
+```text
+weight = count(A->M) * count(M->B)
+```
+
+Before emitting anything, it must drop `A == B`.
+
+If `weight > 5`, the pair already qualifies from this one intermediary. The
+joiner can emit a capped `Q4PairDelta(A, B, 6)`. Otherwise it emits
+`Q4PairDelta(A, B, weight)`.
+
+### Pair Reducer
+
+Pair reducers are sharded by `(A, B)`:
+
+```text
+routing_key = q4_pair_<hash(A, B) % N>
+```
+
+They accumulate:
+
+```text
+pair_count[A,B] = min(6, pair_count[A,B] + delta.weight)
+```
+
+Once the count reaches 6, emit two `Q4AccountId` candidates, `A` and `B`, and
+drop the pair counter.
+
+The reducer must be spillable. When its in-memory map reaches a configured
+limit, flush sorted `(A, B, count)` runs to disk. At EOF, merge the runs and
+finish the threshold check.
+
+### Account Deduper
+
+Account candidates are sharded by account:
+
+```text
+routing_key = q4_account_<hash(account) % N>
+```
+
+Each deduper emits each `Q4AccountId` once to the gateway. It may keep a set in
+memory for small datasets, but the production path should support sorted-run
+spill and merge at EOF.
+
+The gateway writes:
+
+```text
+Bank,Account
+```
+
+## EOF and Scaling Contract
+
+Every Q4 worker group must support multiple replicas and exact EOF propagation.
+Use the same leader-gather pattern already used by `sum`, `aggregator`,
+`filter_q5_usd`, and the current scatter-gather workers:
+
+1. Upstream sends EOF with the number of records it forwarded to the group.
+2. If the group has one replica, the worker flushes local buffers, emits all
+   downstream data, sends downstream EOF with its own forwarded count, and
+   releases client state.
+3. If the group has multiple replicas, upstream EOF is broadcast to the group.
+   Each replica snapshots processed and forwarded counts while holding its
+   lock, flushes buffered/spooled data that belongs before EOF, and reports the
+   snapshot to the leader.
+4. The leader waits until reported processed counts reach the upstream
+   expected total, then emits a flush order.
+5. Every replica sends downstream EOF carrying the number of records it emitted
+   to each downstream partition.
+6. Downstream stages wait for one EOF from each upstream partition before
+   closing the client.
+
+Late data after EOF snapshot must be handled like the existing scalable
+workers: process it, flush it ahead of close, and report a delta to the leader.
+
+## Implementation Order
+
+1. Keep the notebook-exact Q4 reference and LI-Mini fixture as validation.
+2. Add the new Q4 DTOs and dynamic routing helper.
+3. Implement source-prefilter workers and tests.
+4. Implement edge-store workers without hot-M salting.
+5. Implement pair reducer and account deduper.
+6. Switch gateway/client to the Q4 account result contract.
+7. Pass synthetic and LI-Mini end-to-end Q4.
+8. Add hot-M block planning and block joiners.
+9. Add spill paths for pair reducers and account dedupers.
+10. Run LI-Small and then larger datasets.

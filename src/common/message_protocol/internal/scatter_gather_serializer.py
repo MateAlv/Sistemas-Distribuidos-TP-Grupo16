@@ -3,6 +3,10 @@ from dataclasses import dataclass
 
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 
+Q4_EDGE_INCOMING = 1
+Q4_EDGE_OUTGOING = 2
+Q4_QUALIFY_THRESHOLD = 6
+
 
 @dataclass(frozen=True)
 class ScatterGatherRelation:
@@ -15,6 +19,43 @@ class ScatterGatherRelation:
 class ScatterGatherResult:
     from_account: str
     to_account: str
+
+
+@dataclass(frozen=True)
+class Q4AccountId:
+    bank_id: str
+    account: str
+
+
+@dataclass(frozen=True)
+class Q4TransactionEdge:
+    source: Q4AccountId
+    target: Q4AccountId
+
+
+@dataclass(frozen=True)
+class Q4CountedEdge:
+    role: int
+    intermediate: Q4AccountId
+    endpoint: Q4AccountId
+    count: int
+
+
+@dataclass(frozen=True)
+class Q4BlockJoinEdge:
+    role: int
+    intermediate: Q4AccountId
+    endpoint: Q4AccountId
+    a_bucket: int
+    b_bucket: int
+    count: int
+
+
+@dataclass(frozen=True)
+class Q4PairDelta:
+    source: Q4AccountId
+    target: Q4AccountId
+    weight: int
 
 
 class ScatterGatherRelationSerializer:
@@ -84,6 +125,181 @@ class ScatterGatherResultSerializer:
         )
 
 
+class Q4AccountIdSerializer:
+    BANK_SIZE = TransactionSerializer.BANK_SIZE
+    ACCOUNT_SIZE = TransactionSerializer.ACCOUNT_SIZE
+    FORMAT = f"!{BANK_SIZE}s{ACCOUNT_SIZE}s"
+    SIZE = struct.calcsize(FORMAT)
+
+    @classmethod
+    def serialize(cls, account_id: Q4AccountId) -> bytes:
+        return struct.pack(
+            cls.FORMAT,
+            _encode_fixed(account_id.bank_id, cls.BANK_SIZE, "bank_id"),
+            _encode_fixed(account_id.account, cls.ACCOUNT_SIZE, "account"),
+        )
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> Q4AccountId:
+        if len(data) != cls.SIZE:
+            raise ValueError(f"invalid Q4 account id size: {len(data)}")
+        bank_id, account = struct.unpack(cls.FORMAT, data)
+        return Q4AccountId(
+            bank_id=_decode_fixed(bank_id),
+            account=_decode_fixed(account),
+        )
+
+    @classmethod
+    def serialize_batch(cls, account_ids: list[Q4AccountId]) -> bytes:
+        return b"".join(cls.serialize(account_id) for account_id in account_ids)
+
+    @classmethod
+    def deserialize_batch(cls, data: bytes) -> list[Q4AccountId]:
+        return _deserialize_batch(cls, data, "Q4 account id")
+
+
+class Q4TransactionEdgeSerializer:
+    SIZE = Q4AccountIdSerializer.SIZE * 2
+
+    @classmethod
+    def serialize(cls, edge: Q4TransactionEdge) -> bytes:
+        return (
+            Q4AccountIdSerializer.serialize(edge.source)
+            + Q4AccountIdSerializer.serialize(edge.target)
+        )
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> Q4TransactionEdge:
+        if len(data) != cls.SIZE:
+            raise ValueError(f"invalid Q4 transaction edge size: {len(data)}")
+        account_size = Q4AccountIdSerializer.SIZE
+        return Q4TransactionEdge(
+            source=Q4AccountIdSerializer.deserialize(data[:account_size]),
+            target=Q4AccountIdSerializer.deserialize(data[account_size:]),
+        )
+
+    @classmethod
+    def serialize_batch(cls, edges: list[Q4TransactionEdge]) -> bytes:
+        return b"".join(cls.serialize(edge) for edge in edges)
+
+    @classmethod
+    def deserialize_batch(cls, data: bytes) -> list[Q4TransactionEdge]:
+        return _deserialize_batch(cls, data, "Q4 transaction edge")
+
+
+class Q4CountedEdgeSerializer:
+    FORMAT = f"!B{Q4AccountIdSerializer.SIZE}s{Q4AccountIdSerializer.SIZE}sQ"
+    SIZE = struct.calcsize(FORMAT)
+
+    @classmethod
+    def serialize(cls, edge: Q4CountedEdge) -> bytes:
+        _validate_q4_role(edge.role)
+        return struct.pack(
+            cls.FORMAT,
+            int(edge.role),
+            Q4AccountIdSerializer.serialize(edge.intermediate),
+            Q4AccountIdSerializer.serialize(edge.endpoint),
+            int(edge.count),
+        )
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> Q4CountedEdge:
+        if len(data) != cls.SIZE:
+            raise ValueError(f"invalid Q4 counted edge size: {len(data)}")
+        role, intermediate, endpoint, count = struct.unpack(cls.FORMAT, data)
+        _validate_q4_role(role)
+        return Q4CountedEdge(
+            role=role,
+            intermediate=Q4AccountIdSerializer.deserialize(intermediate),
+            endpoint=Q4AccountIdSerializer.deserialize(endpoint),
+            count=count,
+        )
+
+    @classmethod
+    def serialize_batch(cls, edges: list[Q4CountedEdge]) -> bytes:
+        return b"".join(cls.serialize(edge) for edge in edges)
+
+    @classmethod
+    def deserialize_batch(cls, data: bytes) -> list[Q4CountedEdge]:
+        return _deserialize_batch(cls, data, "Q4 counted edge")
+
+
+class Q4BlockJoinEdgeSerializer:
+    FORMAT = f"!B{Q4AccountIdSerializer.SIZE}s{Q4AccountIdSerializer.SIZE}sIIQ"
+    SIZE = struct.calcsize(FORMAT)
+
+    @classmethod
+    def serialize(cls, edge: Q4BlockJoinEdge) -> bytes:
+        _validate_q4_role(edge.role)
+        return struct.pack(
+            cls.FORMAT,
+            int(edge.role),
+            Q4AccountIdSerializer.serialize(edge.intermediate),
+            Q4AccountIdSerializer.serialize(edge.endpoint),
+            int(edge.a_bucket),
+            int(edge.b_bucket),
+            int(edge.count),
+        )
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> Q4BlockJoinEdge:
+        if len(data) != cls.SIZE:
+            raise ValueError(f"invalid Q4 block join edge size: {len(data)}")
+        role, intermediate, endpoint, a_bucket, b_bucket, count = struct.unpack(
+            cls.FORMAT, data
+        )
+        _validate_q4_role(role)
+        return Q4BlockJoinEdge(
+            role=role,
+            intermediate=Q4AccountIdSerializer.deserialize(intermediate),
+            endpoint=Q4AccountIdSerializer.deserialize(endpoint),
+            a_bucket=a_bucket,
+            b_bucket=b_bucket,
+            count=count,
+        )
+
+    @classmethod
+    def serialize_batch(cls, edges: list[Q4BlockJoinEdge]) -> bytes:
+        return b"".join(cls.serialize(edge) for edge in edges)
+
+    @classmethod
+    def deserialize_batch(cls, data: bytes) -> list[Q4BlockJoinEdge]:
+        return _deserialize_batch(cls, data, "Q4 block join edge")
+
+
+class Q4PairDeltaSerializer:
+    FORMAT = f"!{Q4AccountIdSerializer.SIZE}s{Q4AccountIdSerializer.SIZE}sQ"
+    SIZE = struct.calcsize(FORMAT)
+
+    @classmethod
+    def serialize(cls, delta: Q4PairDelta) -> bytes:
+        return struct.pack(
+            cls.FORMAT,
+            Q4AccountIdSerializer.serialize(delta.source),
+            Q4AccountIdSerializer.serialize(delta.target),
+            min(int(delta.weight), Q4_QUALIFY_THRESHOLD),
+        )
+
+    @classmethod
+    def deserialize(cls, data: bytes) -> Q4PairDelta:
+        if len(data) != cls.SIZE:
+            raise ValueError(f"invalid Q4 pair delta size: {len(data)}")
+        source, target, weight = struct.unpack(cls.FORMAT, data)
+        return Q4PairDelta(
+            source=Q4AccountIdSerializer.deserialize(source),
+            target=Q4AccountIdSerializer.deserialize(target),
+            weight=weight,
+        )
+
+    @classmethod
+    def serialize_batch(cls, deltas: list[Q4PairDelta]) -> bytes:
+        return b"".join(cls.serialize(delta) for delta in deltas)
+
+    @classmethod
+    def deserialize_batch(cls, data: bytes) -> list[Q4PairDelta]:
+        return _deserialize_batch(cls, data, "Q4 pair delta")
+
+
 def _encode_fixed(value, size: int, field_name: str) -> bytes:
     encoded = str(value).encode("utf-8")
     if len(encoded) > size:
@@ -93,3 +309,17 @@ def _encode_fixed(value, size: int, field_name: str) -> bytes:
 
 def _decode_fixed(value: bytes) -> str:
     return value.decode("utf-8").rstrip("\x00")
+
+
+def _deserialize_batch(serializer, data: bytes, label: str):
+    if len(data) % serializer.SIZE != 0:
+        raise ValueError(f"invalid {label} batch size: {len(data)}")
+    return [
+        serializer.deserialize(data[offset:offset + serializer.SIZE])
+        for offset in range(0, len(data), serializer.SIZE)
+    ]
+
+
+def _validate_q4_role(role: int) -> None:
+    if role not in (Q4_EDGE_INCOMING, Q4_EDGE_OUTGOING):
+        raise ValueError(f"invalid Q4 edge role: {role}")
