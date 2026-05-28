@@ -40,7 +40,7 @@ class Q2BankMaxResultSerializer:
 class Q2BankMaxPartialSerializer:
     BANK_SIZE = TransactionSerializer.BANK_SIZE
     ACCOUNT_SIZE = TransactionSerializer.ACCOUNT_SIZE
-    FORMAT = f"!{BANK_SIZE}s{ACCOUNT_SIZE}sd"
+    FORMAT = f"!{BANK_SIZE}s{ACCOUNT_SIZE}sdQ"
     SIZE = struct.calcsize(FORMAT)
 
     @classmethod
@@ -50,15 +50,17 @@ class Q2BankMaxPartialSerializer:
             _encode_fixed(partial.bank_id, cls.BANK_SIZE, "bank_id"),
             _encode_fixed(partial.from_account, cls.ACCOUNT_SIZE, "from_account"),
             float(partial.amount),
+            int(getattr(partial, "row_number", 0) or 0),
         )
 
     @classmethod
     def deserialize(cls, data: bytes) -> Q2BankMaxPartial:
-        bank_id, from_account, amount = struct.unpack(cls.FORMAT, data)
+        bank_id, from_account, amount, row_number = struct.unpack(cls.FORMAT, data)
         return Q2BankMaxPartial(
             bank_id=_decode_fixed(bank_id),
             from_account=_decode_fixed(from_account),
             amount=amount,
+            row_number=row_number,
         )
 
 

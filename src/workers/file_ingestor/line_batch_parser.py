@@ -20,10 +20,10 @@ class LineBatchParser:
         parser = TransactionRowParser(batch.header)
         transactions = []
         for index, line in enumerate(batch.lines):
+            line_number = batch.first_line_number + index
             try:
-                transactions.append(parser.parse_line(line))
+                transactions.append(parser.parse_line(line, row_number=line_number))
             except Exception as exc:
-                line_number = batch.first_line_number + index
                 raise ValueError(
                     "invalid transaction line batch "
                     f"(file_type={file_type_name(batch.file_type)}, "

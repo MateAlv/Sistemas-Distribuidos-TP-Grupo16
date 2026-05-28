@@ -34,9 +34,10 @@ class Q2AggregatorProcessor(AggregatorProcessor):
                 bank_id=bank_id,
                 from_account=partial.from_account,
                 amount=partial.amount,
+                row_number=partial.row_number,
             )
         current = self.max_by_bank.get(partial.bank_id)
-        if current is None or partial.amount > current.amount:
+        if _is_better_q2_partial(partial, current):
             self.max_by_bank[partial.bank_id] = partial
 
     def results(self) -> list[bytes]:
@@ -74,6 +75,19 @@ class Q3AggregatorProcessor(AggregatorProcessor):
                 )
             )
         return payloads
+
+
+def _is_better_q2_partial(
+    candidate: Q2BankMaxPartial,
+    current: Q2BankMaxPartial | None,
+) -> bool:
+    if current is None:
+        return True
+    if candidate.amount != current.amount:
+        return candidate.amount > current.amount
+    if candidate.row_number and current.row_number:
+        return candidate.row_number < current.row_number
+    return False
 
 
 class Q5AggregatorProcessor(AggregatorProcessor):
