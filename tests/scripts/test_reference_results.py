@@ -100,3 +100,70 @@ def test_q3_normalization_compares_payment_format_column():
         "Wire",
         "0.50",
     )
+
+
+def test_compute_q4_matches_notebook_prefilter_join_and_unique_accounts(tmp_path):
+    trans_file = tmp_path / "sample_Trans.csv"
+    rows = []
+
+    def tx(
+        from_bank,
+        from_account,
+        to_bank,
+        to_account,
+        currency="US Dollar",
+        timestamp="2022/09/01 00:00",
+    ):
+        rows.append(
+            [
+                timestamp,
+                from_bank,
+                from_account,
+                to_bank,
+                to_account,
+                "1.00",
+                currency,
+                "Wire",
+            ]
+        )
+
+    # A qualifies as a source via M plus five distinct filler targets. One
+    # A->M row crossed with six duplicate M->B rows produces size == 6 without
+    # also qualifying every M filler target.
+    tx("001", "A", "002", "M")
+    for index in range(1, 6):
+        tx("001", "A", "010", f"F{index}")
+    for _ in range(6):
+        tx("002", "M", "003", "B")
+    for index in range(1, 6):
+        tx("002", "M", "020", f"G{index}")
+
+    # Same shape but only five A->M rows: strict notebook size > 5 excludes it.
+    tx("004", "C", "005", "H")
+    for index in range(1, 6):
+        tx("004", "C", "030", f"CF{index}")
+    for _ in range(5):
+        tx("005", "H", "006", "D")
+    for index in range(1, 6):
+        tx("005", "H", "040", f"HF{index}")
+
+    # Notebook raw timestamp upper bound excludes timestamped 09/06 rows.
+    tx("007", "X", "008", "Y", timestamp="2022/09/06 00:00")
+    for index in range(1, 6):
+        tx("007", "X", "050", f"XF{index}", timestamp="2022/09/06 00:00")
+    for _ in range(6):
+        tx("008", "Y", "009", "Z", timestamp="2022/09/06 00:00")
+    for index in range(1, 6):
+        tx("008", "Y", "060", f"YF{index}", timestamp="2022/09/06 00:00")
+
+    _write_csv(trans_file, TRANS_HEADER, rows)
+
+    assert ref.compute_q4(trans_file) == [
+        ("1", "A"),
+        ("3", "B"),
+    ]
+
+
+def test_q4_normalization_compares_bank_and_account_columns():
+    assert ref.OUTPUT_COLUMNS["q4"] == ["Bank", "Account"]
+    assert ref.normalize_row("q4", ["001", "A"]) == ("001", "A")

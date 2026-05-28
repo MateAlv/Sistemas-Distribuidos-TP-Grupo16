@@ -40,7 +40,7 @@ OUTPUT_COLUMNS = {
     "q1": ["From Bank", "Account", "To Bank", "Account.1", "Amount Paid"],
     "q2": ["From Bank", "Account", "Bank Name", "Amount Paid"],
     "q3": ["From Bank", "Account", "Payment Format", "Amount Paid"],
-    "q4": ["from_account", "to_account"],
+    "q4": ["Bank", "Account"],
     "q5": ["count"],
 }
 
@@ -50,15 +50,17 @@ Q1_MAX_AMOUNT = 50.0
 # rows on 09/06 and 09/15 compare greater than those date-only bounds.
 Q3_NOTEBOOK_BASELINE = ("2022/09/01", "2022/09/06")
 Q3_NOTEBOOK_CANDIDATE = ("2022/09/06", "2022/09/15")
-# Q4: USD txns in the window, >= 5 distinct intermediaries per (A, B) pair.
-Q4_WINDOW = ("2022-09-01", "2022-09-05")
-Q4_MIN_INTERMEDIARIES = 5
+# Q4: notebook raw Timestamp window. Timestamped rows on 09/06 compare greater
+# than the date-only upper bound, so the effective range is 09/01-09/05.
+Q4_NOTEBOOK_WINDOW = ("2022/09/01", "2022/09/06")
+Q4_SOURCE_MIN_DISTINCT_TARGETS = 5
+Q4_PAIR_MIN_PATH_ROWS = 5
 # Q5: count of USD-converted < 1 Wire/ACH txns in the window.
 Q5_WINDOW = ("2022-09-01", "2022-09-05")
 Q5_FORMATS = {"Wire", "ACH"}
 Q5_MAX_AMOUNT_USD = 1.0
 
-GENERATOR_VERSION = 2
+GENERATOR_VERSION = 3
 
 
 # --------------------------------------------------------------------------- #
@@ -199,87 +201,85 @@ def compute_q3(trans_file, _accounts_file=None):
 
 
 def compute_q4(trans_file, _accounts_file=None):
-    # Mirrors the scatter-gather linker/detector: a txn X->Y feeds incoming[Y]
-    # (A->M with M=Y) and outgoing[X] (M->B with M=X); a pair (A,B) is emitted
-    # once it has >= Q4_MIN_INTERMEDIARIES distinct M with both A->M and M->B.
-    # Accounts are interned to ints so the pair enumeration stays compact: a
-    # single hub M can produce 100M+ pairs, which would OOM as Python objects.
+    # Notebook Q4:
+    # 1. USD txns in the first September window.
+    # 2. Keep only sources (From Bank, Account) with >5 distinct targets.
+    # 3. Self-join kept rows on A->M and M->B, drop A==B.
+    # 4. Keep (A,B) pairs with path-row count >5, output unique accounts.
     account_ids = {}
+    account_names = []
 
-    def intern(name):
-        i = account_ids.get(name)
+    def intern(bank, account):
+        key = (notebook_bank_id(bank), (account or "").strip())
+        i = account_ids.get(key)
         if i is None:
-            i = account_ids[name] = len(account_ids)
+            i = account_ids[key] = len(account_ids)
+            account_names.append(key)
         return i
 
-    incoming = defaultdict(set)
-    outgoing = defaultdict(set)
+    qualifying_sources = set()
+    targets_by_source = defaultdict(set)
+
     with open(trans_file, "r") as f:
         reader = csv.reader(f)
         col = _columns(next(reader))
         for row in reader:
             if row[col["currency"]].strip() != USD_CURRENCY:
                 continue
-            date = _normalize_date(row[col["date"]])
-            if not (Q4_WINDOW[0] <= date <= Q4_WINDOW[1]):
+            timestamp = row[col["date"]].strip()
+            if not (Q4_NOTEBOOK_WINDOW[0] <= timestamp <= Q4_NOTEBOOK_WINDOW[1]):
                 continue
-            src = intern(row[col["from_account"]].strip())
-            dst = intern(row[col["to_account"]].strip())
-            incoming[dst].add(src)
-            outgoing[src].add(dst)
+            source = intern(row[col["from_bank"]], row[col["from_account"]])
+            if source in qualifying_sources:
+                continue
+            target = intern(row[col["to_bank"]], row[col["to_account"]])
+            targets = targets_by_source[source]
+            targets.add(target)
+            if len(targets) > Q4_SOURCE_MIN_DISTINCT_TARGETS:
+                qualifying_sources.add(source)
+                del targets_by_source[source]
 
-    hubs = set(incoming) & set(outgoing)
-    stride = len(account_ids) + 1  # pack (a, b) into a single a*stride + b key
+    incoming = defaultdict(Counter)
+    outgoing = defaultdict(Counter)
+    with open(trans_file, "r") as f:
+        reader = csv.reader(f)
+        col = _columns(next(reader))
+        for row in reader:
+            if row[col["currency"]].strip() != USD_CURRENCY:
+                continue
+            timestamp = row[col["date"]].strip()
+            if not (Q4_NOTEBOOK_WINDOW[0] <= timestamp <= Q4_NOTEBOOK_WINDOW[1]):
+                continue
+            source = intern(row[col["from_bank"]], row[col["from_account"]])
+            if source not in qualifying_sources:
+                continue
+            target = intern(row[col["to_bank"]], row[col["to_account"]])
+            incoming[target][source] += 1
+            outgoing[source][target] += 1
 
-    try:
-        import numpy as np
-    except ImportError:
-        np = None
-
-    if np is not None:
-        pairs = _q4_qualifying_pairs_numpy(np, incoming, outgoing, hubs, stride)
-    else:
-        pairs = _q4_qualifying_pairs_python(incoming, outgoing, hubs, stride)
-
-    names = [None] * len(account_ids)
-    for name, i in account_ids.items():
-        names[i] = name
-    return [(names[key // stride], names[key % stride]) for key in pairs]
-
-
-def _q4_qualifying_pairs_numpy(np, incoming, outgoing, hubs, stride, chunk=8_000_000):
-    # Pack every (A, B) of every hub into an int64 array, sort it, and keep the
-    # keys whose run length (= distinct intermediary count) reaches the threshold.
-    # The outer product of a hub is filled in row chunks so a single huge hub
-    # (100M+ pairs) never builds one giant temporary array.
-    total = sum(len(incoming[m]) * len(outgoing[m]) for m in hubs)
-    if total == 0:
-        return []
-    keys = np.empty(total, dtype=np.int64)
-    pos = 0
-    for m in hubs:
-        a = np.fromiter(incoming[m], dtype=np.int64, count=len(incoming[m]))
-        b = np.fromiter(outgoing[m], dtype=np.int64, count=len(outgoing[m]))
-        rows_per_chunk = max(1, chunk // b.size)
-        for start in range(0, a.size, rows_per_chunk):
-            block = (a[start:start + rows_per_chunk, None] * stride + b[None, :]).ravel()
-            keys[pos:pos + block.size] = block
-            pos += block.size
-    keys.sort()
-    boundaries = np.flatnonzero(keys[1:] != keys[:-1]) + 1
-    starts = np.concatenate(([0], boundaries))
-    counts = np.diff(np.concatenate((starts, [keys.size])))
-    return keys[starts[counts >= Q4_MIN_INTERMEDIARIES]].tolist()
-
-
-def _q4_qualifying_pairs_python(incoming, outgoing, hubs, stride):
-    counts = defaultdict(int)
-    for m in hubs:
-        for a in incoming[m]:
+    pair_counts = defaultdict(int)
+    qualifying_pairs = set()
+    qualifying_accounts = set()
+    stride = len(account_names) + 1
+    for m in set(incoming) & set(outgoing):
+        for a, incoming_count in incoming[m].items():
             base = a * stride
-            for b in outgoing[m]:
-                counts[base + b] += 1
-    return [key for key, c in counts.items() if c >= Q4_MIN_INTERMEDIARIES]
+            for b, outgoing_count in outgoing[m].items():
+                if a == b:
+                    continue
+                key = base + b
+                if key in qualifying_pairs:
+                    continue
+                count = pair_counts[key] + incoming_count * outgoing_count
+                if count > Q4_PAIR_MIN_PATH_ROWS:
+                    qualifying_pairs.add(key)
+                    qualifying_accounts.add(a)
+                    qualifying_accounts.add(b)
+                    pair_counts.pop(key, None)
+                else:
+                    pair_counts[key] = count
+
+    return [account_names[i] for i in sorted(qualifying_accounts)]
 
 
 RATES_CACHE = Path("data/rates/cache.json")
