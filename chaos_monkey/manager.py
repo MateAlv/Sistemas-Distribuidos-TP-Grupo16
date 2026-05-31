@@ -1,15 +1,25 @@
+import os
 import subprocess
 import random
 import logging
 
+# Substrings protected from kills: broker, entry point, rates edge, clients, self.
+DEFAULT_EXCLUDED = ["rabbitmq", "gateway", "rates_service", "client", "chaos"]
+
+
+def excluded_from_env(env=None):
+    env = os.environ if env is None else env
+    extra = [token.strip() for token in env.get("CHAOS_EXCLUDE", "").split(",") if token.strip()]
+    return list(DEFAULT_EXCLUDED) + extra
+
+
 class ChaosManager:
     def __init__(self, excluded_containers=None):
-        self.excluded_containers = excluded_containers or []
-        # Always exclude self and infrastructure
-        self.excluded_containers.extend(["rabbitmq", "chaos_monkey"])
+        if excluded_containers is None:
+            excluded_containers = list(DEFAULT_EXCLUDED)
+        self.excluded_containers = excluded_containers
 
     def get_running_containers(self):
-        """Returns a list of running container names."""
         try:
             result = subprocess.run(
                 ["docker", "ps", "--format", "{{.Names}}"],
@@ -28,26 +38,13 @@ class ChaosManager:
             )
             return []
 
-    def get_valid_targets(self):
-        """Returns a list of containers that are valid targets for chaos."""
-        containers = self.get_running_containers()
-        targets = []
-        for container in containers:
-            is_excluded = False
-            for excluded in self.excluded_containers:
-                if excluded in container:
-                    is_excluded = True
-                    break
-            
-            if "client" in container:
-                is_excluded = True
+    def is_excluded(self, container):
+        return any(token in container for token in self.excluded_containers)
 
-            if not is_excluded:
-                targets.append(container)
-        return targets
+    def get_valid_targets(self):
+        return [c for c in self.get_running_containers() if not self.is_excluded(c)]
 
     def kill_random_container(self):
-        """Kills a random valid target container."""
         targets = self.get_valid_targets()
         if not targets:
             logging.warning("No valid targets found to kill.")
@@ -57,7 +54,6 @@ class ChaosManager:
         return self.kill_container(target)
 
     def kill_container(self, container_name):
-        """Kills a specific container."""
         logging.info(f"action: kill_container | target: {container_name} | status: starting")
         try:
             subprocess.run(
