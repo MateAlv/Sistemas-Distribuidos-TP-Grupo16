@@ -10,6 +10,9 @@ settings:
   result_line_max_bytes: 1048576
   connect_timeout_seconds: 30
   io_timeout_seconds: 3600
+  chaos:
+    enabled: false
+    interval: 30
 
 workers:
   file_splitters: 3
