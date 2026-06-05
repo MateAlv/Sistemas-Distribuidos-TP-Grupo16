@@ -1,13 +1,21 @@
 import logging
 import signal
 
+from common.heartbeat import HeartbeatSender
 from aggregators import AggregatorWorker
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
     aggregator_worker = AggregatorWorker()
-    signal.signal(signal.SIGTERM, lambda signum, frame: aggregator_worker.handle_sigterm())
+    heartbeat = HeartbeatSender()
+    heartbeat.start()
+
+    def shutdown(*_):
+        heartbeat.stop()
+        aggregator_worker.handle_sigterm()
+
+    signal.signal(signal.SIGTERM, shutdown)
     aggregator_worker.start()
     return 0
 

@@ -10,6 +10,8 @@ except ImportError:
         BankNameJoinerWorker,
     )
 
+from common.heartbeat import HeartbeatSender
+
 
 DEFAULT_ID = 0
 DEFAULT_MOM_HOST = "rabbitmq"
@@ -29,7 +31,14 @@ def main() -> int:
 
     initialize_log(os.getenv("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL))
     worker = BankNameJoinerWorker(config)
-    signal.signal(signal.SIGTERM, lambda *_: worker.stop())
+    heartbeat = HeartbeatSender()
+    heartbeat.start()
+
+    def shutdown(*_):
+        heartbeat.stop()
+        worker.stop()
+
+    signal.signal(signal.SIGTERM, shutdown)
     try:
         worker.start()
     finally:

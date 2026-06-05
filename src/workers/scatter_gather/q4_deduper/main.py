@@ -1,13 +1,21 @@
 import logging
 import signal
 
+from common.heartbeat import HeartbeatSender
 from deduper import Q4DeduperWorker
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO)
     worker = Q4DeduperWorker()
-    signal.signal(signal.SIGTERM, lambda *_: worker.handle_sigterm())
+    heartbeat = HeartbeatSender()
+    heartbeat.start()
+
+    def shutdown(*_):
+        heartbeat.stop()
+        worker.handle_sigterm()
+
+    signal.signal(signal.SIGTERM, shutdown)
     try:
         worker.start()
     finally:

@@ -2,6 +2,7 @@ import logging
 import os
 import signal
 
+from common.heartbeat import HeartbeatSender
 from file_splitter import FileSplitter, FileSplitterConfig
 
 
@@ -25,7 +26,14 @@ def main() -> int:
 
     initialize_log(config.logging_level)
     splitter = FileSplitter(config)
-    signal.signal(signal.SIGTERM, lambda *_: splitter.stop())
+    heartbeat = HeartbeatSender()
+    heartbeat.start()
+
+    def shutdown(*_):
+        heartbeat.stop()
+        splitter.stop()
+
+    signal.signal(signal.SIGTERM, shutdown)
     splitter.start()
     return 0
 
