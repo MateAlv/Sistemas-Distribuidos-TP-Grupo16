@@ -108,6 +108,22 @@ clean-state:
 	find data/datasets -mindepth 1 -maxdepth 1 -type d -name 'client-*' -exec rm -rf {} +
 .PHONY: clean-state
 
+CHAOS_SERVICE := chaos_monkey
+chaos_container = $(shell docker ps -q --filter "label=com.docker.compose.project=$(MAIN_PROJECT)" --filter "label=com.docker.compose.service=$(CHAOS_SERVICE)")
+
+chaos-kill-random:
+	@chaos="$(chaos_container)"; \
+	if [ -z "$$chaos" ]; then echo "chaos monkey not running (enable chaos in config and 'make up')" >&2; exit 1; fi; \
+	docker exec "$$chaos" python3 -c "from manager import ChaosManager, excluded_from_env; print(ChaosManager(excluded_from_env()).kill_random_container())"
+.PHONY: chaos-kill-random
+
+chaos-kill:
+	@if [ -z "$(CONTAINER)" ]; then echo "Usage: make chaos-kill CONTAINER=<name>" >&2; exit 2; fi; \
+	chaos="$(chaos_container)"; \
+	if [ -z "$$chaos" ]; then echo "chaos monkey not running (enable chaos in config and 'make up')" >&2; exit 1; fi; \
+	docker exec "$$chaos" python3 -c "import sys; from manager import ChaosManager; print(ChaosManager().kill_container(sys.argv[1]))" "$(CONTAINER)"
+.PHONY: chaos-kill
+
 logs-test:
 	docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) logs -f --timestamps --no-color $(LOG_ARGS) | $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR)
 .PHONY: logs-test

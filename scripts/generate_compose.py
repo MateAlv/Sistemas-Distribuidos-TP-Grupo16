@@ -151,6 +151,8 @@ def parse_args():
     parser.add_argument("--q3-barrier-workers", type=int, default=None, help="Override q3_barrier worker count (sharded by client_id).")
     parser.add_argument("--prefetch", type=int, default=None, help="PREFETCH_COUNT for filter/sum services.")
     parser.add_argument("--clients", type=int, default=None, help="Number of client containers to spawn. Each gets a distinct client_id sharing the first configured dataset.")
+    parser.add_argument("--chaos", action="store_true", default=None, help="Add the chaos monkey service that kills random workers.")
+    parser.add_argument("--chaos-interval", type=int, default=None, help="Seconds between chaos monkey kills.")
     parser.add_argument("--skip-output", action="store_true", help="Do not write docker-compose.yaml.")
     parser.add_argument("--skip-test-output", action="store_true", help="Do not write docker-compose.test.yaml.")
     parser.set_defaults(skip_output=False, skip_test_output=False)
@@ -313,6 +315,10 @@ def apply_cli_overrides(config: dict, args, path: Path) -> None:
         workers["q3_barrier"] = args.q3_barrier_workers
     if args.prefetch is not None:
         settings["filter_prefetch_count"] = args.prefetch
+    if args.chaos:
+        settings.setdefault("chaos", {})["enabled"] = True
+    if args.chaos_interval is not None:
+        settings.setdefault("chaos", {})["interval"] = args.chaos_interval
     if args.clients is not None:
         if args.clients < 1:
             raise ValueError("clients must be >= 1")
@@ -673,14 +679,27 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
         name for name in services if name not in {"rabbitmq", "gateway"}
     ]
     client_dependencies.insert(0, "gateway")
+    client_names = []
     for client_index, account in enumerate(config["client_accounts"]):
         client_id = int(account.get("client_id", client_index))
-        services[f"client_{client_id}"] = client_service(
+        name = f"client_{client_id}"
+        client_names.append(name)
+        services[name] = client_service(
             client_id=client_id,
             account=account,
             settings=settings,
             depends_on=client_dependencies,
         )
+
+    non_workers = {"rabbitmq", "gateway", "rates_service"}
+    for name, service in services.items():
+        if name in non_workers or name.startswith("client_"):
+            continue
+        service["container_name"] = name
+        service.setdefault("environment", []).append(f"NODE_NAME={name}")
+
+    if settings.get("chaos", {}).get("enabled", False):
+        services["chaos_monkey"] = chaos_monkey_service(settings, client_names)
 
     return {"services": services}
 
@@ -1265,6 +1284,20 @@ def client_service(client_id: int, account: dict, settings: dict, depends_on: li
             "./data/output:/data/output:rw",
         ],
     )
+
+
+def chaos_monkey_service(settings: dict, client_names: list[str]) -> dict:
+    chaos = settings.get("chaos", {})
+    return {
+        "build": {"context": "./chaos_monkey", "dockerfile": "Dockerfile"},
+        "environment": [
+            "PYTHONUNBUFFERED=1",
+            "CHAOS_ENABLED=true",
+            f"CHAOS_INTERVAL={int(chaos.get('interval', 30))}",
+        ],
+        "volumes": ["/var/run/docker.sock:/var/run/docker.sock"],
+        "depends_on": {name: {"condition": "service_started"} for name in client_names},
+    }
 
 
 def base_service(dockerfile: str, depends_on, environment: list[str], volumes: list[str] | None = None) -> dict:
