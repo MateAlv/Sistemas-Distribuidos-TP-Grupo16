@@ -691,6 +691,13 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
             depends_on=client_dependencies,
         )
 
+    non_workers = {"rabbitmq", "gateway", "rates_service"}
+    for name, service in services.items():
+        if name in non_workers or name.startswith("client_"):
+            continue
+        service["container_name"] = name
+        service.setdefault("environment", []).append(f"NODE_NAME={name}")
+
     if settings.get("chaos", {}).get("enabled", False):
         services["chaos_monkey"] = chaos_monkey_service(settings, client_names)
 

@@ -11,8 +11,7 @@ DEFAULT_MONITOR_PORT = 9000
 class HeartbeatSender:
     """Periodically emits this process's node id to the Monitor over UDP.
 
-    Fire-and-forget: the Monitor may not exist yet, so send failures are
-    expected and never interrupt the worker. Runs on a daemon thread and stops
+    Runs on a daemon thread and stops
     on stop() (wired to SIGTERM by the worker entrypoint).
     """
 
@@ -44,7 +43,6 @@ class HeartbeatSender:
         try:
             while not self._stop_event.is_set():
                 self._send(sock)
-                # Event.wait is an interruptible timer, not a spin/poll.
                 self._stop_event.wait(self._interval)
         finally:
             sock.close()
