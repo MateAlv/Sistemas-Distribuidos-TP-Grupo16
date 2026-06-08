@@ -45,7 +45,16 @@ class EofCoordinator:
         mode: str = "broadcast",
         get_forwarded: Optional[Callable[[int], int]] = None,
         leader_id: int = 0,
+        worker_lock: Optional[threading.Lock] = None,
     ):
+        """
+        worker_lock (broadcast mode only): el lock del worker que protege las
+        actualizaciones de conteo (processed_by_client / forwarded_by_client).
+        Cuando se provee, el snapshot en _on_eof_received_broadcast y la comprobación
+        en report_late_data se ejecutan bajo ese mismo lock, evitando el doble conteo
+        que ocurriría si el thread de datos actualiza el contador entre el momento en
+        que el coordinator fija _pending_eof y el momento en que lee el snapshot.
+        """
         if mode not in ("broadcast", "flush_order"):
             raise ValueError(f"EofCoordinator mode must be 'broadcast' or 'flush_order', got {mode!r}")
 
@@ -63,6 +72,10 @@ class EofCoordinator:
 
         self._lock = threading.Lock()
         self._stopped = threading.Event()
+        # En modo broadcast: usamos _snapshot_lock para "fijar pending + tomar snapshot"
+        # y para "comprobar pending en late data". Si el worker pasa su propio lock,
+        # esas operaciones quedan serializadas respecto a las actualizaciones de conteo.
+        self._snapshot_lock: threading.Lock = worker_lock if worker_lock is not None else self._lock
 
         self._internal_protocol = InternalProtocol()
         self._control_serializer = ControlMessageSerializer()
@@ -126,6 +139,11 @@ class EofCoordinator:
         processed: int,
         forwarded: int,
     ) -> None:
+        logging.info(
+            "eof_coordinator_send_to_leader | id=%s | client_id=%s | "
+            "leader_id=%s | processed=%s | forwarded=%s",
+            self._id, client_id, leader_id, processed, forwarded,
+        )
         q = MessageMiddlewareQueueRabbitMQ(
             self._mom_host, self._response_queue_name(leader_id)
         )
@@ -167,14 +185,25 @@ class EofCoordinator:
             with self._lock:
                 self._leader_expected[client_id] = expected_total
             logging.info(
-                "eof_coordinator_broadcast | id=%s | client_id=%s | expected_total=%s",
+                "eof_coordinator_broadcast_attempt | id=%s | client_id=%s | expected_total=%s",
                 self._id, client_id, expected_total,
             )
-            self._broadcast_msg(
-                MessageType.EOF_RECEIVED,
-                client_id,
-                self._make_announcement_payload(self._id, expected_total),
-            )
+            try:
+                self._broadcast_msg(
+                    MessageType.EOF_RECEIVED,
+                    client_id,
+                    self._make_announcement_payload(self._id, expected_total),
+                )
+                logging.info(
+                    "eof_coordinator_broadcast | id=%s | client_id=%s | expected_total=%s",
+                    self._id, client_id, expected_total,
+                )
+            except Exception:
+                logging.exception(
+                    "eof_coordinator_broadcast_error | id=%s | client_id=%s",
+                    self._id, client_id,
+                )
+                raise
         else:  # flush_order
             count = self._get_count(client_id)
             fwd = self._get_forwarded(client_id) if self._get_forwarded else 0
@@ -191,19 +220,28 @@ class EofCoordinator:
             )
             self._send_to_leader(client_id, self._leader_id, count, fwd)
 
-    def report_late_data(
-        self, client_id: int, delta_processed: int, delta_forwarded: int
+    def pending_leader_for(self, client_id: int) -> Optional[int]:
+        """
+        Retorna el leader_id si este cliente tiene un EOF pendiente, o None.
+        NO adquiere ningún lock: el caller debe sostener el lock apropiado
+        (worker_lock) para que la lectura sea atómica con las actualizaciones
+        de conteo del thread de datos.
+        """
+        entry = self._pending_eof.get(client_id)
+        return entry[1] if entry is not None else None
+
+    def send_delta(
+        self,
+        client_id: int,
+        leader_id: int,
+        delta_processed: int,
+        delta_forwarded: int,
     ) -> None:
         """
-        Llamar cuando llega DATA después de haber visto el EOF (deltas tardíos).
-        Solo relevante en modo broadcast con workers que siguen procesando después
-        de recibirlo (ej. sum, filter_q5_usd).
+        Envía un delta PROCESSED_ANSWER al líder. Llamar fuera del lock del worker
+        (I/O lento). Usar en conjunción con pending_leader_for() para replicar el
+        patrón "leer pending bajo lock → enviar fuera del lock".
         """
-        with self._lock:
-            pending = self._pending_eof.get(client_id)
-        if pending is None:
-            return
-        _, leader_id = pending
         self._send_to_leader(client_id, leader_id, delta_processed, delta_forwarded)
 
     def start(self) -> None:
@@ -211,10 +249,27 @@ class EofCoordinator:
         if self._total <= 1:
             return
 
+        # Sincronización: el thread de control señala aquí cuando su cola ya está
+        # enlazada al exchange. start() bloquea hasta recibir la señal, garantizando
+        # que cualquier broadcast enviado DESPUÉS de start() sea recibido por todos
+        # los workers. Sin esto, la cola exclusiva podría no existir aún cuando el
+        # primer EOF llega, causando que el mensaje se pierda y el líder nunca
+        # acumule suficientes respuestas → hang.
+        self._control_ready = threading.Event()
+
         self._control_thread = threading.Thread(
             target=self._run_control_consumer, daemon=True
         )
         self._control_thread.start()
+
+        # Esperar a que el control consumer haya enlazado su cola antes de devolver
+        # el control al worker (que arrancará el data consumer inmediatamente después).
+        if not self._control_ready.wait(timeout=30):
+            logging.warning(
+                "eof_coordinator_start_timeout | id=%s | "
+                "control consumer did not bind in time",
+                self._id,
+            )
 
         # En broadcast: cualquier réplica puede ser líder → todas necesitan consumer de response.
         # En flush_order: solo el líder fijo (leader_id) necesita consumer de response.
@@ -241,19 +296,49 @@ class EofCoordinator:
     # ─── consumer: control exchange ──────────────────────────────────────────
 
     def _run_control_consumer(self) -> None:
-        consumer = MessageMiddlewareExchangeRabbitMQ(
-            self._mom_host, self._control_exchange, [self._control_exchange]
-        )
-        self._control_consumer = consumer
         handler = (
             self._on_eof_received_broadcast
             if self._mode == "broadcast"
             else self._on_flush_order
         )
+        consumer = None
+        bound = False
         try:
+            consumer = MessageMiddlewareExchangeRabbitMQ(
+                self._mom_host, self._control_exchange, [self._control_exchange]
+            )
+            self._control_consumer = consumer
             if not self._stopped.is_set():
-                consumer.start_consuming(handler)
+                # Enlazar la cola al exchange ANTES de señalar ready, para que
+                # cualquier broadcast enviado después de start() sea capturado.
+                consumer._init_queue()
+                bound = True
+        except Exception:
+            logging.exception("eof_coordinator_control_init_error | id=%s", self._id)
         finally:
+            # Señalar siempre — incluso ante error — para no bloquear start() 30s.
+            if hasattr(self, "_control_ready"):
+                self._control_ready.set()
+
+        if consumer is None:
+            return
+
+        if bound:
+            logging.info("eof_coordinator_control_ready | id=%s | exchange=%s",
+                         self._id, self._control_exchange)
+
+        try:
+            if bound and not self._stopped.is_set():
+                consumer.start_consuming(handler)
+            else:
+                logging.warning(
+                    "eof_coordinator_control_skipped | id=%s | bound=%s | stopped=%s",
+                    self._id, bound, self._stopped.is_set(),
+                )
+        except Exception:
+            logging.exception("eof_coordinator_control_consumer_error | id=%s", self._id)
+        finally:
+            logging.info("eof_coordinator_control_exiting | id=%s", self._id)
             try:
                 consumer.close()
             except Exception:
@@ -270,7 +355,7 @@ class EofCoordinator:
             leader_id = ctrl.sender_id
             expected_total = ctrl.expected_total
 
-            with self._lock:
+            with self._snapshot_lock:
                 if client_id in self._pending_eof:
                     ack()
                     return  # broadcast duplicado
@@ -283,7 +368,19 @@ class EofCoordinator:
                 "count=%s | fwd=%s",
                 self._id, client_id, leader_id, count, fwd,
             )
-            self._send_to_leader(client_id, leader_id, count, fwd)
+            try:
+                self._send_to_leader(client_id, leader_id, count, fwd)
+            except Exception:
+                # Si el envío falla, limpiar pending para que el próximo broadcast
+                # reintente el snapshot + envío (en vez de tratarse como duplicado).
+                with self._snapshot_lock:
+                    self._pending_eof.pop(client_id, None)
+                logging.exception(
+                    "eof_coordinator_send_failed_clearing | id=%s | client_id=%s",
+                    self._id, client_id,
+                )
+                nack(requeue=True)
+                return
             ack()
         except Exception:
             logging.exception("eof_coordinator_control_error | id=%s", self._id)
@@ -308,9 +405,10 @@ class EofCoordinator:
     # ─── consumer: response queue (líder) ────────────────────────────────────
 
     def _run_response_consumer(self) -> None:
-        consumer = MessageMiddlewareQueueRabbitMQ(
-            self._mom_host, self._response_queue_name(self._id)
-        )
+        queue_name = self._response_queue_name(self._id)
+        logging.info("eof_coordinator_response_started | id=%s | queue=%s",
+                     self._id, queue_name)
+        consumer = MessageMiddlewareQueueRabbitMQ(self._mom_host, queue_name)
         self._response_consumer = consumer
         try:
             if not self._stopped.is_set():
@@ -367,7 +465,11 @@ class EofCoordinator:
         with self._lock:
             expected = self._leader_expected.get(client_id)
             if expected is None:
-                # Esta réplica no es el líder para este cliente; ignorar.
+                logging.info(
+                    "eof_coordinator_accumulate_ignored | id=%s | client_id=%s | "
+                    "reason=not_leader | sender=%s",
+                    self._id, client_id, ctrl.sender_id,
+                )
                 return None
 
             self._leader_processed[client_id] = (
@@ -377,7 +479,15 @@ class EofCoordinator:
                 self._leader_forwarded.get(client_id, 0) + ctrl.expected_total
             )
 
-            if self._leader_processed[client_id] < expected:
+            running = self._leader_processed[client_id]
+            logging.info(
+                "eof_coordinator_accumulate | id=%s | client_id=%s | "
+                "delta=%s | running=%s | expected=%s | fwd_running=%s",
+                self._id, client_id, ctrl.processed_count,
+                running, expected, self._leader_forwarded[client_id],
+            )
+
+            if running < expected:
                 return None
 
             # Umbral alcanzado: limpiar y retornar totales.
