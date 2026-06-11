@@ -1,17 +1,19 @@
 import logging
 import os
-import signal
 import threading
+import time
 import zlib
 
 from common import middleware
 from common.constants import C_Q2, C_Q3
 from common.domain.transaction import Transaction
+from common.eof_coordinator import EofCoordinator, BroadcastAction, FlushAction, SendAnswerAction
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal import InternalProtocol
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
+from common.middleware import MessageMiddlewareQueueRabbitMQ
 
 try:
     from processors import create_sum_processor
@@ -25,7 +27,7 @@ INPUT_QUEUE = os.environ["INPUT_QUEUE"]
 CONFIGURATION = os.getenv("CONFIGURATION", C_Q2)
 SUM_AMOUNT = int(os.environ["SUM_AMOUNT"])
 SUM_PREFIX = os.environ["SUM_PREFIX"]
-SUM_CONTROL_EXCHANGE = f"{SUM_PREFIX}_control"
+SUM_CONTROL_QUEUE_PREFIX = f"{SUM_PREFIX}_control"
 SUM_RESPONSE_QUEUE_PREFIX = f"{SUM_PREFIX}_response"
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
@@ -36,37 +38,41 @@ class SumWorker:
         if CONFIGURATION not in (C_Q2, C_Q3):
             raise ValueError(f"Invalid sum configuration: {CONFIGURATION}")
 
-        self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST,
-            INPUT_QUEUE,
+        self._coordinator = EofCoordinator(
+            instance_id=ID,
+            total_instances=SUM_AMOUNT,
+            control_queue_prefix=SUM_CONTROL_QUEUE_PREFIX,
+            response_queue_prefix=SUM_RESPONSE_QUEUE_PREFIX,
+            mode="broadcast",
         )
-        self.control_sender = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST,
-            SUM_CONTROL_EXCHANGE,
-            [SUM_CONTROL_EXCHANGE],
-        )
-        self.output_exchanges = self._new_output_exchanges()
-        self.response_queue_name = f"{SUM_RESPONSE_QUEUE_PREFIX}_{ID}"
 
-        self.internal_protocol = InternalProtocol()
-        self.transaction_serializer = TransactionSerializer()
-        self.control_serializer = ControlMessageSerializer()
+        self._internal_protocol = InternalProtocol()
+        self._transaction_serializer = TransactionSerializer()
+        self._control_serializer = ControlMessageSerializer()
 
-        self.lock = threading.Lock()
-        self.processed_by_client = {}
-        self.pending_eof_by_client = {}
-        self.leader_processed_by_client = {}
-        self.leader_forwarded_by_client = {}
-        self.leader_expected_by_client = {}
-        self.processors_by_client = {}
-
-        self.control_consumer = None
-        self.response_consumer = None
-        self.control_thread = None
-        self.response_thread = None
-        self.closed = False
-        self._stopped = False
+        self._lock = threading.Lock()
+        self._processed_by_client: dict[int, int] = {}
+        self._processors_by_client: dict = {}
         self._partials_forwarded = 0
+
+        # Named control queue senders for the main thread (EOF_RECEIVED broadcast).
+        # Pika connections are not thread-safe; each thread creates its own senders.
+        self._main_control_senders: dict = self._new_control_senders()
+        self._output_exchanges = self._new_output_exchanges()
+
+        # Set by the spawned threads before blocking on start_consuming.
+        # Protected by _stopped_lock to avoid the race where handle_sigterm fires before
+        # the thread assigns these fields.
+        self._stopped_lock = threading.Lock()
+        self._input_queue: MessageMiddlewareQueueRabbitMQ | None = None
+        self._control_consumer: MessageMiddlewareQueueRabbitMQ | None = None
+        self._response_consumer: MessageMiddlewareQueueRabbitMQ | None = None
+        self._control_thread: threading.Thread | None = None
+        self._response_thread: threading.Thread | None = None
+        self._closed = False
+        self._stopped = False
+
+    # ---------- connection factories ----------
 
     def _new_output_exchanges(self):
         return [
@@ -78,45 +84,60 @@ class SumWorker:
             for i in range(AGGREGATION_AMOUNT)
         ]
 
+    def _new_control_senders(self) -> dict:
+        return {
+            self._coordinator.control_queue_for(i): MessageMiddlewareQueueRabbitMQ(
+                MOM_HOST, self._coordinator.control_queue_for(i)
+            )
+            for i in range(SUM_AMOUNT)
+        }
+
+    def _new_response_senders(self) -> dict:
+        return {
+            self._coordinator.response_queue_for(i): MessageMiddlewareQueueRabbitMQ(
+                MOM_HOST, self._coordinator.response_queue_for(i)
+            )
+            for i in range(SUM_AMOUNT)
+        }
+
+    # ---------- helpers ----------
+
     def _aggregation_index(self, partition_key: str) -> int:
         return zlib.crc32(partition_key.encode("utf-8")) % AGGREGATION_AMOUNT
 
     def _packet(self, msg_type: MessageType, client_id: int, payload: bytes) -> bytes:
-        return self.internal_protocol.create_packet(
+        return self._internal_protocol.create_packet(
             msg_type=msg_type,
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
             payload=payload,
         )
 
-    def _control_payload(
-        self,
-        sender_id: int,
-        expected_total: int,
-        processed_count: int,
-    ) -> bytes:
-        return self.control_serializer.serialize(
+    def _eof_payload(self, expected_total: int) -> bytes:
+        return self._control_serializer.serialize(
             ControlMessage(
-                sender_id=sender_id,
+                sender_id=ID,
                 expected_total=expected_total,
-                processed_count=processed_count,
+                processed_count=0,
             )
         )
 
-    def _send_control(
-        self,
-        exchange,
-        msg_type: MessageType,
-        client_id: int,
-        expected_total: int,
-        processed_count: int,
-    ) -> None:
-        exchange.send(
-            self._packet(
-                msg_type,
-                client_id,
-                self._control_payload(ID, expected_total, processed_count),
-            )
+    def _do_broadcast(self, action: BroadcastAction, control_senders: dict) -> None:
+        if action.sleep_before > 0:
+            time.sleep(action.sleep_before)
+        for qname in action.queue_names:
+            control_senders[qname].send(action.message)
+
+    def _processor_for_client(self, client_id: int):
+        return self._processors_by_client.setdefault(
+            client_id,
+            create_sum_processor(CONFIGURATION),
         )
+
+    def _partials_for_client(self, client_id: int):
+        processor = self._processors_by_client.get(client_id)
+        if processor is None:
+            return []
+        return processor.partials()
 
     def _forward_partial(
         self,
@@ -126,82 +147,14 @@ class SumWorker:
         exchanges,
     ) -> None:
         index = self._aggregation_index(partition_key)
-        exchanges[index].send(
-            self._packet(MessageType.DATA, client_id, payload)
-        )
+        exchanges[index].send(self._packet(MessageType.DATA, client_id, payload))
         self._partials_forwarded += 1
         if should_log_progress(self._partials_forwarded):
             logging.info(
                 "sum_forward_partial | configuration=%s | id=%s | client_id=%s | "
-                "partition_key=%s | aggregation_index=%s | routing_key=%s | "
-                "payload_bytes=%s",
-                CONFIGURATION,
-                ID,
-                client_id,
-                partition_key,
-                index,
-                f"{AGGREGATION_PREFIX}_{index}",
-                len(payload),
+                "partition_key=%s | aggregation_index=%s",
+                CONFIGURATION, ID, client_id, partition_key, index,
             )
-
-    def _forward_eof_to_aggregators(
-        self,
-        client_id: int,
-        expected_total: int,
-        exchanges,
-    ) -> None:
-        payload = self._control_payload(
-            sender_id=ID,
-            expected_total=expected_total,
-            processed_count=0,
-        )
-        for index, exchange in enumerate(exchanges):
-            exchange.send(self._packet(MessageType.EOF, client_id, payload))
-            logging.info(
-                "sum_forward_eof_to_aggregator | configuration=%s | id=%s | "
-                "client_id=%s | aggregation_index=%s | routing_key=%s | "
-                "expected_total=%s",
-                CONFIGURATION,
-                ID,
-                client_id,
-                index,
-                f"{AGGREGATION_PREFIX}_{index}",
-                expected_total,
-            )
-
-    def _process_transaction(self, client_id: int, transaction: Transaction) -> None:
-        self._processor_for_client(client_id).process(transaction)
-        logging.debug(
-            "sum_transaction | configuration=%s | id=%s | client_id=%s | "
-            "from_bank=%s | payment_format=%s | amount=%s",
-            CONFIGURATION,
-            ID,
-            client_id,
-            transaction.from_bank,
-            transaction.format,
-            transaction.amount,
-        )
-
-    def _processor_for_client(self, client_id: int):
-        return self.processors_by_client.setdefault(
-            client_id,
-            create_sum_processor(CONFIGURATION),
-        )
-
-    def _partials_for_transaction(
-        self,
-        client_id: int,
-        transaction: Transaction,
-    ):
-        return self._processor_for_client(client_id).partials_for_transaction(
-            transaction
-        )
-
-    def _partials_for_client(self, client_id: int):
-        processor = self.processors_by_client.get(client_id)
-        if processor is None:
-            return []
-        return processor.partials()
 
     def _forward_partials(self, client_id: int, partials, exchanges) -> int:
         forwarded = 0
@@ -210,351 +163,389 @@ class SumWorker:
             forwarded += 1
         return forwarded
 
-    def _forward_late_transaction(
-        self,
-        client_id: int,
-        transaction: Transaction,
-    ) -> int:
-        forwarded = 0
-        for partition_key, payload in self._partials_for_transaction(
-            client_id,
-            transaction,
-        ):
-            self._forward_partial(
-                client_id,
-                partition_key,
-                payload,
-                self.output_exchanges,
-            )
-            forwarded += 1
-        return forwarded
-
-    def _report_to_leader(
-        self,
-        client_id: int,
-        leader_id: int,
-        processed_count: int,
-        forwarded_count: int,
+    def _forward_eof_to_aggregators(
+        self, client_id: int, expected_total: int, exchanges
     ) -> None:
-        response_queue = middleware.MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST,
-            f"{SUM_RESPONSE_QUEUE_PREFIX}_{leader_id}",
-        )
-        try:
-            response_queue.send(
-                self._packet(
-                    MessageType.PROCESSED_ANSWER,
-                    client_id,
-                    self._control_payload(
-                        sender_id=ID,
-                        expected_total=forwarded_count,
-                        processed_count=processed_count,
-                    ),
-                )
+        payload = self._eof_payload(expected_total)
+        for index, exchange in enumerate(exchanges):
+            exchange.send(self._packet(MessageType.EOF, client_id, payload))
+            logging.info(
+                "sum_forward_eof_to_aggregator | configuration=%s | id=%s | "
+                "client_id=%s | aggregation_index=%s | expected_total=%s",
+                CONFIGURATION, ID, client_id, index, expected_total,
             )
-        finally:
-            response_queue.close()
 
-    def _broadcast_eof(self, client_id: int, expected_total: int) -> None:
-        self._send_control(
-            self.control_sender,
-            MessageType.EOF_RECEIVED,
-            client_id,
-            expected_total,
-            0,
-        )
+    # ---------- data path ----------
 
     def _handle_data_packet(self, client_id: int, payload: bytes) -> None:
-        transactions = self.transaction_serializer.deserialize_batch(payload)
+        transactions = self._transaction_serializer.deserialize_batch(payload)
         if not transactions:
             return
 
-        with self.lock:
+        with self._lock:
             for transaction in transactions:
-                self._process_transaction(client_id, transaction)
-            self.processed_by_client[client_id] = (
-                self.processed_by_client.get(client_id, 0) + len(transactions)
+                self._processor_for_client(client_id).process(transaction)
+            self._processed_by_client[client_id] = (
+                self._processed_by_client.get(client_id, 0) + len(transactions)
             )
-            processed_total = self.processed_by_client[client_id]
-            pending = self.pending_eof_by_client.get(client_id)
+            processed_total = self._processed_by_client[client_id]
 
         if should_log_progress(processed_total):
             logging.info(
                 "sum_data_batch | configuration=%s | id=%s | client_id=%s | "
-                "batch_size=%s | processed_total=%s | pending_eof=%s",
-                CONFIGURATION,
-                ID,
-                client_id,
-                len(transactions),
-                processed_total,
-                pending is not None,
+                "batch_size=%s | processed_total=%s",
+                CONFIGURATION, ID, client_id, len(transactions), processed_total,
             )
 
-        if pending is None:
-            return
-
-        _, leader_id = pending
-        forwarded_count = 0
-        for transaction in transactions:
-            forwarded_count += self._forward_late_transaction(client_id, transaction)
-        self._report_to_leader(
-            client_id,
-            leader_id,
-            processed_count=len(transactions),
-            forwarded_count=forwarded_count,
-        )
-
     def _handle_upstream_eof(self, client_id: int, payload: bytes) -> None:
-        control_message = self.control_serializer.deserialize(payload)
-        expected_total = control_message.expected_total
+        ctrl = self._control_serializer.deserialize(payload)
+        expected_total = ctrl.expected_total
 
-        with self.lock:
-            self.leader_expected_by_client[client_id] = expected_total
+        with self._lock:
+            count = self._processed_by_client.get(client_id, 0)
+            action = self._coordinator.on_upstream_eof(
+                client_id, expected_total, count, count
+            )
 
         logging.info(
             "sum_upstream_eof | configuration=%s | id=%s | client_id=%s | "
-            "expected_total=%s",
-            CONFIGURATION,
-            ID,
-            client_id,
-            expected_total,
+            "expected_total=%s | local_count=%s",
+            CONFIGURATION, ID, client_id, expected_total, count,
         )
-        self._broadcast_eof(client_id, expected_total)
 
-    def _handle_eof_broadcast(self, message: bytes, ack, nack, output_exchanges) -> None:
+        if isinstance(action, BroadcastAction):
+            self._do_broadcast(action, self._main_control_senders)
+
+        elif isinstance(action, FlushAction):
+            # N==1: flush own partials and send downstream EOF
+            with self._lock:
+                partials = self._partials_for_client(client_id)
+                self._processors_by_client.pop(client_id, None)
+                self._processed_by_client.pop(client_id, None)
+            fwd_final = self._forward_partials(client_id, partials, self._output_exchanges)
+            self._forward_eof_to_aggregators(client_id, fwd_final, self._output_exchanges)
+
+    def _process_message(self, message: bytes, ack, nack) -> None:
         try:
-            msg_type, client_id, payload = self.internal_protocol.unpack_packet(message)
-            if msg_type != MessageType.EOF_RECEIVED:
-                raise ValueError(f"Unexpected sum control message type: {msg_type}")
-
-            control_message = self.control_serializer.deserialize(payload)
-            leader_id = control_message.sender_id
-            expected_total = control_message.expected_total
-            duplicate_eof = False
-
-            with self.lock:
-                if client_id in self.pending_eof_by_client:
-                    duplicate_eof = True
-                else:
-                    processed_count = self.processed_by_client.get(client_id, 0)
-                    partials = self._partials_for_client(client_id)
-                    self.pending_eof_by_client[client_id] = (
-                        expected_total,
-                        leader_id,
-                    )
-
-            if duplicate_eof:
-                logging.info(
-                    "sum_duplicate_eof_control | configuration=%s | "
-                    "id=%s | client_id=%s | leader_id=%s",
-                    CONFIGURATION,
-                    ID,
-                    client_id,
-                    leader_id,
-                )
-                ack()
-                return
-
-            forwarded_count = self._forward_partials(
-                client_id,
-                partials,
-                output_exchanges,
-            )
-            logging.info(
-                "sum_eof_control_snapshot | configuration=%s | id=%s | "
-                "client_id=%s | leader_id=%s | processed_count=%s | "
-                "partials_forwarded=%s | expected_total=%s",
-                CONFIGURATION,
-                ID,
-                client_id,
-                leader_id,
-                processed_count,
-                forwarded_count,
-                expected_total,
-            )
-            self._report_to_leader(
-                client_id,
-                leader_id,
-                processed_count=processed_count,
-                forwarded_count=forwarded_count,
-            )
-            ack()
-        except Exception:
-            logging.exception("sum_control_error | configuration=%s | id=%s", CONFIGURATION, ID)
-            nack()
-
-    def _handle_leader_report(self, message: bytes, ack, nack, output_exchanges) -> None:
-        try:
-            msg_type, client_id, payload = self.internal_protocol.unpack_packet(message)
-            if msg_type != MessageType.PROCESSED_ANSWER:
-                raise ValueError(f"Unexpected sum response message type: {msg_type}")
-
-            control_message = self.control_serializer.deserialize(payload)
-            should_forward_eof = False
-            expected_total = None
-            processed_total = None
-
-            with self.lock:
-                self.leader_processed_by_client[client_id] = (
-                    self.leader_processed_by_client.get(client_id, 0)
-                    + control_message.processed_count
-                )
-                self.leader_forwarded_by_client[client_id] = (
-                    self.leader_forwarded_by_client.get(client_id, 0)
-                    + control_message.expected_total
-                )
-                expected_total = self.leader_expected_by_client.get(client_id)
-
-                if (
-                    expected_total is not None
-                    and self.leader_processed_by_client[client_id] == expected_total
-                ):
-                    should_forward_eof = True
-                    processed_total = self.leader_processed_by_client[client_id]
-                    forwarded_total = self.leader_forwarded_by_client[client_id]
-                    self._cleanup_client(client_id)
-
-            if should_forward_eof:
-                logging.info(
-                    "sum_eof_ready | configuration=%s | id=%s | client_id=%s | "
-                    "processed_total=%s | expected_total=%s | forwarded_total=%s",
-                    CONFIGURATION,
-                    ID,
-                    client_id,
-                    processed_total,
-                    expected_total,
-                    forwarded_total,
-                )
-                self._forward_eof_to_aggregators(
-                    client_id,
-                    forwarded_total,
-                    output_exchanges,
-                )
-
-            ack()
-        except Exception:
-            logging.exception("sum_response_error | configuration=%s | id=%s", CONFIGURATION, ID)
-            nack()
-
-    def _cleanup_client(self, client_id: int) -> None:
-        self.processed_by_client.pop(client_id, None)
-        self.pending_eof_by_client.pop(client_id, None)
-        self.leader_processed_by_client.pop(client_id, None)
-        self.leader_forwarded_by_client.pop(client_id, None)
-        self.leader_expected_by_client.pop(client_id, None)
-        self.processors_by_client.pop(client_id, None)
-
-    def process_message(self, message: bytes, ack, nack) -> None:
-        try:
-            msg_type, client_id, payload = self.internal_protocol.unpack_packet(message)
-
+            msg_type, client_id, payload = self._internal_protocol.unpack_packet(message)
             if msg_type == MessageType.DATA:
                 self._handle_data_packet(client_id, payload)
             elif msg_type == MessageType.EOF:
                 self._handle_upstream_eof(client_id, payload)
             else:
                 raise ValueError(f"Unexpected sum data message type: {msg_type}")
-
             ack()
         except Exception:
             logging.exception("sum_data_error | configuration=%s | id=%s", CONFIGURATION, ID)
             nack()
 
-    def _start_control_consumer(self) -> None:
-        control_consumer = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST,
-            SUM_CONTROL_EXCHANGE,
-            [SUM_CONTROL_EXCHANGE],
+    # ---------- control path ----------
+
+    def _handle_control(
+        self,
+        message: bytes,
+        ack,
+        nack,
+        response_senders: dict,
+        output_exchanges,
+    ) -> None:
+        try:
+            msg_type, client_id, ctrl = self._coordinator.parse_message(message)
+        except Exception:
+            logging.exception(
+                "sum_control_parse_error | configuration=%s | id=%s", CONFIGURATION, ID
+            )
+            nack()
+            return
+
+        with self._lock:
+            count = self._processed_by_client.get(client_id, 0)
+            action = self._coordinator.process_control_message(
+                msg_type, client_id, ctrl, count, count
+            )
+
+        if action is None:
+            ack()
+            return
+
+        if isinstance(action, SendAnswerAction):
+            try:
+                response_senders[action.queue_name].send(action.message)
+                ack()
+            except Exception:
+                logging.exception(
+                    "sum_send_answer_error | configuration=%s | id=%s | client_id=%s",
+                    CONFIGURATION, ID, client_id,
+                )
+                with self._lock:
+                    self._coordinator.clear_pending_eof(client_id)
+                nack()
+
+        elif isinstance(action, FlushAction):
+            # Non-leader: snapshot partials, forward, send FLUSH_ACK, then cleanup
+            with self._lock:
+                partials = self._partials_for_client(client_id)
+            fwd_final = self._forward_partials(client_id, partials, output_exchanges)
+            ack_msg = self._coordinator.build_flush_ack(client_id, fwd_final)
+            try:
+                response_senders[action.ack_queue].send(ack_msg)
+            except Exception:
+                logging.exception(
+                    "sum_flush_ack_error | configuration=%s | id=%s | client_id=%s",
+                    CONFIGURATION, ID, client_id,
+                )
+                nack()
+                return
+            with self._lock:
+                self._processors_by_client.pop(client_id, None)
+                self._processed_by_client.pop(client_id, None)
+                self._coordinator.cleanup_client(client_id)
+            logging.info(
+                "sum_flush_ack_sent | configuration=%s | id=%s | client_id=%s | fwd=%s",
+                CONFIGURATION, ID, client_id, fwd_final,
+            )
+            ack()
+
+        else:
+            logging.warning(
+                "sum_unexpected_control_action | configuration=%s | id=%s | action=%s",
+                CONFIGURATION, ID, action,
+            )
+            ack()
+
+    def _run_control_consumer(self) -> None:
+        consumer = MessageMiddlewareQueueRabbitMQ(
+            MOM_HOST, self._coordinator.my_control_queue()
         )
-        self.control_consumer = control_consumer
+        response_senders = self._new_response_senders()
         output_exchanges = self._new_output_exchanges()
 
+        with self._stopped_lock:
+            self._control_consumer = consumer
+            already_stopped = self._stopped
+
+        if already_stopped:
+            try:
+                consumer.close()
+            except Exception:
+                pass
+            for q in response_senders.values():
+                try:
+                    q.close()
+                except Exception:
+                    pass
+            for ex in output_exchanges:
+                try:
+                    ex.close()
+                except Exception:
+                    pass
+            return
+
         try:
-            if not self._stopped:
-                control_consumer.start_consuming(
-                    lambda message, ack, nack: self._handle_eof_broadcast(
-                        message,
-                        ack,
-                        nack,
-                        output_exchanges,
-                    )
+            consumer.start_consuming(
+                lambda msg, ack, nack: self._handle_control(
+                    msg, ack, nack, response_senders, output_exchanges
+                )
+            )
+        except Exception as e:
+            if not self._closed:
+                logging.error(
+                    "sum_control_consumer_stopped | configuration=%s | id=%s | error=%s",
+                    CONFIGURATION, ID, e,
                 )
         finally:
-            for exchange in output_exchanges:
-                exchange.close()
-            control_consumer.close()
+            for q in response_senders.values():
+                try:
+                    q.close()
+                except Exception:
+                    pass
+            for ex in output_exchanges:
+                try:
+                    ex.close()
+                except Exception:
+                    pass
+            try:
+                consumer.close()
+            except Exception:
+                pass
 
-    def _start_response_consumer(self) -> None:
-        response_consumer = middleware.MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST,
-            self.response_queue_name,
+    # ---------- response path (leader) ----------
+
+    def _handle_response(
+        self,
+        message: bytes,
+        ack,
+        nack,
+        control_senders: dict,
+        output_exchanges,
+    ) -> None:
+        try:
+            msg_type, client_id, ctrl = self._coordinator.parse_message(message)
+        except Exception:
+            logging.exception(
+                "sum_response_parse_error | configuration=%s | id=%s", CONFIGURATION, ID
+            )
+            nack()
+            return
+
+        own_partials = []
+        with self._lock:
+            action = self._coordinator.process_control_message(msg_type, client_id, ctrl)
+            if isinstance(action, FlushAction) and action.is_leader:
+                own_partials = self._partials_for_client(client_id)
+                self._processors_by_client.pop(client_id, None)
+                self._processed_by_client.pop(client_id, None)
+
+        if action is None:
+            ack()
+            return
+
+        if isinstance(action, BroadcastAction):
+            try:
+                self._do_broadcast(action, control_senders)
+                ack()
+            except Exception:
+                logging.exception(
+                    "sum_broadcast_error | configuration=%s | id=%s | client_id=%s",
+                    CONFIGURATION, ID, client_id,
+                )
+                nack()
+
+        elif isinstance(action, FlushAction) and action.is_leader:
+            own_fwd = self._forward_partials(client_id, own_partials, output_exchanges)
+            total_fwd = action.total_forwarded + own_fwd
+            logging.info(
+                "sum_eof_ready | configuration=%s | id=%s | client_id=%s | "
+                "total_fwd=%s | own_fwd=%s | acks_fwd=%s",
+                CONFIGURATION, ID, client_id, total_fwd, own_fwd, action.total_forwarded,
+            )
+            try:
+                self._forward_eof_to_aggregators(client_id, total_fwd, output_exchanges)
+                ack()
+            except Exception:
+                logging.exception(
+                    "sum_forward_eof_error | configuration=%s | id=%s | client_id=%s",
+                    CONFIGURATION, ID, client_id,
+                )
+                nack()
+
+        else:
+            logging.warning(
+                "sum_unexpected_response_action | configuration=%s | id=%s | action=%s",
+                CONFIGURATION, ID, action,
+            )
+            ack()
+
+    def _run_response_consumer(self) -> None:
+        consumer = MessageMiddlewareQueueRabbitMQ(
+            MOM_HOST, self._coordinator.my_response_queue()
         )
-        self.response_consumer = response_consumer
+        control_senders = self._new_control_senders()
         output_exchanges = self._new_output_exchanges()
 
+        with self._stopped_lock:
+            self._response_consumer = consumer
+            already_stopped = self._stopped
+
+        if already_stopped:
+            for q in control_senders.values():
+                try:
+                    q.close()
+                except Exception:
+                    pass
+            for ex in output_exchanges:
+                try:
+                    ex.close()
+                except Exception:
+                    pass
+            try:
+                consumer.close()
+            except Exception:
+                pass
+            return
+
         try:
-            if not self._stopped:
-                response_consumer.start_consuming(
-                    lambda message, ack, nack: self._handle_leader_report(
-                        message,
-                        ack,
-                        nack,
-                        output_exchanges,
-                    )
+            consumer.start_consuming(
+                lambda msg, ack, nack: self._handle_response(
+                    msg, ack, nack, control_senders, output_exchanges
+                )
+            )
+        except Exception as e:
+            if not self._closed:
+                logging.error(
+                    "sum_response_consumer_stopped | configuration=%s | id=%s | error=%s",
+                    CONFIGURATION, ID, e,
                 )
         finally:
-            for exchange in output_exchanges:
-                exchange.close()
-            response_consumer.close()
+            for q in control_senders.values():
+                try:
+                    q.close()
+                except Exception:
+                    pass
+            for ex in output_exchanges:
+                try:
+                    ex.close()
+                except Exception:
+                    pass
+            try:
+                consumer.close()
+            except Exception:
+                pass
+
+    # ---------- lifecycle ----------
 
     def start(self) -> None:
-        signal.signal(signal.SIGTERM, lambda *_: self.handle_sigterm())
-        self.control_thread = threading.Thread(target=self._start_control_consumer)
-        self.response_thread = threading.Thread(target=self._start_response_consumer)
-        self.control_thread.start()
-        self.response_thread.start()
+        logging.info(
+            "sum_start | configuration=%s | id=%s | mom_host=%s | queue=%s | "
+            "sum_amount=%s | aggregation_amount=%s",
+            CONFIGURATION, ID, MOM_HOST, INPUT_QUEUE, SUM_AMOUNT, AGGREGATION_AMOUNT,
+        )
 
+        self._control_thread = threading.Thread(target=self._run_control_consumer)
+        self._response_thread = threading.Thread(target=self._run_response_consumer)
+        self._control_thread.start()
+        self._response_thread.start()
+
+        self._input_queue = middleware.MessageMiddlewareQueueRabbitMQ(MOM_HOST, INPUT_QUEUE)
         try:
             if not self._stopped:
-                self.input_queue.start_consuming(self.process_message)
+                self._input_queue.start_consuming(self._process_message)
         finally:
             self.handle_sigterm()
-            self.control_thread.join(timeout=5)
-            self.response_thread.join(timeout=5)
-            self.close()
+            self._control_thread.join(timeout=5)
+            self._response_thread.join(timeout=5)
+            self._close()
 
     def handle_sigterm(self) -> None:
-        if self._stopped:
-            return
-        self._stopped = True
+        with self._stopped_lock:
+            if self._stopped:
+                return
+            self._stopped = True
+            control_consumer = self._control_consumer
+            response_consumer = self._response_consumer
 
-        logging.info(
-            "sum_shutdown | configuration=%s | id=%s",
-            CONFIGURATION,
-            ID,
+        logging.info("sum_shutdown | configuration=%s | id=%s", CONFIGURATION, ID)
+        for consumer in (self._input_queue, control_consumer, response_consumer):
+            if consumer is not None:
+                consumer.request_stop_consuming()
+
+    def _close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+
+        resources = (
+            [self._input_queue]
+            + list(self._main_control_senders.values())
+            + self._output_exchanges
         )
-        self.input_queue.request_stop_consuming()
-        if self.control_consumer is not None:
-            self.control_consumer.request_stop_consuming()
-        if self.response_consumer is not None:
-            self.response_consumer.request_stop_consuming()
-
-    def close(self) -> None:
-        if self.closed:
-            return
-        self.closed = True
-
-        for resource in [
-            self.input_queue,
-            self.control_sender,
-            *self.output_exchanges,
-        ]:
+        for resource in resources:
+            if resource is None:
+                continue
             try:
                 resource.close()
             except Exception as e:
                 logging.warning(
                     "sum_close_error | configuration=%s | id=%s | error=%s",
-                    CONFIGURATION,
-                    ID,
-                    e,
+                    CONFIGURATION, ID, e,
                 )
