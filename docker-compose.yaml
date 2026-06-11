@@ -75,7 +75,8 @@ services:
         condition: service_healthy
     environment:
     - ID=0
-    - FILE_INGESTOR_CONTROL_EXCHANGE=file_ingestor_control
+    - FILE_INGESTOR_AMOUNT=1
+    - FILE_INGESTOR_CONTROL_QUEUE_PREFIX=file_ingestor_control
     - FILE_INGESTOR_RESPONSE_QUEUE_PREFIX=file_ingestor_response
     - LINE_BATCH_INPUT_QUEUE=line_batch_queue
     - LOGGING_LEVEL=INFO

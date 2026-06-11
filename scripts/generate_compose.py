@@ -475,8 +475,9 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
             index, settings, q2_enabled=q2_enabled
         )
 
-    for index in range(counts["file_ingestors"]):
-        services[f"file_ingestor_{index}"] = file_ingestor_service(index, settings)
+    file_ingestor_count = counts["file_ingestors"]
+    for index in range(file_ingestor_count):
+        services[f"file_ingestor_{index}"] = file_ingestor_service(index, file_ingestor_count, settings)
 
     filter_specs = []
     if usd_enabled:
@@ -732,13 +733,14 @@ def gateway_service(file_ingestor_count: int, settings: dict, enabled_queries: s
     )
 
 
-def file_ingestor_service(index: int, settings: dict) -> dict:
+def file_ingestor_service(index: int, total: int, settings: dict) -> dict:
     return base_service(
         "workers/file_ingestor/Dockerfile",
         depends_on=depends_on_rabbitmq(),
         environment=[
             f"ID={index}",
-            f"FILE_INGESTOR_CONTROL_EXCHANGE={FILE_INGESTOR_CONTROL_EXCHANGE}",
+            f"FILE_INGESTOR_AMOUNT={total}",
+            f"FILE_INGESTOR_CONTROL_QUEUE_PREFIX=file_ingestor_control",
             f"FILE_INGESTOR_RESPONSE_QUEUE_PREFIX={FILE_INGESTOR_RESPONSE_QUEUE_PREFIX}",
             f"LINE_BATCH_INPUT_QUEUE={LINE_BATCH_QUEUE}",
             f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
