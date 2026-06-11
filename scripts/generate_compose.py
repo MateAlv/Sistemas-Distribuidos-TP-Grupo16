@@ -350,7 +350,8 @@ def load_config(path: Path) -> dict:
         raise FileNotFoundError(f"config file not found: {path}")
     with path.open("r", encoding="utf-8") as file:
         config = yaml.safe_load(file) or {}
-    validate_config(config, path)
+    # Validation is deferred to apply_cli_overrides so that --dataset / --clients
+    # overrides are applied before the file-existence checks run.
     return config
 
 

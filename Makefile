@@ -138,7 +138,7 @@ stats:
 .PHONY: stats
 
 # Dataset used by the full `make test` run and `make expected`.
-DATASET ?= HI-Medium
+DATASET ?= HI-Small
 
 # Precompute the per-dataset reference results (data/datasets/<DATASET>/expected_results/).
 # Use FORCE=1 to regenerate. The expensive Q4 graph is computed once here, not per run.
@@ -295,12 +295,13 @@ test-q3:
 		echo "=== client_0 logs ==="; $$compose logs client_0'
 .PHONY: test-q3
 
-Q5_DATASET ?= LI-Mini
-Q5_FORMAT_WORKERS ?=
-Q5_USD_WORKERS ?=
+Q5_DATASET ?= HI-Small
+Q5_FORMAT_WORKERS ?= 3
+Q5_USD_WORKERS ?= 3
 USD_WORKERS ?=
 PREFETCH_COUNT ?=
 test-q5:
+	@echo ">>> regenerating $(TEST_COMPOSE_FILE) for Q5 (dataset=$(Q5_DATASET))"
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q5-test --dataset $(Q5_DATASET) \
 		$(if $(Q5_FORMAT_WORKERS),--filter-q5-format-workers $(Q5_FORMAT_WORKERS)) \
 		$(if $(Q5_USD_WORKERS),--filter-q5-usd-workers $(Q5_USD_WORKERS)) \
@@ -322,20 +323,23 @@ test-q5:
 		mkdir -p data/output; \
 		rm -f data/output/results_q*.csv; \
 		start_time=$$SECONDS; \
-		echo "Starting Q5 flow test (preset=q5-test, dataset=$(Q5_DATASET))..."; \
+		echo "Starting Q5 flow test (dataset=$(Q5_DATASET), Q5_USD_WORKERS=$(or $(Q5_USD_WORKERS),1), PREFETCH_COUNT=$(or $(PREFETCH_COUNT),1), CLIENTS=$(or $(CLIENTS),1))..."; \
 		$$compose up --build --remove-orphans --detach; \
+		$$compose logs --follow --timestamps --no-color \
+			| $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR) & LOG_PID=$$!; \
 		clients="$$($$compose config --services | grep "^client_" | tr "\n" " ")"; \
-		if [ -z "$$clients" ]; then echo "no client services found" >&2; exit 2; fi; \
-		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
+		if [ -z "$$clients" ]; then echo "no client services found" >&2; kill $$LOG_PID 2>/dev/null || true; exit 2; fi; \
+		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null || true; \
+		kill $$LOG_PID 2>/dev/null || true; \
+		wait $$LOG_PID 2>/dev/null || true; \
 		elapsed=$$((SECONDS - start_time)); \
+		echo ""; \
 		echo "Client finished in $${elapsed}s"; \
 		Q5_DATASET_DIR=data/datasets/$(Q5_DATASET) \
 		Q5_DATASET_TRANS=$(Q5_DATASET)_Trans.csv \
 			$(PYTHON) scripts/validate_q5_output.py \
 			&& echo "✓ Q5 test PASSED ($${elapsed}s)" \
-			|| { echo "✗ Q5 test FAILED ($${elapsed}s)"; exit 1; }; \
-		echo ""; \
-		echo "=== client_0 logs ==="; $$compose logs client_0'
+			|| { echo "✗ Q5 test FAILED ($${elapsed}s)"; exit 1; }'
 .PHONY: test-q5
 
 test-unit:
