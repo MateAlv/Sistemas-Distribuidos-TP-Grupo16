@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping
 
 
 DEFAULT_COMPOSE_PROJECT_NAME = "distribuidos"
+PINNED_CONTAINER_NAMES_ENV = "PINNED_CONTAINER_NAMES"
 
 RecoveryFn = Callable[[str], None]
 CommandRunner = Callable[..., subprocess.CompletedProcess]
@@ -14,6 +15,9 @@ def container_name(
     node_id: str,
     env: Mapping[str, str] = os.environ,
 ) -> str:
+    if env.get(PINNED_CONTAINER_NAMES_ENV, "").lower() == "true":
+        return node_id
+
     project_name = env.get(
         "COMPOSE_PROJECT_NAME",
         DEFAULT_COMPOSE_PROJECT_NAME,

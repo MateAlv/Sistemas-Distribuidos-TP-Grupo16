@@ -177,6 +177,10 @@ class ElectionHandler:
         with self._leader_lock:
             return self._leader
 
+    def leader_is_running(self) -> bool:
+        with self._leader_lock:
+            return self._leader_running
+
     def wait_for_new_leader(self, timeout: float) -> bool:
         acquired = self._leader_semaphore.acquire(timeout=timeout)
         if not acquired:

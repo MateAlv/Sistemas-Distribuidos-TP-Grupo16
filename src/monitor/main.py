@@ -39,7 +39,7 @@ class MonitorConfig:
     check_interval: float
     max_missed: int
     nodes_to_watch: tuple[str, ...]
-    heartbeat_target_host: str
+    heartbeat_target_hosts: tuple[str, ...]
     logging_level: str
 
 
@@ -127,10 +127,7 @@ def load_config(env: Mapping[str, str] = os.environ) -> MonitorConfig:
         check_interval=check_interval,
         max_missed=max_missed,
         nodes_to_watch=nodes_to_watch,
-        heartbeat_target_host=env.get(
-            "MONITOR_HOST",
-            DEFAULT_HEARTBEAT_TARGET_HOST,
-        ),
+        heartbeat_target_hosts=_heartbeat_hosts(env),
         logging_level=env.get("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
     )
 
@@ -160,7 +157,7 @@ def build_monitor(config: MonitorConfig) -> Monitor:
 def build_heartbeat_sender(config: MonitorConfig) -> HeartbeatSender:
     return HeartbeatSender(
         node_id=f"monitor_{config.monitor_id}",
-        host=config.heartbeat_target_host,
+        hosts=config.heartbeat_target_hosts,
         port=config.monitor_port,
     )
 
@@ -238,6 +235,23 @@ def _parse_int(name: str, value: str) -> int:
         return int(value)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer") from exc
+
+
+def _heartbeat_hosts(env: Mapping[str, str]) -> tuple[str, ...]:
+    raw_hosts = env.get(
+        "MONITOR_HOSTS",
+        env.get("MONITOR_HOST", DEFAULT_HEARTBEAT_TARGET_HOST),
+    )
+    hosts = tuple(
+        dict.fromkeys(
+            host.strip()
+            for host in raw_hosts.split(",")
+            if host.strip()
+        )
+    )
+    if not hosts:
+        return (DEFAULT_HEARTBEAT_TARGET_HOST,)
+    return hosts
 
 
 if __name__ == "__main__":

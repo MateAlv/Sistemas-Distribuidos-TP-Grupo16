@@ -66,6 +66,12 @@ class Monitor:
             self._recover_failed_nodes()
             return
 
+        if not self._election_handler.leader_is_running():
+            self._election_handler.wait_for_new_leader(
+                self._coordinator_timeout
+            )
+            return
+
         if self._leader_is_alive():
             return
 

@@ -6,9 +6,15 @@ from monitor import Monitor
 
 
 class FakeElectionHandler:
-    def __init__(self, leader: bool, leader_id: int = 3) -> None:
+    def __init__(
+        self,
+        leader: bool,
+        leader_id: int = 3,
+        leader_running: bool | None = None,
+    ) -> None:
         self.leader = leader
         self.leader_id = leader_id
+        self.leader_running = leader if leader_running is None else leader_running
         self.wait_calls = []
         self.listen_started = threading.Event()
         self.listen_stopped = threading.Event()
@@ -19,6 +25,9 @@ class FakeElectionHandler:
 
     def get_leader(self) -> int:
         return self.leader_id
+
+    def leader_is_running(self) -> bool:
+        return self.leader_running
 
     def wait_for_new_leader(self, timeout: float) -> bool:
         self.wait_calls.append(timeout)
@@ -167,7 +176,11 @@ def test_recovery_error_does_not_skip_other_failed_nodes() -> None:
 
 
 def test_follower_waits_when_leader_heartbeat_is_fresh() -> None:
-    election = FakeElectionHandler(leader=False, leader_id=2)
+    election = FakeElectionHandler(
+        leader=False,
+        leader_id=2,
+        leader_running=True,
+    )
     monitor = Monitor(
         election,
         FakeHeartbeatReceiver({"monitor_2": 95.0}),
@@ -184,13 +197,32 @@ def test_follower_waits_when_leader_heartbeat_is_fresh() -> None:
 
 
 def test_follower_waits_for_coordinator_when_leader_is_expired() -> None:
-    election = FakeElectionHandler(leader=False, leader_id=2)
+    election = FakeElectionHandler(
+        leader=False,
+        leader_id=2,
+        leader_running=True,
+    )
     monitor = Monitor(
         election,
         FakeHeartbeatReceiver({"monitor_2": 50.0}),
         [],
         check_interval=10,
         max_missed=3,
+        coordinator_timeout=7,
+        clock=lambda: 100.0,
+    )
+
+    monitor.run_once()
+
+    assert election.wait_calls == [7]
+
+
+def test_follower_waits_for_first_coordinator_even_with_fresh_heartbeat() -> None:
+    election = FakeElectionHandler(leader=False, leader_id=3)
+    monitor = Monitor(
+        election,
+        FakeHeartbeatReceiver({"monitor_3": 100.0}),
+        [],
         coordinator_timeout=7,
         clock=lambda: 100.0,
     )

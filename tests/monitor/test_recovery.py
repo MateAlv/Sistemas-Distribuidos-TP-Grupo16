@@ -31,6 +31,16 @@ def test_container_name_uses_default_project(env: dict[str, str]) -> None:
     )
 
 
+def test_container_name_supports_pinned_compose_names() -> None:
+    assert (
+        container_name(
+            "filter_usd_0",
+            {"PINNED_CONTAINER_NAMES": "true"},
+        )
+        == "filter_usd_0"
+    )
+
+
 def test_docker_start_invokes_docker_without_raising_on_failure() -> None:
     calls = []
 

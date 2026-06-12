@@ -44,10 +44,53 @@ def test_node_id_falls_back_to_hostname(monkeypatch):
 
 def test_defaults_target_monitor(monkeypatch):
     monkeypatch.delenv("MONITOR_HOST", raising=False)
+    monkeypatch.delenv("MONITOR_HOSTS", raising=False)
     monkeypatch.delenv("MONITOR_PORT", raising=False)
     sender = HeartbeatSender(node_id="x")
     assert sender._host == DEFAULT_MONITOR_HOST
     assert sender._port == DEFAULT_MONITOR_PORT
+
+
+def test_sends_to_all_configured_monitors():
+    class FakeSocket:
+        def __init__(self):
+            self.targets = []
+
+        def sendto(self, payload, target):
+            self.targets.append((payload, target))
+            return len(payload)
+
+    sock = FakeSocket()
+    sender = HeartbeatSender(
+        node_id="worker_0",
+        hosts=["monitor_1", "monitor_2", "monitor_1"],
+        port=9100,
+    )
+
+    sender._send(sock)
+
+    assert sock.targets == [
+        (b"worker_0", ("monitor_1", 9100)),
+        (b"worker_0", ("monitor_2", 9100)),
+    ]
+
+
+def test_accepts_monitor_hosts_as_comma_separated_string():
+    sender = HeartbeatSender(
+        node_id="worker_0",
+        hosts="monitor_1, monitor_2",
+    )
+
+    assert sender._hosts == ("monitor_1", "monitor_2")
+
+
+def test_monitor_hosts_env_takes_precedence(monkeypatch):
+    monkeypatch.setenv("MONITOR_HOST", "legacy")
+    monkeypatch.setenv("MONITOR_HOSTS", "monitor_1, monitor_2")
+
+    sender = HeartbeatSender(node_id="x")
+
+    assert sender._hosts == ("monitor_1", "monitor_2")
 
 
 def test_emits_repeatedly():

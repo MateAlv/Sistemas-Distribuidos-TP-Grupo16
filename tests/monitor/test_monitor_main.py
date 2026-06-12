@@ -29,7 +29,7 @@ def test_load_config_uses_defaults_and_deduplicates_nodes() -> None:
     assert config.check_interval == 3.0
     assert config.max_missed == 3
     assert config.nodes_to_watch == ("worker_0", "monitor_1")
-    assert config.heartbeat_target_host == "monitor"
+    assert config.heartbeat_target_hosts == ("monitor",)
 
 
 def test_load_config_accepts_all_runtime_overrides() -> None:
@@ -43,7 +43,7 @@ def test_load_config_accepts_all_runtime_overrides() -> None:
             MAX_MISSED="4",
             ELECTION_TIMEOUT="2.5",
             COORDINATOR_TIMEOUT="6",
-            MONITOR_HOST="monitor_1",
+            MONITOR_HOSTS="monitor_1,monitor_2",
             LOGGING_LEVEL="DEBUG",
         )
     )
@@ -56,7 +56,7 @@ def test_load_config_accepts_all_runtime_overrides() -> None:
     assert config.max_missed == 4
     assert config.election_timeout == 2.5
     assert config.coordinator_timeout == 6
-    assert config.heartbeat_target_host == "monitor_1"
+    assert config.heartbeat_target_hosts == ("monitor_1", "monitor_2")
     assert config.logging_level == "DEBUG"
 
 
@@ -128,7 +128,7 @@ def test_builders_wire_config_into_components(monkeypatch) -> None:
     )
     assert calls["sender"] == {
         "node_id": "monitor_2",
-        "host": "monitor",
+        "hosts": ("monitor",),
         "port": 9000,
     }
 

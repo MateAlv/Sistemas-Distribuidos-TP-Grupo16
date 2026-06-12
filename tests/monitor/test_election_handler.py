@@ -90,6 +90,7 @@ def test_monitor_waits_when_higher_monitor_answers_ok() -> None:
     handler.start_election()
 
     assert not handler.i_am_leader()
+    assert not handler.leader_is_running()
     assert handler.get_leader() == 3
 
 
@@ -111,6 +112,7 @@ def test_coordinator_updates_leader_and_releases_waiter() -> None:
     assert response is None
     assert not should_elect
     assert handler.get_leader() == 2
+    assert handler.leader_is_running()
     assert not handler.i_am_leader()
     assert handler.wait_for_new_leader(timeout=0)
 

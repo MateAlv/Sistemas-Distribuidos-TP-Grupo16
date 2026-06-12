@@ -197,6 +197,35 @@ Variables de ejecución:
 | `CHUNK_LOG_EVERY` | Cada cuantos chunks cliente/gateway loguear progreso. Default: `100`. |
 | `RESULT_LOG_EVERY` | Cada cuantas lineas de resultado gateway->cliente loguear progreso. Default: `100`. |
 
+## Monitor y recuperación
+
+El bloque `monitor` de `config/main-config.yaml` habilita las réplicas que
+detectan caídas por heartbeat y recuperan containers con `docker start`:
+
+```yaml
+monitor:
+  enabled: true
+  count: 3
+  port: 9000
+  election_port: 9001
+  check_interval: 3
+  max_missed: 3
+  election_timeout: 5
+  coordinator_timeout: 10
+```
+
+Los procesos envían su heartbeat UDP a todas las réplicas. Los monitores usan
+elección Bully para coordinar cuál de ellos ejecuta las recuperaciones. Para
+acceder al daemon del host, los containers de monitor montan
+`/var/run/docker.sock`.
+
+Para deshabilitarlos en un escenario:
+
+```yaml
+monitor:
+  enabled: false
+```
+
 ## Outputs
 
 Los resultados se escriben en `data/output/`:
