@@ -386,15 +386,6 @@ class EofCoordinator:
         Espera N respuestas (incluyendo la propia del líder vía self-report).
         Cuando llegan todas: verifica total >= expected o reintenta.
         """
-        # Verificar que esta instancia es el líder para este client_id
-        if client_id not in self._leader_expected:
-            logging.info(
-                "eof_coordinator_accumulate_ignored | id=%s | client_id=%s | sender=%s",
-                self._id, client_id, ctrl.sender_id,
-            )
-            return None
-
-        expected = self._leader_expected[client_id]
         sender_id = ctrl.sender_id
 
         if client_id not in self._leader_responders:
@@ -404,17 +395,22 @@ class EofCoordinator:
             self._leader_processed.get(client_id, 0) + ctrl.processed_count
         )
 
+        # In flush_order mode, non-leaders can send PROCESSED_ANSWER before the leader has
+        # processed its own shard EOF (which sets _leader_expected). Always accumulate; defer
+        # the flush decision until both all N responders and the expected total are known.
+        expected = self._leader_expected.get(client_id)
         responder_count = len(self._leader_responders[client_id])
         running = self._leader_processed[client_id]
 
         logging.info(
             "eof_coordinator_accumulate | id=%s | client_id=%s | "
             "sender=%s | responders=%s/%s | running=%s | expected=%s",
-            self._id, client_id, sender_id, responder_count, self._total, running, expected,
+            self._id, client_id, sender_id, responder_count, self._total, running,
+            expected if expected is not None else "?",
         )
 
-        if responder_count < self._total:
-            return None  # Faltan respuestas
+        if expected is None or responder_count < self._total:
+            return None  # Esperando expected total o respuestas faltantes
 
         # Todas las instancias respondieron — evaluar conteo
         if running >= expected:
