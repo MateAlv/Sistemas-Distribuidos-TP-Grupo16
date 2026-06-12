@@ -3,6 +3,8 @@ import os
 import threading
 from collections import defaultdict
 
+from common.upstream_eof_counter import UpstreamEofCounter
+
 from common.batch_buffer import BatchBuffer
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal import (
@@ -79,7 +81,7 @@ class Q4DeduperWorker:
         self._lock = threading.Lock()
         self._accounts_by_client: dict[int, set[tuple[str, str]]] = {}
         self._processed_by_client: dict[int, int] = {}
-        self._eofs_by_client: dict[int, set[int]] = defaultdict(set)
+        self._eof_counter = UpstreamEofCounter(Q4_AGGREGATOR_AMOUNT)
         self._closed_by_client: set[int] = set()
 
         self._leader_reports_by_client: dict[int, set[int]] = defaultdict(set)
@@ -258,41 +260,19 @@ class Q4DeduperWorker:
         return len(accounts)
 
     def _handle_eof(self, client_id: int, payload: bytes) -> None:
-        """Count one EOF from one aggregator shard. Once every aggregator has
-        sent us its EOF for this client, we have all the candidates → close."""
         control = self._control_serializer.deserialize(payload)
-        should_emit = False
 
         with self._lock:
-            if client_id in self._closed_by_client:
-                return
-            if control.sender_id in self._eofs_by_client[client_id]:
-                logging.info(
-                    "q4_deduper_duplicate_eof | id=%s | client_id=%s | "
-                    "pair_reducer_id=%s",
-                    ID,
-                    client_id,
-                    control.sender_id,
-                )
-                return
-
-            self._eofs_by_client[client_id].add(control.sender_id)
-            eof_count = len(self._eofs_by_client[client_id])
+            should_emit = self._eof_counter.on_eof(client_id, control.sender_id)
+            eof_count = self._eof_counter.count(client_id)
             processed_total = self._processed_by_client.get(client_id, 0)
-            if eof_count >= Q4_AGGREGATOR_AMOUNT:
-                should_emit = True
 
         logging.info(
             "q4_deduper_eof_received | id=%s | client_id=%s | "
             "pair_reducer_id=%s | eof_count=%s | expected_eofs=%s | "
             "sender_expected_total=%s | processed_total=%s",
-            ID,
-            client_id,
-            control.sender_id,
-            eof_count,
-            Q4_AGGREGATOR_AMOUNT,
-            control.expected_total,
-            processed_total,
+            ID, client_id, control.sender_id, eof_count, Q4_AGGREGATOR_AMOUNT,
+            control.expected_total, processed_total,
         )
 
         if should_emit:
@@ -308,7 +288,7 @@ class Q4DeduperWorker:
                 return 0
             keys = self._accounts_by_client.pop(client_id, set())
             processed_total = self._processed_by_client.pop(client_id, 0)
-            self._eofs_by_client.pop(client_id, None)
+            self._eof_counter.close(client_id)
             self._closed_by_client.add(client_id)
 
         emitted_accounts = 0

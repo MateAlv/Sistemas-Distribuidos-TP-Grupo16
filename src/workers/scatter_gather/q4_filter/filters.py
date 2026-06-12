@@ -1,10 +1,17 @@
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 
 from common.bank_ids import notebook_bank_id
 from common.batch_buffer import BatchBuffer
+from common.eof_coordinator import (
+    BroadcastAction,
+    EofCoordinator,
+    FlushAction,
+    SendAnswerAction,
+)
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal import (
     InternalProtocol,
@@ -30,34 +37,23 @@ from common.middleware.middleware_rabbitmq import (
 ID = int(os.environ["ID"])
 LEADER_ID = 0
 MOM_HOST = os.environ["MOM_HOST"]
-INPUT_QUEUE = os.environ.get("INPUT_QUEUE", "q4_filter_input")
 INPUT_EXCHANGE = os.environ.get("Q4_FILTER_INPUT_EXCHANGE")
 INPUT_ROUTING_PREFIX = os.environ.get(
     "Q4_FILTER_INPUT_ROUTING_PREFIX", "q4_filter"
 )
 Q4_FILTER_AMOUNT = int(os.environ.get("Q4_FILTER_AMOUNT", "1"))
-Q4_FILTER_PREFIX = os.environ.get(
-    "Q4_FILTER_PREFIX", "q4_filter"
-)
-CONTROL_EXCHANGE = os.environ.get(
-    "Q4_FILTER_CONTROL_EXCHANGE",
-    f"{Q4_FILTER_PREFIX}_control",
-)
-RESPONSE_QUEUE_PREFIX = os.environ.get(
-    "Q4_FILTER_RESPONSE_QUEUE_PREFIX",
-    f"{Q4_FILTER_PREFIX}_response",
-)
+Q4_FILTER_PREFIX = os.environ.get("Q4_FILTER_PREFIX", "q4_filter")
 Q4_SUM_EXCHANGE = os.environ["Q4_SUM_EXCHANGE"]
 Q4_SUM_AMOUNT = int(os.environ["Q4_SUM_AMOUNT"])
-Q4_SUM_ROUTING_PREFIX = os.environ.get(
-    "Q4_SUM_ROUTING_PREFIX", "q4_sum"
-)
+Q4_SUM_ROUTING_PREFIX = os.environ.get("Q4_SUM_ROUTING_PREFIX", "q4_sum")
 Q4_FILTER_BATCH_BYTES = int(
     os.environ.get("Q4_FILTER_BATCH_BYTES", str(1024 * 1024))
 )
 Q4_FILTER_BATCH_MAX_EDGES = int(
     os.environ.get("Q4_FILTER_BATCH_MAX_EDGES", "5000")
 )
+Q4_FILTER_CONTROL_QUEUE_PREFIX = f"{Q4_FILTER_PREFIX}_control"
+Q4_FILTER_RESPONSE_QUEUE_PREFIX = f"{Q4_FILTER_PREFIX}_response"
 
 
 @dataclass
@@ -68,24 +64,15 @@ class _SourceState:
 
 
 class Q4FilterWorker:
-    """Notebook-exact Q4 source prefilter.
-
-    The worker owns complete sources through upstream sharding. It keeps a capped
-    target set and the source's pending rows in memory until the source reaches
-    six distinct targets.
-    """
-
     def __init__(self):
-        self._input = self._new_input()
-        self._edge_store_output = self._new_edge_store_output()
-        self._control_sender = None
-        if Q4_FILTER_AMOUNT > 1:
-            self._control_sender = MessageMiddlewareExchangeRabbitMQ(
-                MOM_HOST,
-                CONTROL_EXCHANGE,
-                [CONTROL_EXCHANGE],
-            )
-        self._response_queue_name = f"{RESPONSE_QUEUE_PREFIX}_{ID}"
+        self._coordinator = EofCoordinator(
+            instance_id=ID,
+            total_instances=Q4_FILTER_AMOUNT,
+            control_queue_prefix=Q4_FILTER_CONTROL_QUEUE_PREFIX,
+            response_queue_prefix=Q4_FILTER_RESPONSE_QUEUE_PREFIX,
+            mode="flush_order",
+            leader_id=LEADER_ID,
+        )
 
         self._proto = InternalProtocol()
         self._tx_serializer = TransactionSerializer()
@@ -100,19 +87,18 @@ class Q4FilterWorker:
         self._states_by_client: dict[int, dict[Q4AccountId, _SourceState]] = {}
         self._processed_by_client: dict[int, int] = {}
         self._forwarded_by_partition_by_client: dict[int, dict[int, int]] = {}
-        self._pending_eof_by_client: dict[int, tuple[int, int]] = {}
-        self._leader_expected_by_client: dict[int, int] = {}
-        self._leader_processed_by_client: dict[int, int] = {}
-        self._leader_forwarded_by_client: dict[int, int] = {}
-        self._flushed_by_client: set[int] = set()
         self._closed_by_client: set[int] = set()
 
-        self._control_consumer = None
-        self._response_consumer = None
+        self._input = self._new_input()
+        self._edge_store_output = self._new_edge_store_output()
+        self.control_consumer = None
+        self.response_consumer = None
         self._control_thread = None
         self._response_thread = None
         self._closed = False
         self._stopped = False
+
+    # ---------- connection helpers ----------
 
     def _new_input(self):
         if INPUT_EXCHANGE:
@@ -123,40 +109,28 @@ class Q4FilterWorker:
                 queue_name=f"{INPUT_ROUTING_PREFIX}_{ID}",
                 exclusive=False,
             )
-        if Q4_FILTER_AMOUNT > 1:
-            logging.warning(
-                "q4_filter_queue_input_with_multiple_workers | "
-                "amount=%s | exact_source_ownership_requires_input_exchange",
-                Q4_FILTER_AMOUNT,
-            )
-        return MessageMiddlewareQueueRabbitMQ(MOM_HOST, INPUT_QUEUE)
+        return MessageMiddlewareQueueRabbitMQ(
+            MOM_HOST, os.environ.get("INPUT_QUEUE", "q4_filter_input")
+        )
 
     def _new_edge_store_output(self):
-        return MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST,
-            Q4_SUM_EXCHANGE,
-            [],
-        )
+        return MessageMiddlewareExchangeRabbitMQ(MOM_HOST, Q4_SUM_EXCHANGE, [])
+
+    def _new_control_senders(self) -> dict:
+        return {
+            self._coordinator.control_queue_for(i): MessageMiddlewareQueueRabbitMQ(
+                MOM_HOST, self._coordinator.control_queue_for(i)
+            )
+            for i in range(Q4_FILTER_AMOUNT)
+        }
+
+    # ---------- packet helpers ----------
 
     def _packet(self, msg_type: MessageType, client_id: int, payload: bytes) -> bytes:
         return self._proto.create_packet(
             msg_type=msg_type,
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
             payload=payload,
-        )
-
-    def _control_payload(
-        self,
-        sender_id: int,
-        expected_total: int,
-        processed_count: int,
-    ) -> bytes:
-        return self._control_serializer.serialize(
-            ControlMessage(
-                sender_id=sender_id,
-                expected_total=expected_total,
-                processed_count=processed_count,
-            )
         )
 
     def _routing_key(self, partition: int) -> str:
@@ -180,31 +154,9 @@ class Q4FilterWorker:
             ),
         )
 
-    def _append_pending_edge(
-        self,
-        edge: Q4TransactionEdge,
-        state: _SourceState,
-    ) -> None:
-        state.pending.append(edge)
+    # ---------- edge emit helpers ----------
 
-    def _replay_pending_edges(
-        self,
-        client_id: int,
-        state: _SourceState,
-        output=None,
-    ) -> int:
-        forwarded = 0
-        for edge in state.pending:
-            forwarded += self._emit_qualified_edge(client_id, edge, output)
-        state.pending = []
-        return forwarded
-
-    def _emit_counted_edge(
-        self,
-        client_id: int,
-        edge: Q4CountedEdge,
-        output=None,
-    ) -> None:
+    def _emit_counted_edge(self, client_id: int, edge: Q4CountedEdge, output=None) -> None:
         output = output or self._edge_store_output
         partition = self._edge_store_partition(edge.intermediate)
         payload = self._counted_edge_serializer.serialize(edge)
@@ -214,44 +166,20 @@ class Q4FilterWorker:
         if batch_payload is not None:
             self._send_batch(client_id, partition, batch_payload, output)
 
-    def _emit_qualified_edge(
-        self,
-        client_id: int,
-        edge: Q4TransactionEdge,
-        output=None,
-    ) -> int:
-        """One qualified transaction A->M becomes two counted edges keyed by the
-        intermediary: an IN edge (M receives from A) and an OUT edge (A sends to M).
-        Both are routed to the q4_sum partition that owns their intermediary."""
+    def _emit_qualified_edge(self, client_id: int, edge: Q4TransactionEdge, output=None) -> int:
         self._emit_counted_edge(
             client_id,
-            Q4CountedEdge(
-                role=Q4_EDGE_INCOMING,
-                intermediate=edge.target,
-                endpoint=edge.source,
-                count=1,
-            ),
+            Q4CountedEdge(role=Q4_EDGE_INCOMING, intermediate=edge.target, endpoint=edge.source, count=1),
             output,
         )
         self._emit_counted_edge(
             client_id,
-            Q4CountedEdge(
-                role=Q4_EDGE_OUTGOING,
-                intermediate=edge.source,
-                endpoint=edge.target,
-                count=1,
-            ),
+            Q4CountedEdge(role=Q4_EDGE_OUTGOING, intermediate=edge.source, endpoint=edge.target, count=1),
             output,
         )
         return 2
 
-    def _send_batch(
-        self,
-        client_id: int,
-        partition: int,
-        batch_payload: bytes,
-        output=None,
-    ) -> None:
+    def _send_batch(self, client_id: int, partition: int, batch_payload: bytes, output=None) -> None:
         output = output or self._edge_store_output
         output.send(
             self._packet(MessageType.DATA, client_id, batch_payload),
@@ -259,43 +187,57 @@ class Q4FilterWorker:
         )
 
     def _flush_client_buffers(self, client_id: int, output=None) -> None:
-        for (_, partition), batch_payload in self._batcher.flush(
-            lambda k: k[0] == client_id
-        ):
+        for (_, partition), batch_payload in self._batcher.flush(lambda k: k[0] == client_id):
             self._send_batch(client_id, partition, batch_payload, output)
 
-    def _accept_edge_locked(
-        self,
-        client_id: int,
-        edge: Q4TransactionEdge,
-        output=None,
-    ) -> int:
-        """The source gate. If the source A is already qualified, emit the edge
-        downstream now. Otherwise add the target to A's distinct-target set (capped
-        at 6) and stash the edge. On the 6th distinct target A becomes qualified
-        and its stashed edges are replayed. Caller must hold self._lock."""
+    def _forward_eof_to_edge_store(
+        self, client_id: int, counts_by_partition: dict[int, int], output=None
+    ) -> None:
+        output = output or self._edge_store_output
+        for partition in range(Q4_SUM_AMOUNT):
+            expected_total = int(counts_by_partition.get(partition, 0))
+            payload = self._control_serializer.serialize(
+                ControlMessage(sender_id=ID, expected_total=expected_total, processed_count=0)
+            )
+            output.send(
+                self._packet(MessageType.EOF, client_id, payload),
+                routing_key=self._routing_key(partition),
+            )
+            logging.info(
+                "q4_filter_forward_eof | id=%s | client_id=%s | "
+                "edge_store_partition=%s | expected_total=%s",
+                ID, client_id, partition, expected_total,
+            )
+
+    def _do_broadcast(self, action: BroadcastAction, control_senders: dict) -> None:
+        if action.sleep_before > 0:
+            time.sleep(action.sleep_before)
+        for qname in action.queue_names:
+            control_senders[qname].send(action.message)
+
+    # ---------- source gate ----------
+
+    def _accept_edge_locked(self, client_id: int, edge: Q4TransactionEdge, output=None) -> int:
         states = self._states_by_client.setdefault(client_id, {})
         state = states.setdefault(edge.source, _SourceState())
-
         if state.qualified:
             return self._emit_qualified_edge(client_id, edge, output)
-
-        self._append_pending_edge(edge, state)
+        state.pending.append(edge)
         if len(state.targets) < 6:
             state.targets.add(edge.target)
-
         if len(state.targets) < 6:
             return 0
-
         state.qualified = True
         state.targets.clear()
-        return self._replay_pending_edges(client_id, state, output)
+        forwarded = 0
+        for e in state.pending:
+            forwarded += self._emit_qualified_edge(client_id, e, output)
+        state.pending = []
+        return forwarded
 
-    def _handle_data_packet(self, client_id: int, payload: bytes, output=None) -> None:
-        """Main data path. Deserialize the batch of transactions, run each one
-        through the source gate, and bookkeep processed/forwarded counts. If an
-        upstream EOF is already pending for this client, flush late data and
-        report this delta to the leader."""
+    # ---------- data path ----------
+
+    def _handle_data_packet(self, client_id: int, payload: bytes) -> None:
         transactions = self._tx_serializer.deserialize_batch(payload)
         if not transactions:
             return
@@ -304,287 +246,65 @@ class Q4FilterWorker:
         with self._lock:
             if client_id in self._closed_by_client:
                 logging.info(
-                    "q4_filter_message_for_closed_client | id=%s | "
-                    "client_id=%s",
-                    ID,
-                    client_id,
+                    "q4_filter_message_for_closed_client | id=%s | client_id=%s", ID, client_id
                 )
                 return
-
-            forwarded_count = 0
             for edge in edges:
-                forwarded_count += self._accept_edge_locked(client_id, edge, output)
-
+                self._accept_edge_locked(client_id, edge)
             self._processed_by_client[client_id] = (
                 self._processed_by_client.get(client_id, 0) + len(edges)
             )
             processed_total = self._processed_by_client[client_id]
-            forwarded_total = sum(
-                self._forwarded_by_partition_by_client.get(client_id, {}).values()
-            )
-            pending = self._pending_eof_by_client.get(client_id)
+            forwarded_total = sum(self._forwarded_by_partition_by_client.get(client_id, {}).values())
 
         if should_log_progress(processed_total):
             logging.info(
                 "q4_filter_data_batch | id=%s | client_id=%s | "
-                "batch_size=%s | forwarded_in_batch=%s | processed_total=%s | "
-                "forwarded_total=%s | pending_eof=%s",
-                ID,
-                client_id,
-                len(edges),
-                forwarded_count,
-                processed_total,
-                forwarded_total,
-                pending is not None,
+                "batch_size=%s | processed_total=%s | forwarded_total=%s",
+                ID, client_id, len(edges), processed_total, forwarded_total,
             )
 
-        if pending is not None:
-            self._flush_client_buffers(client_id, output)
-            _, leader_id = pending
-            self._report_to_leader(
-                client_id,
-                leader_id,
-                processed_count=len(edges),
-                forwarded_count=forwarded_count,
-            )
-
-        if Q4_FILTER_AMOUNT == 1:
-            self._try_forward_single_worker_eof(client_id, output)
-
-    def _handle_upstream_eof(self, client_id: int, payload: bytes) -> None:
-        """Upstream told us 'no more data for this client'. In a single-worker
-        deployment we close right away once our processed count catches up.
-        In a multi-worker deployment we snapshot our counts and report to the
-        leader, which will broadcast a flush order once every shard reports in."""
-        control = self._control_serializer.deserialize(payload)
-        expected_total = control.expected_total
-
-        if Q4_FILTER_AMOUNT == 1:
-            with self._lock:
-                if client_id in self._closed_by_client:
-                    return
-                self._pending_eof_by_client[client_id] = (expected_total, ID)
-            self._try_forward_single_worker_eof(client_id)
-            return
-
+    def _handle_upstream_eof(self, client_id: int, payload: bytes, response_queue) -> None:
+        ctrl = self._control_serializer.deserialize(payload)
         with self._lock:
             if client_id in self._closed_by_client:
                 return
-            if client_id in self._pending_eof_by_client:
-                logging.info(
-                    "q4_filter_duplicate_upstream_eof | id=%s | "
-                    "client_id=%s",
-                    ID,
-                    client_id,
-                )
-                return
-            self._pending_eof_by_client[client_id] = (expected_total, LEADER_ID)
-            processed_snapshot = self._processed_by_client.get(client_id, 0)
-            forwarded_snapshot = sum(
-                self._forwarded_by_partition_by_client.get(client_id, {}).values()
+            count = self._processed_by_client.get(client_id, 0)
+            forwarded = sum(self._forwarded_by_partition_by_client.get(client_id, {}).values())
+            action = self._coordinator.on_upstream_eof(
+                client_id, ctrl.expected_total, count, forwarded
             )
-            if ID == LEADER_ID:
-                self._leader_expected_by_client[client_id] = expected_total
-
+        if action is None:
+            return
         logging.info(
             "q4_filter_upstream_eof | id=%s | client_id=%s | "
             "expected_total=%s | processed_snapshot=%s | forwarded_snapshot=%s",
-            ID,
-            client_id,
-            expected_total,
-            processed_snapshot,
-            forwarded_snapshot,
+            ID, client_id, ctrl.expected_total, count, forwarded,
         )
-        self._report_to_leader(
-            client_id,
-            LEADER_ID,
-            processed_count=processed_snapshot,
-            forwarded_count=forwarded_snapshot,
-        )
-
-    def _try_forward_single_worker_eof(self, client_id: int, output=None) -> None:
-        """Single-shard close gate. If our processed count has reached the upstream's
-        expected total, we have everything for this client: flush and close."""
-        with self._lock:
-            pending = self._pending_eof_by_client.get(client_id)
-            if pending is None or client_id in self._closed_by_client:
-                return
-            expected_total, _ = pending
-            if self._processed_by_client.get(client_id, 0) < expected_total:
-                return
-
-        self._flush_and_close_client(client_id, output)
-
-    def _report_to_leader(
-        self,
-        client_id: int,
-        leader_id: int,
-        processed_count: int,
-        forwarded_count: int,
-    ) -> None:
-        """Send this shard's processed/forwarded snapshot to the leader's response
-        queue. Used during the multi-worker EOF agreement."""
-        response_queue = MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST,
-            f"{RESPONSE_QUEUE_PREFIX}_{leader_id}",
-        )
-        try:
-            response_queue.send(
-                self._packet(
-                    MessageType.PROCESSED_ANSWER,
-                    client_id,
-                    self._control_payload(
-                        sender_id=ID,
-                        expected_total=forwarded_count,
-                        processed_count=processed_count,
-                    ),
-                )
-            )
-        finally:
-            response_queue.close()
-
-    def _send_flush_order(self, client_id: int) -> None:
-        """Leader-only. Broadcast 'everyone, you can close this client now' on the
-        control exchange. All shards (including the leader) react to it."""
-        if self._control_sender is None:
-            raise RuntimeError("q4 source prefilter control sender is not configured")
-        self._control_sender.send(
-            self._packet(
-                MessageType.FLUSH_ORDER,
-                client_id,
-                self._control_payload(ID, 0, 0),
-            )
-        )
-
-    def _handle_leader_report(self, message: bytes, ack, nack) -> None:
-        """Leader-only. Receive one shard's PROCESSED_ANSWER, accumulate the totals,
-        and once every shard has reported in (and the processed total reached the
-        upstream's expected total) broadcast the flush order."""
-        try:
-            msg_type, client_id, payload = self._proto.unpack_packet(message)
-            if msg_type != MessageType.PROCESSED_ANSWER:
-                raise ValueError(
-                    f"unexpected q4 source prefilter response type: {msg_type}"
-                )
-
-            control = self._control_serializer.deserialize(payload)
-            should_flush = False
-            expected_total = None
-            processed_total = None
-
+        if isinstance(action, SendAnswerAction):
+            response_queue.send(action.message)
+        elif isinstance(action, FlushAction):
+            # N=1 shortcut: flush directly from data thread
             with self._lock:
-                if client_id in self._flushed_by_client:
-                    ack()
+                if client_id in self._closed_by_client:
                     return
-                self._leader_processed_by_client[client_id] = (
-                    self._leader_processed_by_client.get(client_id, 0)
-                    + control.processed_count
+                counts_by_partition = dict(
+                    self._forwarded_by_partition_by_client.get(client_id, {})
                 )
-                self._leader_forwarded_by_client[client_id] = (
-                    self._leader_forwarded_by_client.get(client_id, 0)
-                    + control.expected_total
-                )
-                expected_total = self._leader_expected_by_client.get(client_id)
-                processed_total = self._leader_processed_by_client[client_id]
+                self._states_by_client.pop(client_id, None)
+                self._processed_by_client.pop(client_id, None)
+                self._forwarded_by_partition_by_client.pop(client_id, None)
+                self._closed_by_client.add(client_id)
+            self._flush_client_buffers(client_id)
+            self._forward_eof_to_edge_store(client_id, counts_by_partition)
 
-                if expected_total is not None and processed_total >= expected_total:
-                    self._flushed_by_client.add(client_id)
-                    should_flush = True
-
-            if should_flush:
-                logging.info(
-                    "q4_filter_flush_ready | id=%s | client_id=%s | "
-                    "processed_total=%s | expected_total=%s",
-                    ID,
-                    client_id,
-                    processed_total,
-                    expected_total,
-                )
-                self._send_flush_order(client_id)
-
-            ack()
-        except Exception:
-            logging.exception("q4_filter_response_error | id=%s", ID)
-            nack()
-
-    def _handle_flush_order(self, message: bytes, ack, nack, output=None) -> None:
-        """Control consumer callback. The leader said it's safe to close this
-        client: drop our state and forward EOF to every q4_sum partition."""
-        try:
-            msg_type, client_id, _ = self._proto.unpack_packet(message)
-            if msg_type != MessageType.FLUSH_ORDER:
-                raise ValueError(
-                    f"unexpected q4 source prefilter control type: {msg_type}"
-                )
-
-            self._flush_and_close_client(client_id, output)
-            ack()
-        except Exception:
-            logging.exception("q4_filter_control_error | id=%s", ID)
-            nack()
-
-    def _forward_eof_to_edge_store(
-        self,
-        client_id: int,
-        counts_by_partition: dict[int, int],
-        output=None,
-    ) -> None:
-        """Send one EOF to every q4_sum partition. Each EOF carries the count of
-        records we shipped to that partition so q4_sum knows when it has them all."""
-        output = output or self._edge_store_output
-        for partition in range(Q4_SUM_AMOUNT):
-            expected_total = int(counts_by_partition.get(partition, 0))
-            output.send(
-                self._packet(
-                    MessageType.EOF,
-                    client_id,
-                    self._control_payload(
-                        sender_id=ID,
-                        expected_total=expected_total,
-                        processed_count=0,
-                    ),
-                ),
-                routing_key=self._routing_key(partition),
-            )
-            logging.info(
-                "q4_filter_forward_eof | id=%s | client_id=%s | "
-                "edge_store_partition=%s | expected_total=%s",
-                ID,
-                client_id,
-                partition,
-                expected_total,
-            )
-
-    def _flush_and_close_client(self, client_id: int, output=None) -> None:
-        """End-of-client cleanup. Drop all per-client state (sources still in
-        pending purgatory get discarded), flush any batched edges, and send EOF
-        to every q4_sum partition with per-partition record counts."""
-        with self._lock:
-            if client_id in self._closed_by_client:
-                return
-            counts_by_partition = dict(
-                self._forwarded_by_partition_by_client.get(client_id, {})
-            )
-            self._states_by_client.pop(client_id, None)
-            self._processed_by_client.pop(client_id, None)
-            self._forwarded_by_partition_by_client.pop(client_id, None)
-            self._pending_eof_by_client.pop(client_id, None)
-            self._leader_expected_by_client.pop(client_id, None)
-            self._leader_processed_by_client.pop(client_id, None)
-            self._leader_forwarded_by_client.pop(client_id, None)
-            self._flushed_by_client.discard(client_id)
-            self._closed_by_client.add(client_id)
-
-        self._flush_client_buffers(client_id, output)
-        self._forward_eof_to_edge_store(client_id, counts_by_partition, output)
-
-    def _on_message(self, raw, ack, nack):
+    def _on_message(self, raw, ack, nack, response_queue) -> None:
         try:
             msg_type, client_id, payload = self._proto.unpack_packet(raw)
             if msg_type == MessageType.DATA:
                 self._handle_data_packet(client_id, payload)
             elif msg_type == MessageType.EOF:
-                self._handle_upstream_eof(client_id, payload)
+                self._handle_upstream_eof(client_id, payload, response_queue)
             else:
                 raise ValueError(f"unexpected q4 source prefilter message: {msg_type}")
             ack()
@@ -592,61 +312,162 @@ class Q4FilterWorker:
             logging.exception("q4_filter_error | id=%s", ID)
             nack()
 
+    # ---------- control path ----------
+
+    def _handle_control(self, message, ack, nack, response_sender, output) -> None:
+        try:
+            msg_type, client_id, ctrl = self._coordinator.parse_message(message)
+        except Exception:
+            logging.exception("q4_filter_control_parse_error | id=%s", ID)
+            nack()
+            return
+
+        counts_by_partition = None
+        with self._lock:
+            count = self._processed_by_client.get(client_id, 0)
+            forwarded = sum(self._forwarded_by_partition_by_client.get(client_id, {}).values())
+            action = self._coordinator.process_control_message(
+                msg_type, client_id, ctrl, count, forwarded
+            )
+            if isinstance(action, FlushAction):
+                if client_id in self._closed_by_client:
+                    ack()
+                    return
+                counts_by_partition = dict(
+                    self._forwarded_by_partition_by_client.get(client_id, {})
+                )
+                self._states_by_client.pop(client_id, None)
+                self._processed_by_client.pop(client_id, None)
+                self._forwarded_by_partition_by_client.pop(client_id, None)
+                self._closed_by_client.add(client_id)
+                self._coordinator.cleanup_client(client_id)
+
+        if action is None:
+            ack()
+            return
+        if isinstance(action, SendAnswerAction):
+            response_sender.send(action.message)
+            ack()
+        elif isinstance(action, FlushAction):
+            self._flush_client_buffers(client_id, output)
+            self._forward_eof_to_edge_store(client_id, counts_by_partition, output)
+            response_sender.send(self._coordinator.build_flush_ack(client_id, 0))
+            ack()
+        else:
+            logging.warning(
+                "q4_filter_unexpected_control_action | id=%s | action=%s", ID, action
+            )
+            ack()
+
     def _start_control_consumer(self) -> None:
-        control_consumer = MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST,
-            CONTROL_EXCHANGE,
-            [CONTROL_EXCHANGE],
+        # Assign before the _stopped check so handle_sigterm can always reach this consumer.
+        control_consumer = MessageMiddlewareQueueRabbitMQ(
+            MOM_HOST, self._coordinator.my_control_queue()
         )
-        self._control_consumer = control_consumer
+        self.control_consumer = control_consumer
+        response_sender = MessageMiddlewareQueueRabbitMQ(
+            MOM_HOST, self._coordinator.response_queue_for(LEADER_ID)
+        )
         output = self._new_edge_store_output()
         try:
             if not self._stopped:
                 control_consumer.start_consuming(
-                    lambda message, ack, nack: self._handle_flush_order(
-                        message, ack, nack, output
+                    lambda msg, ack, nack: self._handle_control(
+                        msg, ack, nack, response_sender, output
                     )
                 )
         finally:
+            response_sender.close()
             output.close()
             control_consumer.close()
 
+    # ---------- response path (leader only) ----------
+
+    def _handle_response(self, message, ack, nack, control_senders, output) -> None:
+        try:
+            msg_type, client_id, ctrl = self._coordinator.parse_message(message)
+        except Exception:
+            logging.exception("q4_filter_response_parse_error | id=%s", ID)
+            nack()
+            return
+
+        counts_by_partition = None
+        with self._lock:
+            action = self._coordinator.process_control_message(msg_type, client_id, ctrl)
+            if isinstance(action, FlushAction) and action.is_leader:
+                if client_id in self._closed_by_client:
+                    ack()
+                    return
+                counts_by_partition = dict(
+                    self._forwarded_by_partition_by_client.get(client_id, {})
+                )
+                self._states_by_client.pop(client_id, None)
+                self._processed_by_client.pop(client_id, None)
+                self._forwarded_by_partition_by_client.pop(client_id, None)
+                self._closed_by_client.add(client_id)
+
+        if action is None:
+            ack()
+            return
+        if isinstance(action, BroadcastAction):
+            self._do_broadcast(action, control_senders)
+            ack()
+        elif isinstance(action, FlushAction) and action.is_leader:
+            self._flush_client_buffers(client_id, output)
+            self._forward_eof_to_edge_store(client_id, counts_by_partition, output)
+            ack()
+        else:
+            logging.warning(
+                "q4_filter_unexpected_response_action | id=%s | action=%s", ID, action
+            )
+            ack()
+
     def _start_response_consumer(self) -> None:
+        # Assign before the _stopped check so handle_sigterm can always reach this consumer.
         response_consumer = MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST,
-            self._response_queue_name,
+            MOM_HOST, self._coordinator.my_response_queue()
         )
-        self._response_consumer = response_consumer
+        self.response_consumer = response_consumer
+        control_senders = self._new_control_senders()
+        output = self._new_edge_store_output()
         try:
             if not self._stopped:
-                response_consumer.start_consuming(self._handle_leader_report)
+                response_consumer.start_consuming(
+                    lambda msg, ack, nack: self._handle_response(
+                        msg, ack, nack, control_senders, output
+                    )
+                )
         finally:
+            for q in control_senders.values():
+                q.close()
+            output.close()
             response_consumer.close()
+
+    # ---------- lifecycle ----------
 
     def start(self) -> None:
         logging.info(
-            "q4_filter_start | id=%s | amount=%s | input_queue=%s | "
-            "input_exchange=%s | edge_store_exchange=%s | sum_amount=%s",
-            ID,
-            Q4_FILTER_AMOUNT,
-            INPUT_QUEUE,
-            INPUT_EXCHANGE,
-            Q4_SUM_EXCHANGE,
-            Q4_SUM_AMOUNT,
+            "q4_filter_start | id=%s | amount=%s | input_exchange=%s | "
+            "edge_store_exchange=%s | sum_amount=%s | leader=%s",
+            ID, Q4_FILTER_AMOUNT, INPUT_EXCHANGE, Q4_SUM_EXCHANGE, Q4_SUM_AMOUNT,
+            ID == LEADER_ID,
         )
-        if Q4_FILTER_AMOUNT > 1:
-            self._control_thread = threading.Thread(target=self._start_control_consumer)
-            self._control_thread.start()
-            if ID == LEADER_ID:
-                self._response_thread = threading.Thread(
-                    target=self._start_response_consumer
-                )
-                self._response_thread.start()
+        self._control_thread = threading.Thread(target=self._start_control_consumer)
+        self._control_thread.start()
+        if self._coordinator.needs_response_consumer():
+            self._response_thread = threading.Thread(target=self._start_response_consumer)
+            self._response_thread.start()
 
+        data_response = MessageMiddlewareQueueRabbitMQ(
+            MOM_HOST, self._coordinator.response_queue_for(LEADER_ID)
+        )
         try:
             if not self._stopped:
-                self._input.start_consuming(self._on_message)
+                self._input.start_consuming(
+                    lambda msg, ack, nack: self._on_message(msg, ack, nack, data_response)
+                )
         finally:
+            data_response.close()
             self.handle_sigterm()
             if self._control_thread is not None:
                 self._control_thread.join(timeout=5)
@@ -660,23 +481,19 @@ class Q4FilterWorker:
         self._stopped = True
         logging.info("q4_filter_shutdown | id=%s", ID)
         self._input.request_stop_consuming()
-        if self._control_consumer is not None:
-            self._control_consumer.request_stop_consuming()
-        if self._response_consumer is not None:
-            self._response_consumer.request_stop_consuming()
+        if self.control_consumer is not None:
+            self.control_consumer.request_stop_consuming()
+        if self.response_consumer is not None:
+            self.response_consumer.request_stop_consuming()
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        for resource in (self._input, self._edge_store_output, self._control_sender):
+        for resource in (self._input, self._edge_store_output):
             if resource is None:
                 continue
             try:
                 resource.close()
             except Exception as e:
-                logging.warning(
-                    "q4_filter_close_error | id=%s | error=%s",
-                    ID,
-                    e,
-                )
+                logging.warning("q4_filter_close_error | id=%s | error=%s", ID, e)
