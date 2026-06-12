@@ -2,6 +2,7 @@ import socket
 import threading
 
 from monitor.heartbeat import HeartbeatReceiver
+from monitor.heartbeat import heartbeat_receiver
 
 
 class FakeDatagramSocket:
@@ -43,15 +44,15 @@ def _run_receiver(receiver: HeartbeatReceiver) -> threading.Thread:
     return thread
 
 
-def test_records_latest_timestamp_for_each_node() -> None:
+def test_records_latest_timestamp_for_each_node(monkeypatch) -> None:
     fake_socket = FakeDatagramSocket(
         [b"filter_usd_0", b"q4_sum_1", b"filter_usd_0"]
     )
+    monkeypatch.setattr(heartbeat_receiver.socket, "socket", lambda *_: fake_socket)
     timestamps = iter([10.0, 20.0, 30.0])
     receiver = HeartbeatReceiver(
         host="127.0.0.1",
         port=9876,
-        socket_factory=lambda *_: fake_socket,
         clock=lambda: next(timestamps),
     )
 
@@ -69,10 +70,10 @@ def test_records_latest_timestamp_for_each_node() -> None:
     assert (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) in fake_socket.socket_options
 
 
-def test_ignores_empty_and_invalid_utf8_payloads() -> None:
+def test_ignores_empty_and_invalid_utf8_payloads(monkeypatch) -> None:
     fake_socket = FakeDatagramSocket([b"", b"\xff", b"worker_0"])
+    monkeypatch.setattr(heartbeat_receiver.socket, "socket", lambda *_: fake_socket)
     receiver = HeartbeatReceiver(
-        socket_factory=lambda *_: fake_socket,
         clock=lambda: 42.0,
     )
 
@@ -85,9 +86,10 @@ def test_ignores_empty_and_invalid_utf8_payloads() -> None:
     assert receiver.last_seen("worker_0") == 42.0
 
 
-def test_stop_unblocks_receive_and_is_idempotent() -> None:
+def test_stop_unblocks_receive_and_is_idempotent(monkeypatch) -> None:
     fake_socket = FakeDatagramSocket()
-    receiver = HeartbeatReceiver(socket_factory=lambda *_: fake_socket)
+    monkeypatch.setattr(heartbeat_receiver.socket, "socket", lambda *_: fake_socket)
+    receiver = HeartbeatReceiver()
 
     thread = _run_receiver(receiver)
     assert fake_socket.recv_started.wait(timeout=1)
@@ -100,9 +102,14 @@ def test_stop_unblocks_receive_and_is_idempotent() -> None:
     assert fake_socket.closed
 
 
-def test_stop_before_listen_does_not_create_socket() -> None:
+def test_stop_before_listen_does_not_create_socket(monkeypatch) -> None:
     created = []
-    receiver = HeartbeatReceiver(socket_factory=lambda *_: created.append(True))
+    monkeypatch.setattr(
+        heartbeat_receiver.socket,
+        "socket",
+        lambda *_: created.append(True),
+    )
+    receiver = HeartbeatReceiver()
 
     receiver.stop()
     receiver.listen()
