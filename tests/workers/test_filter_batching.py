@@ -463,7 +463,10 @@ def test_batcher_isolates_buffers_between_clients(monkeypatch):
     assert TransactionSerializer.deserialize_batch(payload)[0].amount == 2.0
 
 
-def test_control_path_uses_thread_local_output_publishers(monkeypatch):
+def test_response_path_uses_thread_local_output_publishers(monkeypatch):
+    """_handle_flush_ack must emit EOF to thread-local output_queues, not self.output_queues."""
+    import json
+
     module = _import_filter_module(
         monkeypatch,
         configuration="Q1",
@@ -472,29 +475,22 @@ def test_control_path_uses_thread_local_output_publishers(monkeypatch):
     worker = module.FilterWorker()
 
     client_id = 123
+    # Leader (worker 0) already processed 3 forwarded items for this client.
     worker.forwarded_by_client[client_id] = 3
-    thread_control_output = FakeExchange()
-    thread_output_queues = {
-        "gateway_results_queue": FakeQueue(),
-    }
+    worker.forwarded_by_output_by_client[client_id] = {"gateway_results_queue": 3}
+    # Mark the coordinator as having started a broadcast round for this client.
+    worker.coordinator._leader_expected[client_id] = 5
 
-    control_payload = module.message_protocol.internal.ControlMessageSerializer.serialize(
-        module.message_protocol.internal.ControlMessage(
-            sender_id=1, expected_total=0, processed_count=2
-        )
-    )
-    flush_ack = InternalProtocol.create_packet(
-        msg_type=MessageType.FLUSH_ACK,
-        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-        payload=control_payload,
-    )
+    thread_output_queues = {"gateway_results_queue": FakeQueue()}
 
-    worker._process_control_message(
-        flush_ack,
-        control_output=thread_control_output,
-        output_queues=thread_output_queues,
-    )
+    # JSON FLUSH_ACK from worker 1 carrying 2 forwarded items.
+    flush_ack_payload = json.dumps(
+        {"sender_id": 1, "forwarded_by_output": {"gateway_results_queue": 2}}
+    ).encode("utf-8")
 
+    worker._handle_flush_ack(client_id, flush_ack_payload, thread_output_queues)
+
+    # EOF must go to the thread-local output, not the data-thread's own queues.
     assert len(worker.output_queues["gateway_results_queue"].sent) == 0
     assert len(thread_output_queues["gateway_results_queue"].sent) == 1
     msg_type, sent_client_id, payload = InternalProtocol.unpack_packet(
@@ -505,10 +501,14 @@ def test_control_path_uses_thread_local_output_publishers(monkeypatch):
     )
     assert msg_type == MessageType.EOF
     assert sent_client_id == client_id
-    assert forwarded_eof.expected_total == 5
+    assert forwarded_eof.expected_total == 5  # 3 leader + 2 non-leader
 
 
-def test_control_path_uses_thread_local_control_publisher(monkeypatch):
+def test_response_path_broadcasts_flush_order_via_thread_local_senders(monkeypatch):
+    """When all PROCESSED_ANSWERs arrive, FLUSH_ORDER must go through thread-local
+    control_senders, not through self._main_control_senders."""
+    from common.message_protocol.internal.common import MessageType as MT
+
     module = _import_filter_module(
         monkeypatch,
         configuration="Q1",
@@ -517,33 +517,43 @@ def test_control_path_uses_thread_local_control_publisher(monkeypatch):
     worker = module.FilterWorker()
 
     client_id = 456
+    # Simulate coordinator state: leader has expected=5, worker 1 already answered
+    # with processed_count=2.  Only worker 0's own answer is outstanding.
+    worker.coordinator._leader_expected[client_id] = 5
+    worker.coordinator._leader_processed[client_id] = 2
+    worker.coordinator._leader_responders[client_id] = {1}
     worker.processed_by_client[client_id] = 3
-    thread_control_output = FakeExchange()
-    thread_output_queues = {
-        "gateway_results_queue": FakeQueue(),
-    }
 
-    control_payload = module.message_protocol.internal.ControlMessageSerializer.serialize(
-        module.message_protocol.internal.ControlMessage(
-            sender_id=1, expected_total=5, processed_count=2
-        )
+    thread_control_senders = {
+        worker.coordinator.control_queue_for(0): FakeQueue(),
+        worker.coordinator.control_queue_for(1): FakeQueue(),
+    }
+    thread_output_queues = {"gateway_results_queue": FakeQueue()}
+
+    # PROCESSED_ANSWER from worker 0 (the leader, self-reporting count=3)
+    ctrl = module.message_protocol.internal.ControlMessage(
+        sender_id=0, expected_total=5, processed_count=3
     )
+    ctrl_bytes = module.message_protocol.internal.ControlMessageSerializer.serialize(ctrl)
     processed_answer = InternalProtocol.create_packet(
         msg_type=MessageType.PROCESSED_ANSWER,
         client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-        payload=control_payload,
+        payload=ctrl_bytes,
     )
 
-    worker._process_control_message(
+    worker._handle_response(
         processed_answer,
-        control_output=thread_control_output,
-        output_queues=thread_output_queues,
+        lambda: None,  # ack
+        lambda: None,  # nack
+        thread_control_senders,
+        thread_output_queues,
     )
 
-    assert len(worker.control_output.sent) == 0
-    assert len(thread_control_output.sent) == 1
-    msg_type, sent_client_id, _ = InternalProtocol.unpack_packet(
-        thread_control_output.sent[0]
-    )
-    assert msg_type == MessageType.FLUSH_ORDER
-    assert sent_client_id == client_id
+    # FLUSH_ORDER must be sent via thread-local control senders, not main senders.
+    for q in worker._main_control_senders.values():
+        assert len(q.sent) == 0, "FLUSH_ORDER must not use _main_control_senders"
+    for q in thread_control_senders.values():
+        assert len(q.sent) == 1
+        msg_type, sent_client_id, _ = InternalProtocol.unpack_packet(q.sent[0])
+        assert msg_type == MessageType.FLUSH_ORDER
+        assert sent_client_id == client_id

@@ -1,4 +1,5 @@
 from .middleware_rabbitmq import (
+    LazyQueue,
     MessageMiddlewareQueueRabbitMQ,
     MessageMiddlewareExchangeRabbitMQ,
     MessageMiddlewareRpcClientRabbitMQ,

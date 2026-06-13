@@ -3,6 +3,7 @@ import logging
 import pika
 import uuid
 import time
+import random
 import threading
 from common.logging_utils import get_flow_logger
 
@@ -22,6 +23,8 @@ from .middleware import (
 _DURABLE = os.environ.get("RABBITMQ_DURABLE", "false").lower() == "true"
 _DELIVERY_MODE = 2 if _DURABLE else 1
 _PREFETCH_COUNT = int(os.environ.get("PREFETCH_COUNT", "1"))
+_CONNECT_RETRIES = int(os.environ.get("RABBITMQ_CONNECT_RETRIES", "10"))
+_CONNECT_RETRY_DELAY = float(os.environ.get("RABBITMQ_CONNECT_RETRY_DELAY", "3.0"))
 
 _CONNECTION_ERRORS = (
     pika.exceptions.AMQPConnectionError,
@@ -36,17 +39,28 @@ class _RabbitMQBase:
         self._user_callback = None
         self._queue_name = None
         self._flow_logger = get_flow_logger()
-        try:
-            self._connection = pika.BlockingConnection(
-                pika.ConnectionParameters(
-                    host=host,
-                    heartbeat=0,
-                    blocked_connection_timeout=300,
+        last_exc = None
+        for attempt in range(_CONNECT_RETRIES):
+            try:
+                self._connection = pika.BlockingConnection(
+                    pika.ConnectionParameters(
+                        host=host,
+                        heartbeat=0,
+                        blocked_connection_timeout=300,
+                    )
                 )
-            )
-            self._channel = self._connection.channel()
-        except _CONNECTION_ERRORS as e:
-            raise MessageMiddlewareDisconnectedError(e)
+                self._channel = self._connection.channel()
+                return
+            except Exception as e:
+                last_exc = e
+                cap = _CONNECT_RETRY_DELAY * 10
+                delay = random.uniform(0, min(cap, _CONNECT_RETRY_DELAY * (2 ** attempt)))
+                logging.warning(
+                    "rabbitmq_connect_retry | attempt=%s/%s | retry_in=%.1fs | error=%s",
+                    attempt + 1, _CONNECT_RETRIES, delay, e,
+                )
+                time.sleep(delay)
+        raise MessageMiddlewareDisconnectedError(last_exc)
 
     def __enter__(self):
         return self
@@ -125,6 +139,29 @@ class _RabbitMQBase:
         if errors:
             raise MessageMiddlewareCloseError(errors[0])
 
+
+
+class LazyQueue:
+    """Wraps MessageMiddlewareQueueRabbitMQ with deferred connection.
+
+    The AMQP connection is not established until the first send() call.
+    Safe to close() even if never connected.
+    """
+
+    def __init__(self, host: str, queue_name: str):
+        self._host = host
+        self._queue_name = queue_name
+        self._queue: "MessageMiddlewareQueueRabbitMQ | None" = None
+
+    def send(self, message, routing_key=None):
+        if self._queue is None:
+            self._queue = MessageMiddlewareQueueRabbitMQ(self._host, self._queue_name)
+        self._queue.send(message, routing_key)
+
+    def close(self):
+        if self._queue is not None:
+            self._queue.close()
+            self._queue = None
 
 
 class MessageMiddlewareQueueRabbitMQ(_RabbitMQBase, MessageMiddlewareQueue):

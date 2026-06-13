@@ -246,6 +246,21 @@ class EofCoordinator:
         self._pending_eof.pop(client_id, None)
         self._seen_eof.discard(client_id)
 
+    def cleanup_leader_state(self, client_id: int) -> None:
+        """Limpiar estado del líder cuando los FLUSH_ACKs se manejan manualmente.
+
+        Llamar bajo lock después de procesar todos los FLUSH_ACKs sin pasar por
+        process_control_message(FLUSH_ACK, ...).  Necesario cuando el worker usa
+        un payload de FLUSH_ACK no estándar (ej. JSON con desglose por output).
+        """
+        self._flush_acks.pop(client_id, None)
+        self._forwarded_from_acks.pop(client_id, None)
+        self._leader_expected.pop(client_id, None)
+        if self._mode == "broadcast":
+            self._pending_eof.pop(client_id, None)
+        else:
+            self._seen_eof.discard(client_id)
+
     # ─── API principal ────────────────────────────────────────────────────────
 
     def on_upstream_eof(

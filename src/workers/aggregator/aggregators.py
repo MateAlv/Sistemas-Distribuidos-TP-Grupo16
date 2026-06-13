@@ -11,7 +11,7 @@ from common.message_protocol.internal.common import MessageType
 from common.message_protocol.internal.common.control_message import ControlMessage
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal import InternalProtocol
-from common.middleware import MessageMiddlewareQueueRabbitMQ
+from common.middleware import LazyQueue, MessageMiddlewareQueueRabbitMQ
 
 try:
     from processors import create_aggregator_processor
@@ -87,7 +87,7 @@ class AggregatorWorker:
 
     def _new_control_senders(self):
         return {
-            self._coordinator.control_queue_for(i): MessageMiddlewareQueueRabbitMQ(
+            self._coordinator.control_queue_for(i): LazyQueue(
                 MOM_HOST, self._coordinator.control_queue_for(i)
             )
             for i in range(AGGREGATION_AMOUNT)

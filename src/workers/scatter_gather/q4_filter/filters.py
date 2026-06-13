@@ -28,6 +28,7 @@ from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import (
     ControlMessageSerializer,
 )
+from common.middleware import LazyQueue
 from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
     MessageMiddlewareQueueRabbitMQ,
@@ -118,7 +119,7 @@ class Q4FilterWorker:
 
     def _new_control_senders(self) -> dict:
         return {
-            self._coordinator.control_queue_for(i): MessageMiddlewareQueueRabbitMQ(
+            self._coordinator.control_queue_for(i): LazyQueue(
                 MOM_HOST, self._coordinator.control_queue_for(i)
             )
             for i in range(Q4_FILTER_AMOUNT)

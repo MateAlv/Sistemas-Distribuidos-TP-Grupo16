@@ -5,6 +5,7 @@ import time
 
 from common.eof_coordinator import EofCoordinator, BroadcastAction, FlushAction, SendAnswerAction
 from common.middleware import (
+    LazyQueue,
     MessageMiddlewareQueueRabbitMQ,
     MessageMiddlewareExchangeRabbitMQ,
     MessageMiddlewareRpcClientRabbitMQ,
@@ -114,7 +115,7 @@ class FilterQ5UsdWorker:
 
     def _new_control_senders(self) -> dict:
         return {
-            self.coordinator.control_queue_for(i): MessageMiddlewareQueueRabbitMQ(
+            self.coordinator.control_queue_for(i): LazyQueue(
                 MOM_HOST, self.coordinator.control_queue_for(i)
             )
             for i in range(FILTER_Q5_USD_AMOUNT)
@@ -122,7 +123,7 @@ class FilterQ5UsdWorker:
 
     def _new_response_senders(self) -> dict:
         return {
-            self.coordinator.response_queue_for(i): MessageMiddlewareQueueRabbitMQ(
+            self.coordinator.response_queue_for(i): LazyQueue(
                 MOM_HOST, self.coordinator.response_queue_for(i)
             )
             for i in range(FILTER_Q5_USD_AMOUNT)
