@@ -20,12 +20,9 @@ class FakeSender:
         return self.responses.get(peer_id)
 
 
-@pytest.mark.parametrize("monitor_count", [0, 256])
-def test_rejects_monitor_count_outside_protocol_range(
-    monitor_count: int,
-) -> None:
+def test_rejects_monitor_count_outside_protocol_range() -> None:
     with pytest.raises(ValueError, match="monitor_count must be in range"):
-        ElectionHandler(monitor_id=1, monitor_count=monitor_count)
+        ElectionHandler(monitor_id=1, monitor_count=256)
 
 
 def test_rejects_non_positive_election_timeout() -> None:

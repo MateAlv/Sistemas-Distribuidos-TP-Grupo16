@@ -5,15 +5,13 @@ from collections.abc import Callable, Iterable
 
 from monitor.election import ElectionHandler
 from monitor.heartbeat import HeartbeatReceiver
-from monitor.recovery import RecoveryFn, docker_start
+from monitor.recovery import docker_start
 
 
 DEFAULT_CHECK_INTERVAL = 3.0
 DEFAULT_MAX_MISSED = 3
 DEFAULT_COORDINATOR_TIMEOUT = 10.0
 THREAD_JOIN_TIMEOUT = 5.0
-
-Clock = Callable[[], float]
 
 
 class Monitor:
@@ -22,11 +20,11 @@ class Monitor:
         election_handler: ElectionHandler,
         heartbeat_receiver: HeartbeatReceiver,
         nodes_to_watch: Iterable[str],
-        recovery: RecoveryFn = docker_start,
+        recovery: Callable[[str], None] = docker_start,
         check_interval: float = DEFAULT_CHECK_INTERVAL,
         max_missed: int = DEFAULT_MAX_MISSED,
         coordinator_timeout: float = DEFAULT_COORDINATOR_TIMEOUT,
-        clock: Clock = time.time,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         if check_interval <= 0:
             raise ValueError("check_interval must be greater than 0")
@@ -45,18 +43,33 @@ class Monitor:
         self._clock = clock
 
         self._stop_event = threading.Event()
-        self._threads: list[threading.Thread] = []
         self._last_recovery_by_node: dict[str, float] = {}
 
     def run(self) -> None:
-        self._start_listeners()
+        threads = [
+            threading.Thread(
+                target=self._election_handler.listen_for_election,
+                name="monitor-election-listener",
+            ),
+            threading.Thread(
+                target=self._heartbeat_receiver.listen,
+                name="monitor-heartbeat-receiver",
+            ),
+        ]
+        for t in threads:
+            t.start()
         try:
             while not self._stop_event.is_set():
                 self.run_once()
                 self._stop_event.wait(self._check_interval)
         finally:
             self.stop()
-            self._join_listeners()
+            for t in threads:
+                t.join(timeout=THREAD_JOIN_TIMEOUT)
+                if t.is_alive():
+                    logging.warning(
+                        "monitor_thread_join_timeout | thread=%s", t.name
+                    )
 
     def run_once(self) -> None:
         if self._stop_event.is_set():
@@ -67,17 +80,13 @@ class Monitor:
             return
 
         if not self._election_handler.leader_is_running():
-            self._election_handler.wait_for_new_leader(
-                self._coordinator_timeout
-            )
+            self._election_handler.wait_for_new_leader(self._coordinator_timeout)
             return
 
         if self._leader_is_alive():
             return
 
-        self._election_handler.wait_for_new_leader(
-            self._coordinator_timeout
-        )
+        self._election_handler.wait_for_new_leader(self._coordinator_timeout)
 
     def stop(self) -> None:
         if self._stop_event.is_set():
@@ -85,32 +94,6 @@ class Monitor:
         self._stop_event.set()
         self._election_handler.stop()
         self._heartbeat_receiver.stop()
-
-    def _start_listeners(self) -> None:
-        if self._threads:
-            return
-
-        self._threads = [
-            threading.Thread(
-                target=self._election_handler.listen_for_election,
-                name="monitor-election-listener",
-            ),
-            threading.Thread(
-                target=self._heartbeat_receiver.listen,
-                name="monitor-heartbeat-receiver",
-            ),
-        ]
-        for thread in self._threads:
-            thread.start()
-
-    def _join_listeners(self) -> None:
-        for thread in self._threads:
-            thread.join(timeout=THREAD_JOIN_TIMEOUT)
-            if thread.is_alive():
-                logging.warning(
-                    "monitor_thread_join_timeout | thread=%s",
-                    thread.name,
-                )
 
     def _leader_is_alive(self) -> bool:
         leader_id = self._election_handler.get_leader()
@@ -124,30 +107,19 @@ class Monitor:
                 continue
 
             last_recovery = self._last_recovery_by_node.get(node_id)
-            if (
-                last_recovery is not None
-                and now - last_recovery <= self._failure_timeout
-            ):
+            if last_recovery is not None and now - last_recovery <= self._failure_timeout:
                 continue
 
-            logging.warning(
-                "monitor_node_failed | node_id=%s",
-                node_id,
-            )
+            logging.warning("monitor_node_failed | node_id=%s", node_id)
             try:
                 self._recovery(node_id)
             except Exception:
                 logging.exception(
-                    "monitor_recovery_unexpected_error | node_id=%s",
-                    node_id,
+                    "monitor_recovery_unexpected_error | node_id=%s", node_id
                 )
             self._last_recovery_by_node[node_id] = now
 
-    def _is_failed(
-        self,
-        node_id: str,
-        now: float | None = None,
-    ) -> bool:
+    def _is_failed(self, node_id: str, now: float | None = None) -> bool:
         last_seen = self._heartbeat_receiver.last_seen(node_id)
         if last_seen is None:
             return True

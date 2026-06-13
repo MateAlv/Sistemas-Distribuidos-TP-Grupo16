@@ -1,14 +1,11 @@
 import logging
 import os
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 
 
 DEFAULT_COMPOSE_PROJECT_NAME = "distribuidos"
 PINNED_CONTAINER_NAMES_ENV = "PINNED_CONTAINER_NAMES"
-
-RecoveryFn = Callable[[str], None]
-CommandRunner = Callable[..., subprocess.CompletedProcess]
 
 
 def container_name(
@@ -30,7 +27,6 @@ def container_name(
 
 def docker_start(
     node_id: str,
-    runner: CommandRunner = subprocess.run,
     env: Mapping[str, str] = os.environ,
 ) -> None:
     container = container_name(node_id, env)
@@ -41,7 +37,7 @@ def docker_start(
     )
 
     try:
-        result = runner(
+        result = subprocess.run(
             ["docker", "start", container],
             check=False,
             capture_output=True,

@@ -3,6 +3,7 @@ import subprocess
 
 import pytest
 
+import monitor.recovery as recovery_module
 from monitor.recovery import (
     DEFAULT_COMPOSE_PROJECT_NAME,
     container_name,
@@ -41,42 +42,33 @@ def test_container_name_supports_pinned_compose_names() -> None:
     )
 
 
-def test_docker_start_invokes_docker_without_raising_on_failure() -> None:
+def test_docker_start_invokes_docker_without_raising_on_failure(monkeypatch) -> None:
     calls = []
 
-    def runner(command, **kwargs):
+    def fake_run(command, **kwargs):
         calls.append((command, kwargs))
-        return subprocess.CompletedProcess(
-            command,
-            returncode=1,
-            stdout="",
-            stderr="container is already running",
-        )
+        return subprocess.CompletedProcess(command, returncode=1, stdout="", stderr="container is already running")
 
-    docker_start(
-        "filter_usd_0",
-        runner=runner,
-        env={"COMPOSE_PROJECT_NAME": "grupo16"},
-    )
+    monkeypatch.setattr(recovery_module.subprocess, "run", fake_run)
+
+    docker_start("filter_usd_0", env={"COMPOSE_PROJECT_NAME": "grupo16"})
 
     assert calls == [
         (
             ["docker", "start", "grupo16-filter_usd_0-1"],
-            {
-                "check": False,
-                "capture_output": True,
-                "text": True,
-            },
+            {"check": False, "capture_output": True, "text": True},
         )
     ]
 
 
-def test_docker_start_logs_os_error(caplog) -> None:
-    def runner(*_args, **_kwargs):
+def test_docker_start_logs_os_error(monkeypatch, caplog) -> None:
+    def fake_run(*_args, **_kwargs):
         raise FileNotFoundError("docker not found")
 
+    monkeypatch.setattr(recovery_module.subprocess, "run", fake_run)
+
     with caplog.at_level(logging.ERROR):
-        docker_start("worker_0", runner=runner, env={})
+        docker_start("worker_0", env={})
 
     assert "monitor_recovery_error" in caplog.text
     assert "docker not found" in caplog.text

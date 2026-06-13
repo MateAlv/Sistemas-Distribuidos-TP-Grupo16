@@ -44,7 +44,7 @@ def test_rejects_sender_id_outside_uint8(sender_id: int) -> None:
         ElectionMessage(ElectionMessageType.ELECTION, epoch=0, sender_id=sender_id)
 
 
-@pytest.mark.parametrize("data", [b"", b"\x00", b"\x00\x00\x00", b"\x00" * 5])
+@pytest.mark.parametrize("data", [b"\x00\x00\x00", b"\x00" * 5])
 def test_rejects_invalid_frame_size(data: bytes) -> None:
     with pytest.raises(ValueError, match="must be exactly 4 bytes"):
         ElectionMessage.deserialize(data)

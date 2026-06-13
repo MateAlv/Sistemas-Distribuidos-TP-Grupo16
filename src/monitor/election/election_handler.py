@@ -9,18 +9,7 @@ from monitor.election.messages import ElectionMessage, ElectionMessageType
 DEFAULT_ELECTION_HOST = "0.0.0.0"
 DEFAULT_ELECTION_PORT = 9001
 DEFAULT_ELECTION_TIMEOUT = 5.0
-DEFAULT_COORDINATOR_TIMEOUT = 10.0
 LISTEN_BACKLOG = 5
-
-PeerHostFn = Callable[[int], str]
-MessageSender = Callable[
-    [int, ElectionMessage, bool],
-    ElectionMessage | None,
-]
-
-
-def default_peer_host(monitor_id: int) -> str:
-    return f"monitor_{monitor_id}"
 
 
 class ElectionHandler:
@@ -31,8 +20,7 @@ class ElectionHandler:
         host: str = DEFAULT_ELECTION_HOST,
         port: int = DEFAULT_ELECTION_PORT,
         election_timeout: float = DEFAULT_ELECTION_TIMEOUT,
-        peer_host: PeerHostFn = default_peer_host,
-        message_sender: MessageSender | None = None,
+        message_sender: Callable[[int, ElectionMessage, bool], ElectionMessage | None] | None = None,
     ) -> None:
         if monitor_count < 1 or monitor_count > 255:
             raise ValueError("monitor_count must be in range [1, 255]")
@@ -46,7 +34,6 @@ class ElectionHandler:
         self._host = host
         self._port = port
         self._election_timeout = election_timeout
-        self._peer_host = peer_host
         self._message_sender = message_sender or self._send_tcp_message
 
         self._leader = monitor_count
@@ -159,7 +146,14 @@ class ElectionHandler:
 
                 with connection:
                     connection.settimeout(self._election_timeout)
-                    self._handle_connection(connection)
+                    try:
+                        self._handle_connection(connection)
+                    except (OSError, ValueError) as exc:
+                        logging.warning(
+                            "monitor_election_connection_error | monitor_id=%s | error=%s",
+                            self._monitor_id,
+                            exc,
+                        )
         finally:
             with self._server_lock:
                 if self._server_socket is server:
@@ -168,10 +162,7 @@ class ElectionHandler:
 
     def i_am_leader(self) -> bool:
         with self._leader_lock:
-            return (
-                self._leader_running
-                and self._leader == self._monitor_id
-            )
+            return self._leader_running and self._leader == self._monitor_id
 
     def get_leader(self) -> int:
         with self._leader_lock:
@@ -213,9 +204,7 @@ class ElectionHandler:
         self.send_coordinator()
 
     def _handle_connection(self, connection: socket.socket) -> None:
-        message = ElectionMessage.deserialize(
-            _recv_exact(connection, 4)
-        )
+        message = ElectionMessage.deserialize(_recv_exact(connection, 4))
         response, should_start_election = self._handle_message(message)
         if response is not None:
             connection.sendall(response.serialize())
@@ -255,7 +244,7 @@ class ElectionHandler:
         message: ElectionMessage,
         expect_response: bool,
     ) -> ElectionMessage | None:
-        address = (self._peer_host(peer_id), self._port)
+        address = (f"monitor_{peer_id}", self._port)
         with socket.create_connection(
             address,
             timeout=self._election_timeout,

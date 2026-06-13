@@ -21,18 +21,10 @@ class ElectionMessage:
     sender_id: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.message_type, ElectionMessageType):
-            raise TypeError("message_type must be an ElectionMessageType")
-        if not isinstance(self.epoch, int):
-            raise TypeError("epoch must be an int")
         if not 0 <= self.epoch <= _MAX_EPOCH:
             raise ValueError(f"epoch must be in range [0, {_MAX_EPOCH}]")
-        if not isinstance(self.sender_id, int):
-            raise TypeError("sender_id must be an int")
         if not 0 <= self.sender_id <= _MAX_SENDER_ID:
-            raise ValueError(
-                f"sender_id must be in range [0, {_MAX_SENDER_ID}]"
-            )
+            raise ValueError(f"sender_id must be in range [0, {_MAX_SENDER_ID}]")
 
     def serialize(self) -> bytes:
         return struct.pack(
