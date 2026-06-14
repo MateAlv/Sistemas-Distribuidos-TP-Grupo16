@@ -226,6 +226,42 @@ monitor:
   enabled: false
 ```
 
+Ver solamente los logs de las réplicas del monitor:
+
+```bash
+make monitor-logs
+```
+
+Ver el estado de los containers y los eventos de los últimos cinco minutos:
+
+```bash
+make monitor-status
+```
+
+Para comprobar la recuperación de punta a punta, elegir un worker que esté
+corriendo. El comando lo detiene y espera que el líder lo inicie nuevamente:
+
+```bash
+make monitor-test-recovery CONTAINER=filter_usd_0
+```
+
+El resultado esperado incluye `monitor_node_failed`,
+`monitor_recovery_start`, `monitor_recovery_success` y finaliza con `PASS`.
+El timeout puede ajustarse con `MONITOR_TEST_TIMEOUT`; debe ser mayor que
+`check_interval * max_missed`.
+
+Para probar la elección de líder con Chaos Monkey, primero habilitar
+`settings.chaos.enabled` y levantar el sistema. Luego ejecutar:
+
+```bash
+make monitor-test-election
+```
+
+El comando mata al monitor de mayor ID, comprueba que el siguiente monitor gane
+la elección, que recupere al líder caído y que el cluster vuelva a converger en
+el monitor de mayor ID. El límite de espera se configura con
+`MONITOR_FAILOVER_TIMEOUT`.
+
 ## Outputs
 
 Los resultados se escriben en `data/output/`:

@@ -57,6 +57,11 @@ class ElectionHandler:
                 self._leader_running = False
                 epoch = self._epoch
 
+            logging.info(
+                "monitor_election_started | monitor_id=%s | epoch=%s",
+                self._monitor_id,
+                epoch,
+            )
             election = ElectionMessage(
                 ElectionMessageType.ELECTION,
                 epoch,
@@ -216,14 +221,40 @@ class ElectionHandler:
         message: ElectionMessage,
     ) -> tuple[ElectionMessage | None, bool]:
         with self._leader_lock:
-            if message.epoch < self._epoch:
-                return None, False
-
             if message.message_type == ElectionMessageType.COORDINATOR:
-                self._epoch = message.epoch
+                if (
+                    message.epoch < self._epoch
+                    and message.sender_id <= self._leader
+                ):
+                    logging.info(
+                        "monitor_coordinator_ignored | monitor_id=%s | "
+                        "leader_id=%s | epoch=%s | sender_id=%s | "
+                        "announced_epoch=%s",
+                        self._monitor_id,
+                        self._leader,
+                        self._epoch,
+                        message.sender_id,
+                        message.epoch,
+                    )
+                    return None, False
+
+                # A restarted higher-ID monitor must be able to rejoin even
+                # though epochs are intentionally not persisted.
+                self._epoch = max(self._epoch, message.epoch)
                 self._leader = message.sender_id
                 self._leader_running = True
                 self._leader_semaphore.release()
+                logging.info(
+                    "monitor_coordinator_accepted | monitor_id=%s | "
+                    "leader_id=%s | epoch=%s | announced_epoch=%s",
+                    self._monitor_id,
+                    message.sender_id,
+                    self._epoch,
+                    message.epoch,
+                )
+                return None, False
+
+            if message.epoch < self._epoch:
                 return None, False
 
             if message.message_type == ElectionMessageType.ELECTION:

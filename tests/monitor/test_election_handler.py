@@ -141,6 +141,90 @@ def test_stale_message_is_ignored() -> None:
     assert handler.get_leader() == 3
 
 
+def test_restarted_higher_monitor_can_reclaim_leadership() -> None:
+    handler = ElectionHandler(
+        monitor_id=2,
+        monitor_count=3,
+        message_sender=FakeSender(),
+    )
+    handler._handle_message(
+        ElectionMessage(
+            ElectionMessageType.COORDINATOR,
+            epoch=5,
+            sender_id=2,
+        )
+    )
+
+    response, should_elect = handler._handle_message(
+        ElectionMessage(
+            ElectionMessageType.COORDINATOR,
+            epoch=1,
+            sender_id=3,
+        )
+    )
+
+    assert response is None
+    assert not should_elect
+    assert handler.get_leader() == 3
+    assert handler.leader_is_running()
+    assert handler._epoch == 5
+
+
+def test_stale_lower_coordinator_does_not_replace_running_leader() -> None:
+    handler = ElectionHandler(
+        monitor_id=1,
+        monitor_count=3,
+        message_sender=FakeSender(),
+    )
+    handler._handle_message(
+        ElectionMessage(
+            ElectionMessageType.COORDINATOR,
+            epoch=5,
+            sender_id=3,
+        )
+    )
+
+    handler._handle_message(
+        ElectionMessage(
+            ElectionMessageType.COORDINATOR,
+            epoch=4,
+            sender_id=2,
+        )
+    )
+
+    assert handler.get_leader() == 3
+    assert handler._epoch == 5
+
+
+def test_stale_lower_coordinator_is_ignored_during_election() -> None:
+    handler = ElectionHandler(
+        monitor_id=1,
+        monitor_count=3,
+        message_sender=FakeSender(),
+    )
+    handler._handle_message(
+        ElectionMessage(
+            ElectionMessageType.COORDINATOR,
+            epoch=5,
+            sender_id=3,
+        )
+    )
+    with handler._leader_lock:
+        handler._leader_running = False
+
+    handler._handle_message(
+        ElectionMessage(
+            ElectionMessageType.COORDINATOR,
+            epoch=4,
+            sender_id=2,
+        )
+    )
+
+    assert handler.get_leader() == 3
+    assert not handler.leader_is_running()
+    assert handler._epoch == 5
+
+
 def test_running_monitor_answers_election_and_starts_own_round() -> None:
     sender = FakeSender()
     handler = ElectionHandler(

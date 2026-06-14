@@ -16,6 +16,7 @@ class FakeElectionHandler:
         self.leader_id = leader_id
         self.leader_running = leader if leader_running is None else leader_running
         self.wait_calls = []
+        self.start_calls = 0
         self.listen_started = threading.Event()
         self.listen_stopped = threading.Event()
         self.stop_calls = 0
@@ -32,6 +33,9 @@ class FakeElectionHandler:
     def wait_for_new_leader(self, timeout: float) -> bool:
         self.wait_calls.append(timeout)
         return False
+
+    def start_election(self) -> None:
+        self.start_calls += 1
 
     def listen_for_election(self) -> None:
         self.listen_started.set()
@@ -196,7 +200,7 @@ def test_follower_waits_when_leader_heartbeat_is_fresh() -> None:
     assert election.wait_calls == []
 
 
-def test_follower_waits_for_coordinator_when_leader_is_expired() -> None:
+def test_follower_starts_election_when_leader_is_expired() -> None:
     election = FakeElectionHandler(
         leader=False,
         leader_id=2,
@@ -214,7 +218,8 @@ def test_follower_waits_for_coordinator_when_leader_is_expired() -> None:
 
     monitor.run_once()
 
-    assert election.wait_calls == [7]
+    assert election.start_calls == 1
+    assert election.wait_calls == []
 
 
 def test_follower_waits_for_first_coordinator_even_with_fresh_heartbeat() -> None:

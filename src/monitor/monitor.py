@@ -86,7 +86,7 @@ class Monitor:
         if self._leader_is_alive():
             return
 
-        self._election_handler.wait_for_new_leader(self._coordinator_timeout)
+        self._election_handler.start_election()
 
     def stop(self) -> None:
         if self._stop_event.is_set():
