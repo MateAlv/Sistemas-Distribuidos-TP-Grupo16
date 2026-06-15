@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 from monitor.election.epoch_store import EpochStore, MAX_EPOCH
 from monitor.election.messages import ElectionMessage, ElectionMessageType
+from monitor.election.state import ElectionState
 
 
 DEFAULT_ELECTION_HOST = "0.0.0.0"
@@ -41,6 +42,7 @@ class ElectionHandler:
 
         self._leader = monitor_count
         self._epoch = epoch_store.load() if epoch_store is not None else 0
+        self._state = ElectionState.FOLLOWER
         self._election_generation = 0
         self._leader_running = False
         self._leader_lock = threading.Lock()
@@ -61,6 +63,10 @@ class ElectionHandler:
                 self._election_generation += 1
                 generation = self._election_generation
                 self._leader_running = False
+                self._transition_state_locked(
+                    ElectionState.CANDIDATE,
+                    reason="election_started",
+                )
                 epoch = self._epoch
 
             logging.info(
@@ -185,6 +191,10 @@ class ElectionHandler:
         with self._leader_lock:
             return self._leader
 
+    def get_state(self) -> ElectionState:
+        with self._leader_lock:
+            return self._state
+
     def leader_is_running(self) -> bool:
         with self._leader_lock:
             return self._leader_running
@@ -230,6 +240,10 @@ class ElectionHandler:
             self._set_epoch_locked(self._epoch + 1)
             self._leader = self._monitor_id
             self._leader_running = True
+            self._transition_state_locked(
+                ElectionState.LEADER,
+                reason="election_won",
+            )
             epoch = self._epoch
 
         logging.info(
@@ -286,6 +300,10 @@ class ElectionHandler:
                 self._set_epoch_locked(max(self._epoch, message.epoch))
                 self._leader = message.sender_id
                 self._leader_running = True
+                self._transition_state_locked(
+                    ElectionState.FOLLOWER,
+                    reason="coordinator_accepted",
+                )
                 self._leader_semaphore.release()
                 logging.info(
                     "monitor_coordinator_accepted | monitor_id=%s | "
@@ -315,6 +333,26 @@ class ElectionHandler:
         if self._epoch_store is not None:
             self._epoch_store.save(epoch)
         self._epoch = epoch
+
+    def _transition_state_locked(
+        self,
+        state: ElectionState,
+        reason: str,
+    ) -> None:
+        if state == self._state:
+            return
+        previous = self._state
+        self._state = state
+        logging.info(
+            "monitor_state_changed | monitor_id=%s | previous=%s | "
+            "current=%s | epoch=%s | leader_id=%s | reason=%s",
+            self._monitor_id,
+            previous.value,
+            state.value,
+            self._epoch,
+            self._leader if self._leader_running else "-",
+            reason,
+        )
 
     def _send_tcp_message(
         self,

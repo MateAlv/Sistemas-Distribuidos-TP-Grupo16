@@ -6,6 +6,7 @@ from monitor.election import (
     ElectionHandler,
     ElectionMessage,
     ElectionMessageType,
+    ElectionState,
 )
 from monitor.election.epoch_store import EpochStore, MAX_EPOCH
 
@@ -49,6 +50,7 @@ def test_highest_active_monitor_wins_and_announces_coordinator() -> None:
 
     assert handler.i_am_leader()
     assert handler.get_leader() == 3
+    assert handler.get_state() == ElectionState.LEADER
     assert [
         (peer_id, message.message_type, expect_response)
         for peer_id, message, expect_response in sender.sent
@@ -172,6 +174,7 @@ def test_monitor_waits_when_higher_monitor_answers_ok() -> None:
     assert not handler.i_am_leader()
     assert not handler.leader_is_running()
     assert handler.get_leader() == 3
+    assert handler.get_state() == ElectionState.CANDIDATE
 
 
 def test_coordinator_updates_leader_and_releases_waiter() -> None:
@@ -194,6 +197,7 @@ def test_coordinator_updates_leader_and_releases_waiter() -> None:
     assert handler.get_leader() == 2
     assert handler.leader_is_running()
     assert not handler.i_am_leader()
+    assert handler.get_state() == ElectionState.FOLLOWER
     assert handler.wait_for_new_leader(timeout=0)
 
 
