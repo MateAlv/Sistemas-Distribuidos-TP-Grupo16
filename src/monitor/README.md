@@ -71,6 +71,23 @@ monitor:
 Al comenzar, las réplicas realizan una elección Bully. La réplica activa con
 mayor ID gana y anuncia un mensaje `COORDINATOR`.
 
+Cada réplica persiste el mayor epoch conocido en su volumen individual:
+
+```text
+data/monitor/monitor_<id>/epoch.json
+```
+
+La escritura usa un archivo temporal, `fsync` y reemplazo atómico. Al
+reiniciarse, un monitor recupera ese epoch antes de participar. Durante una
+elección consulta a todas las réplicas disponibles para aprender el máximo
+epoch del cluster; solamente una respuesta de un ID mayor bloquea su
+candidatura. Si gana, anuncia `max_epoch + 1`.
+
+Un `COORDINATOR` se acepta si tiene un epoch mayor, o si tiene el mismo epoch y
+no reemplaza a un líder de ID superior. Los anuncios con epoch menor se
+ignoran. Una coordinación aceptada invalida cualquier elección local que
+todavía estuviera en curso.
+
 El ciclo de cada réplica funciona así:
 
 1. Si es líder, revisa los heartbeats y recupera los nodos caídos.
@@ -87,6 +104,8 @@ monitor_election_started
 monitor_election_won
 monitor_election_cancelled
 monitor_coordinator_accepted
+monitor_coordinator_ignored
+monitor_state_changed
 monitor_node_failed
 monitor_recovery_start
 monitor_recovery_success
@@ -361,7 +380,24 @@ pytest tests/monitor
 ```
 
 Los tests cubren configuración, recepción de heartbeats, mensajes binarios,
-elección, coordinación, detección de fallas y recuperación.
+persistencia y sincronización de epochs, elecciones concurrentes, coordinación,
+detección de fallas y recuperación.
+
+## Garantías y límites
+
+El protocolo busca que:
+
+- el epoch nunca disminuya después de reiniciar una réplica;
+- un nuevo líder anuncie un epoch mayor al máximo observado;
+- todas las réplicas converjan al mismo par `(leader_id, epoch)`;
+- elecciones anteriores no sobrescriban un coordinador ya aceptado;
+- un anuncio retrasado con epoch viejo no reemplace al líder vigente.
+
+El monitor implementa detección de fallas por timeout y crash-recovery. No
+implementa consenso por quórum y puede producir falsos positivos ante pausas o
+particiones de red. La recuperación del contenedor tampoco recupera por sí sola
+el estado de negocio de los workers; esa garantía corresponde al WAL de cada
+worker.
 
 ## Cerrar las pruebas
 
