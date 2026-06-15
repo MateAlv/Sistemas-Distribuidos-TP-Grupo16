@@ -7,6 +7,7 @@ from monitor.election import (
     ElectionMessage,
     ElectionMessageType,
 )
+from monitor.election.epoch_store import EpochStore, MAX_EPOCH
 
 
 class FakeSender:
@@ -56,6 +57,74 @@ def test_highest_active_monitor_wins_and_announces_coordinator() -> None:
         (2, ElectionMessageType.COORDINATOR, False),
     ]
     assert all(message.epoch == 1 for _, message, _ in sender.sent)
+
+
+def test_epoch_survives_handler_restart(tmp_path) -> None:
+    state_path = tmp_path / "epoch.json"
+    first_handler = ElectionHandler(
+        monitor_id=3,
+        monitor_count=3,
+        message_sender=FakeSender(),
+        epoch_store=EpochStore(state_path),
+    )
+    first_handler._handle_message(
+        ElectionMessage(
+            ElectionMessageType.COORDINATOR,
+            epoch=5,
+            sender_id=2,
+        )
+    )
+
+    sender = FakeSender()
+    restarted_handler = ElectionHandler(
+        monitor_id=3,
+        monitor_count=3,
+        message_sender=sender,
+        epoch_store=EpochStore(state_path),
+    )
+    restarted_handler.start_election()
+
+    assert restarted_handler.i_am_leader()
+    assert restarted_handler._epoch == 6
+    assert all(message.epoch == 6 for _, message, _ in sender.sent)
+
+
+def test_coordinator_epoch_is_persisted(tmp_path) -> None:
+    state_path = tmp_path / "epoch.json"
+    handler = ElectionHandler(
+        monitor_id=1,
+        monitor_count=3,
+        message_sender=FakeSender(),
+        epoch_store=EpochStore(state_path),
+    )
+
+    handler._handle_message(
+        ElectionMessage(
+            ElectionMessageType.COORDINATOR,
+            epoch=8,
+            sender_id=3,
+        )
+    )
+
+    assert EpochStore(state_path).load() == 8
+
+
+def test_monitor_does_not_lead_after_epoch_is_exhausted(tmp_path) -> None:
+    state_path = tmp_path / "epoch.json"
+    EpochStore(state_path).save(MAX_EPOCH)
+    sender = FakeSender()
+    handler = ElectionHandler(
+        monitor_id=1,
+        monitor_count=1,
+        message_sender=sender,
+        epoch_store=EpochStore(state_path),
+    )
+
+    with pytest.raises(RuntimeError, match="epoch exhausted"):
+        handler.start_election()
+
+    assert not handler.i_am_leader()
+    assert sender.sent == []
 
 
 def test_monitor_wins_when_all_higher_monitors_are_unavailable() -> None:

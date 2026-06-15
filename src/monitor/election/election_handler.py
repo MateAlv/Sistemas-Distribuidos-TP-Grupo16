@@ -3,6 +3,7 @@ import socket
 import threading
 from collections.abc import Callable
 
+from monitor.election.epoch_store import EpochStore, MAX_EPOCH
 from monitor.election.messages import ElectionMessage, ElectionMessageType
 
 
@@ -21,6 +22,7 @@ class ElectionHandler:
         port: int = DEFAULT_ELECTION_PORT,
         election_timeout: float = DEFAULT_ELECTION_TIMEOUT,
         message_sender: Callable[[int, ElectionMessage, bool], ElectionMessage | None] | None = None,
+        epoch_store: EpochStore | None = None,
     ) -> None:
         if monitor_count < 1 or monitor_count > 255:
             raise ValueError("monitor_count must be in range [1, 255]")
@@ -35,9 +37,10 @@ class ElectionHandler:
         self._port = port
         self._election_timeout = election_timeout
         self._message_sender = message_sender or self._send_tcp_message
+        self._epoch_store = epoch_store
 
         self._leader = monitor_count
-        self._epoch = 0
+        self._epoch = epoch_store.load() if epoch_store is not None else 0
         self._election_generation = 0
         self._leader_running = False
         self._leader_lock = threading.Lock()
@@ -218,7 +221,9 @@ class ElectionHandler:
                 )
                 return False
 
-            self._epoch += 1
+            if self._epoch == MAX_EPOCH:
+                raise RuntimeError("monitor election epoch exhausted")
+            self._set_epoch_locked(self._epoch + 1)
             self._leader = self._monitor_id
             self._leader_running = True
             epoch = self._epoch
@@ -269,10 +274,10 @@ class ElectionHandler:
                     )
                     return None, False
 
-                # A restarted higher-ID monitor must be able to rejoin even
-                # though epochs are intentionally not persisted.
+                # A higher-ID coordinator may reclaim leadership while keeping
+                # the greatest durable epoch observed by this monitor.
                 self._election_generation += 1
-                self._epoch = max(self._epoch, message.epoch)
+                self._set_epoch_locked(max(self._epoch, message.epoch))
                 self._leader = message.sender_id
                 self._leader_running = True
                 self._leader_semaphore.release()
@@ -290,7 +295,7 @@ class ElectionHandler:
                 return None, False
 
             if message.message_type == ElectionMessageType.ELECTION:
-                self._epoch = message.epoch
+                self._set_epoch_locked(message.epoch)
                 should_start_election = self._leader_running
                 response = ElectionMessage(
                     ElectionMessageType.OK,
@@ -300,6 +305,13 @@ class ElectionHandler:
                 return response, should_start_election
 
         return None, False
+
+    def _set_epoch_locked(self, epoch: int) -> None:
+        if epoch == self._epoch:
+            return
+        if self._epoch_store is not None:
+            self._epoch_store.save(epoch)
+        self._epoch = epoch
 
     def _send_tcp_message(
         self,
