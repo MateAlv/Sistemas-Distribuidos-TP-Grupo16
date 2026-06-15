@@ -77,7 +77,9 @@ class ElectionHandler:
             )
             higher_monitor_answered = False
 
-            for peer_id in range(self._monitor_id + 1, self._monitor_count + 1):
+            for peer_id in range(1, self._monitor_count + 1):
+                if peer_id == self._monitor_id:
+                    continue
                 try:
                     response = self._message_sender(peer_id, election, True)
                 except OSError as exc:
@@ -94,9 +96,11 @@ class ElectionHandler:
                     response is not None
                     and response.message_type == ElectionMessageType.OK
                     and response.sender_id == peer_id
-                    and response.epoch >= epoch
                 ):
-                    higher_monitor_answered = True
+                    with self._leader_lock:
+                        self._set_epoch_locked(max(self._epoch, response.epoch))
+                    if peer_id > self._monitor_id:
+                        higher_monitor_answered = True
 
             if not higher_monitor_answered:
                 self._become_leader(generation)
@@ -260,7 +264,11 @@ class ElectionHandler:
             if message.message_type == ElectionMessageType.COORDINATOR:
                 if (
                     message.epoch < self._epoch
-                    and message.sender_id <= self._leader
+                    or (
+                        message.epoch == self._epoch
+                        and self._leader_running
+                        and message.sender_id < self._leader
+                    )
                 ):
                     logging.info(
                         "monitor_coordinator_ignored | monitor_id=%s | "
@@ -274,8 +282,6 @@ class ElectionHandler:
                     )
                     return None, False
 
-                # A higher-ID coordinator may reclaim leadership while keeping
-                # the greatest durable epoch observed by this monitor.
                 self._election_generation += 1
                 self._set_epoch_locked(max(self._epoch, message.epoch))
                 self._leader = message.sender_id
@@ -291,12 +297,9 @@ class ElectionHandler:
                 )
                 return None, False
 
-            if message.epoch < self._epoch:
-                return None, False
-
             if message.message_type == ElectionMessageType.ELECTION:
-                self._set_epoch_locked(message.epoch)
-                should_start_election = self._leader_running
+                self._set_epoch_locked(max(self._epoch, message.epoch))
+                should_start_election = message.sender_id < self._monitor_id
                 response = ElectionMessage(
                     ElectionMessageType.OK,
                     self._epoch,

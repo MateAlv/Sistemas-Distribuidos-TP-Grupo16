@@ -53,10 +53,17 @@ def test_highest_active_monitor_wins_and_announces_coordinator() -> None:
         (peer_id, message.message_type, expect_response)
         for peer_id, message, expect_response in sender.sent
     ] == [
+        (1, ElectionMessageType.ELECTION, True),
+        (2, ElectionMessageType.ELECTION, True),
         (1, ElectionMessageType.COORDINATOR, False),
         (2, ElectionMessageType.COORDINATOR, False),
     ]
-    assert all(message.epoch == 1 for _, message, _ in sender.sent)
+    coordinator_messages = [
+        message
+        for _, message, expect_response in sender.sent
+        if not expect_response
+    ]
+    assert all(message.epoch == 1 for message in coordinator_messages)
 
 
 def test_epoch_survives_handler_restart(tmp_path) -> None:
@@ -86,7 +93,12 @@ def test_epoch_survives_handler_restart(tmp_path) -> None:
 
     assert restarted_handler.i_am_leader()
     assert restarted_handler._epoch == 6
-    assert all(message.epoch == 6 for _, message, _ in sender.sent)
+    coordinator_messages = [
+        message
+        for _, message, expect_response in sender.sent
+        if not expect_response
+    ]
+    assert all(message.epoch == 6 for message in coordinator_messages)
 
 
 def test_coordinator_epoch_is_persisted(tmp_path) -> None:
@@ -185,7 +197,7 @@ def test_coordinator_updates_leader_and_releases_waiter() -> None:
     assert handler.wait_for_new_leader(timeout=0)
 
 
-def test_stale_message_is_ignored() -> None:
+def test_stale_election_receives_current_epoch() -> None:
     handler = ElectionHandler(
         monitor_id=2,
         monitor_count=3,
@@ -207,12 +219,16 @@ def test_stale_message_is_ignored() -> None:
         )
     )
 
-    assert response is None
-    assert not should_elect
+    assert response == ElectionMessage(
+        ElectionMessageType.OK,
+        epoch=5,
+        sender_id=2,
+    )
+    assert should_elect
     assert handler.get_leader() == 3
 
 
-def test_restarted_higher_monitor_can_reclaim_leadership() -> None:
+def test_stale_higher_coordinator_is_ignored() -> None:
     handler = ElectionHandler(
         monitor_id=2,
         monitor_count=3,
@@ -236,9 +252,68 @@ def test_restarted_higher_monitor_can_reclaim_leadership() -> None:
 
     assert response is None
     assert not should_elect
-    assert handler.get_leader() == 3
+    assert handler.get_leader() == 2
     assert handler.leader_is_running()
     assert handler._epoch == 5
+
+
+def test_restarted_highest_monitor_learns_epoch_before_leading(tmp_path) -> None:
+    state_path = tmp_path / "epoch.json"
+    EpochStore(state_path).save(1)
+    sender = FakeSender(
+        responses={
+            1: ElectionMessage(ElectionMessageType.OK, epoch=2, sender_id=1),
+            2: ElectionMessage(ElectionMessageType.OK, epoch=2, sender_id=2),
+        }
+    )
+    handler = ElectionHandler(
+        monitor_id=3,
+        monitor_count=3,
+        message_sender=sender,
+        epoch_store=EpochStore(state_path),
+    )
+
+    handler.start_election()
+
+    assert handler.i_am_leader()
+    assert handler._epoch == 3
+    assert EpochStore(state_path).load() == 3
+    coordinator_messages = [
+        message
+        for _, message, expect_response in sender.sent
+        if not expect_response
+    ]
+    assert all(message.epoch == 3 for message in coordinator_messages)
+
+
+def test_lower_monitor_shares_epoch_without_starting_election() -> None:
+    handler = ElectionHandler(
+        monitor_id=1,
+        monitor_count=3,
+        message_sender=FakeSender(),
+    )
+    handler._handle_message(
+        ElectionMessage(
+            ElectionMessageType.COORDINATOR,
+            epoch=4,
+            sender_id=2,
+        )
+    )
+
+    response, should_elect = handler._handle_message(
+        ElectionMessage(
+            ElectionMessageType.ELECTION,
+            epoch=1,
+            sender_id=3,
+        )
+    )
+
+    assert response == ElectionMessage(
+        ElectionMessageType.OK,
+        epoch=4,
+        sender_id=1,
+    )
+    assert not should_elect
 
 
 def test_stale_lower_coordinator_does_not_replace_running_leader() -> None:
