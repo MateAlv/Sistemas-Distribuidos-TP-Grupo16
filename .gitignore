@@ -25,3 +25,4 @@ output/*
 /venv
 
 data/rates/
+data/monitor/

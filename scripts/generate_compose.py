@@ -1420,6 +1420,7 @@ def monitor_service(
                 "STARTUP_GRACE_PERIOD="
                 f"{monitor_config.get('startup_grace_period', DEFAULT_STARTUP_GRACE_PERIOD)}"
             ),
+            "MONITOR_STATE_PATH=/data/monitor/epoch.json",
             f"NODES_TO_WATCH={','.join(nodes_to_watch)}",
             "PINNED_CONTAINER_NAMES=true",
             f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
@@ -1429,7 +1430,10 @@ def monitor_service(
             f"{monitor_port}/udp",
             str(election_port),
         ],
-        "volumes": ["/var/run/docker.sock:/var/run/docker.sock"],
+        "volumes": [
+            "/var/run/docker.sock:/var/run/docker.sock",
+            f"./data/monitor/monitor_{monitor_id}:/data/monitor:rw",
+        ],
     }
 
 
