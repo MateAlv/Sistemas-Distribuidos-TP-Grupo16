@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from monitor.election import (
@@ -249,6 +251,90 @@ def test_running_monitor_answers_election_and_starts_own_round() -> None:
         sender_id=2,
     )
     assert should_elect
+
+
+def test_coordinator_invalidates_election_in_progress() -> None:
+    sender_entered = threading.Event()
+    release_sender = threading.Event()
+
+    def blocking_sender(peer_id, message, expect_response):
+        sender_entered.set()
+        assert release_sender.wait(timeout=1)
+        raise ConnectionRefusedError(f"monitor {peer_id} unavailable")
+
+    handler = ElectionHandler(
+        monitor_id=1,
+        monitor_count=3,
+        message_sender=blocking_sender,
+    )
+    election = threading.Thread(target=handler.start_election)
+    election.start()
+    assert sender_entered.wait(timeout=1)
+
+    handler._handle_message(
+        ElectionMessage(
+            ElectionMessageType.COORDINATOR,
+            epoch=1,
+            sender_id=3,
+        )
+    )
+    release_sender.set()
+    election.join(timeout=1)
+
+    assert not election.is_alive()
+    assert not handler.i_am_leader()
+    assert handler.get_leader() == 3
+    assert handler.leader_is_running()
+
+
+def test_connection_starts_election_asynchronously(monkeypatch) -> None:
+    election_started = threading.Event()
+    release_election = threading.Event()
+
+    class FakeConnection:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = bytearray(payload)
+            self.sent = bytearray()
+
+        def recv(self, size: int) -> bytes:
+            chunk = self.payload[:size]
+            del self.payload[:size]
+            return bytes(chunk)
+
+        def sendall(self, payload: bytes) -> None:
+            self.sent.extend(payload)
+
+    handler = ElectionHandler(
+        monitor_id=2,
+        monitor_count=2,
+        message_sender=FakeSender(),
+    )
+    with handler._leader_lock:
+        handler._leader = 2
+        handler._leader_running = True
+
+    def blocking_election() -> None:
+        election_started.set()
+        release_election.wait(timeout=1)
+
+    monkeypatch.setattr(handler, "start_election", blocking_election)
+    connection = FakeConnection(
+        ElectionMessage(
+            ElectionMessageType.ELECTION,
+            epoch=0,
+            sender_id=1,
+        ).serialize()
+    )
+
+    handler._handle_connection(connection)
+
+    assert election_started.wait(timeout=1)
+    assert ElectionMessage.deserialize(bytes(connection.sent)) == ElectionMessage(
+        ElectionMessageType.OK,
+        epoch=0,
+        sender_id=2,
+    )
+    release_election.set()
 
 
 def test_wait_timeout_starts_election() -> None:

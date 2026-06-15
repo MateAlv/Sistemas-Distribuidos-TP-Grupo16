@@ -85,6 +85,7 @@ Los eventos principales son:
 ```text
 monitor_election_started
 monitor_election_won
+monitor_election_cancelled
 monitor_coordinator_accepted
 monitor_node_failed
 monitor_recovery_start

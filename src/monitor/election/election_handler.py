@@ -38,6 +38,7 @@ class ElectionHandler:
 
         self._leader = monitor_count
         self._epoch = 0
+        self._election_generation = 0
         self._leader_running = False
         self._leader_lock = threading.Lock()
         self._election_lock = threading.Lock()
@@ -54,13 +55,17 @@ class ElectionHandler:
 
         try:
             with self._leader_lock:
+                self._election_generation += 1
+                generation = self._election_generation
                 self._leader_running = False
                 epoch = self._epoch
 
             logging.info(
-                "monitor_election_started | monitor_id=%s | epoch=%s",
+                "monitor_election_started | monitor_id=%s | epoch=%s | "
+                "generation=%s",
                 self._monitor_id,
                 epoch,
+                generation,
             )
             election = ElectionMessage(
                 ElectionMessageType.ELECTION,
@@ -91,7 +96,7 @@ class ElectionHandler:
                     higher_monitor_answered = True
 
             if not higher_monitor_answered:
-                self._become_leader()
+                self._become_leader(generation)
         finally:
             self._election_lock.release()
 
@@ -186,6 +191,8 @@ class ElectionHandler:
     def stop(self) -> None:
         self._stop_event.set()
         self._leader_semaphore.release()
+        with self._leader_lock:
+            self._election_generation += 1
         with self._server_lock:
             server = self._server_socket
         if server is not None:
@@ -194,8 +201,23 @@ class ElectionHandler:
             except OSError:
                 pass
 
-    def _become_leader(self) -> None:
+    def _become_leader(self, generation: int) -> bool:
         with self._leader_lock:
+            if (
+                self._stop_event.is_set()
+                or generation != self._election_generation
+                or self._leader_running
+            ):
+                logging.info(
+                    "monitor_election_cancelled | monitor_id=%s | "
+                    "generation=%s | current_generation=%s | leader_id=%s",
+                    self._monitor_id,
+                    generation,
+                    self._election_generation,
+                    self._leader,
+                )
+                return False
+
             self._epoch += 1
             self._leader = self._monitor_id
             self._leader_running = True
@@ -207,6 +229,7 @@ class ElectionHandler:
             epoch,
         )
         self.send_coordinator()
+        return True
 
     def _handle_connection(self, connection: socket.socket) -> None:
         message = ElectionMessage.deserialize(_recv_exact(connection, 4))
@@ -214,7 +237,15 @@ class ElectionHandler:
         if response is not None:
             connection.sendall(response.serialize())
         if should_start_election:
-            self.start_election()
+            self._start_election_async()
+
+    def _start_election_async(self) -> None:
+        thread = threading.Thread(
+            target=self.start_election,
+            name=f"monitor-election-{self._monitor_id}",
+            daemon=True,
+        )
+        thread.start()
 
     def _handle_message(
         self,
@@ -240,6 +271,7 @@ class ElectionHandler:
 
                 # A restarted higher-ID monitor must be able to rejoin even
                 # though epochs are intentionally not persisted.
+                self._election_generation += 1
                 self._epoch = max(self._epoch, message.epoch)
                 self._leader = message.sender_id
                 self._leader_running = True
