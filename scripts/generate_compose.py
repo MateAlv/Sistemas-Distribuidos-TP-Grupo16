@@ -85,6 +85,7 @@ DEFAULT_MONITOR_CHECK_INTERVAL = 3.0
 DEFAULT_MAX_MISSED = 3
 DEFAULT_ELECTION_TIMEOUT = 5.0
 DEFAULT_COORDINATOR_TIMEOUT = 10.0
+DEFAULT_STARTUP_GRACE_PERIOD = 30.0
 
 
 def main() -> int:
@@ -433,6 +434,13 @@ def validate_config(config: dict, path: Path) -> None:
                 raise ValueError(
                     f"{path}: monitor.{key} must be greater than 0"
                 )
+        startup_grace_period = float(
+            monitor.get("startup_grace_period", DEFAULT_STARTUP_GRACE_PERIOD)
+        )
+        if startup_grace_period < 0:
+            raise ValueError(
+                f"{path}: monitor.startup_grace_period must be at least 0"
+            )
         if int(monitor.get("max_missed", DEFAULT_MAX_MISSED)) <= 0:
             raise ValueError(f"{path}: monitor.max_missed must be greater than 0")
 
@@ -1407,6 +1415,10 @@ def monitor_service(
             (
                 "COORDINATOR_TIMEOUT="
                 f"{monitor_config.get('coordinator_timeout', DEFAULT_COORDINATOR_TIMEOUT)}"
+            ),
+            (
+                "STARTUP_GRACE_PERIOD="
+                f"{monitor_config.get('startup_grace_period', DEFAULT_STARTUP_GRACE_PERIOD)}"
             ),
             f"NODES_TO_WATCH={','.join(nodes_to_watch)}",
             "PINNED_CONTAINER_NAMES=true",

@@ -59,6 +59,7 @@ def test_build_compose_adds_monitor_replicas_and_heartbeat_targets() -> None:
         assert env["MONITOR_ID"] == str(monitor_id)
         assert env["MONITOR_COUNT"] == "3"
         assert env["MONITOR_HOSTS"] == monitor_hosts
+        assert env["STARTUP_GRACE_PERIOD"] == "30.0"
         assert env["PINNED_CONTAINER_NAMES"] == "true"
         assert set(env["NODES_TO_WATCH"].split(",")) == expected_nodes
 
@@ -92,6 +93,10 @@ def test_build_compose_omits_monitors_when_disabled() -> None:
             "monitor.check_interval",
         ),
         ({"enabled": True, "max_missed": 0}, "monitor.max_missed"),
+        (
+            {"enabled": True, "startup_grace_period": -1},
+            "monitor.startup_grace_period",
+        ),
     ],
 )
 def test_validate_config_rejects_invalid_monitor_settings(

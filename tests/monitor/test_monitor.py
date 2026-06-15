@@ -71,6 +71,7 @@ class FakeHeartbeatReceiver:
         ("check_interval", 0, "check_interval"),
         ("max_missed", 0, "max_missed"),
         ("coordinator_timeout", 0, "coordinator_timeout"),
+        ("startup_grace_period", -1, "startup_grace_period"),
     ],
 )
 def test_rejects_invalid_timing_configuration(
@@ -88,11 +89,30 @@ def test_rejects_invalid_timing_configuration(
         )
 
 
-def test_leader_recovers_missing_and_expired_nodes() -> None:
+def test_leader_does_not_recover_never_seen_node_during_startup_grace() -> None:
+    now = [100.0]
+    recovered = []
+    monitor = Monitor(
+        FakeElectionHandler(leader=True),
+        FakeHeartbeatReceiver(),
+        ["worker_0"],
+        recovery=recovered.append,
+        startup_grace_period=30,
+        clock=lambda: now[0],
+    )
+
+    now[0] = 129.0
+    monitor.run_once()
+
+    assert recovered == []
+
+
+def test_leader_recovers_never_seen_and_expired_nodes_after_startup_grace() -> None:
+    now = [100.0]
     recovered = []
     heartbeat = FakeHeartbeatReceiver(
         {
-            "healthy": 95.0,
+            "healthy": 125.0,
             "expired": 60.0,
         }
     )
@@ -103,9 +123,11 @@ def test_leader_recovers_missing_and_expired_nodes() -> None:
         recovery=recovered.append,
         check_interval=10,
         max_missed=3,
-        clock=lambda: 100.0,
+        startup_grace_period=30,
+        clock=lambda: now[0],
     )
 
+    now[0] = 130.0
     monitor.run_once()
 
     assert recovered == ["missing", "expired"]
@@ -121,6 +143,7 @@ def test_leader_does_not_repeat_recovery_during_cooldown() -> None:
         recovery=recovered.append,
         check_interval=10,
         max_missed=3,
+        startup_grace_period=0,
         clock=lambda: now[0],
     )
 
@@ -144,6 +167,7 @@ def test_fresh_heartbeat_clears_recovery_cooldown() -> None:
         recovery=recovered.append,
         check_interval=10,
         max_missed=3,
+        startup_grace_period=0,
         clock=lambda: now[0],
     )
 
@@ -171,6 +195,7 @@ def test_recovery_error_does_not_skip_other_failed_nodes() -> None:
         FakeHeartbeatReceiver(),
         ["broken_recovery", "worker_1"],
         recovery=recovery,
+        startup_grace_period=0,
         clock=lambda: 100.0,
     )
 
@@ -268,6 +293,7 @@ def test_nodes_to_watch_are_deduplicated() -> None:
         FakeHeartbeatReceiver(),
         ["worker_0", "worker_0"],
         recovery=recovered.append,
+        startup_grace_period=0,
         clock=lambda: 100.0,
     )
 

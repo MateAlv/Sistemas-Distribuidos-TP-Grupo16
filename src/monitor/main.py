@@ -11,6 +11,7 @@ from monitor.monitor import (
     DEFAULT_CHECK_INTERVAL,
     DEFAULT_COORDINATOR_TIMEOUT,
     DEFAULT_MAX_MISSED,
+    DEFAULT_STARTUP_GRACE_PERIOD,
     Monitor,
 )
 
@@ -34,6 +35,7 @@ class MonitorConfig:
     election_port: int
     election_timeout: float
     coordinator_timeout: float
+    startup_grace_period: float
     check_interval: float
     max_missed: int
     nodes_to_watch: tuple[str, ...]
@@ -68,11 +70,13 @@ def main() -> int:
 
     logging.info(
         "monitor_config | result=ok | monitor_id=%s | monitor_count=%s | "
-        "monitor_port=%s | election_port=%s | nodes_to_watch=%s",
+        "monitor_port=%s | election_port=%s | startup_grace_period=%s | "
+        "nodes_to_watch=%s",
         config.monitor_id,
         config.monitor_count,
         config.monitor_port,
         config.election_port,
+        config.startup_grace_period,
         len(config.nodes_to_watch),
     )
 
@@ -98,6 +102,11 @@ def load_config(env: Mapping[str, str] = os.environ) -> MonitorConfig:
     check_interval = _parse_positive_float(env, "MONITOR_CHECK_INTERVAL", DEFAULT_CHECK_INTERVAL)
     election_timeout = _parse_positive_float(env, "ELECTION_TIMEOUT", DEFAULT_ELECTION_TIMEOUT)
     coordinator_timeout = _parse_positive_float(env, "COORDINATOR_TIMEOUT", DEFAULT_COORDINATOR_TIMEOUT)
+    startup_grace_period = _parse_non_negative_float(
+        env,
+        "STARTUP_GRACE_PERIOD",
+        DEFAULT_STARTUP_GRACE_PERIOD,
+    )
     max_missed = _parse_int(env, "MAX_MISSED", DEFAULT_MAX_MISSED)
     if max_missed < 1:
         raise ValueError("MAX_MISSED must be greater than 0")
@@ -125,6 +134,7 @@ def load_config(env: Mapping[str, str] = os.environ) -> MonitorConfig:
         election_port=election_port,
         election_timeout=election_timeout,
         coordinator_timeout=coordinator_timeout,
+        startup_grace_period=startup_grace_period,
         check_interval=check_interval,
         max_missed=max_missed,
         nodes_to_watch=nodes_to_watch,
@@ -152,6 +162,7 @@ def build_monitor(config: MonitorConfig) -> Monitor:
         check_interval=config.check_interval,
         max_missed=config.max_missed,
         coordinator_timeout=config.coordinator_timeout,
+        startup_grace_period=config.startup_grace_period,
     )
 
 
@@ -188,6 +199,21 @@ def _parse_positive_float(env: Mapping[str, str], name: str, default: float) -> 
         raise ValueError(f"{name} must be a number")
     if value <= 0:
         raise ValueError(f"{name} must be greater than 0")
+    return value
+
+
+def _parse_non_negative_float(
+    env: Mapping[str, str],
+    name: str,
+    default: float,
+) -> float:
+    raw = env.get(name, str(default))
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a number")
+    if value < 0:
+        raise ValueError(f"{name} must be at least 0")
     return value
 
 

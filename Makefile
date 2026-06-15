@@ -82,7 +82,7 @@ rebuild:
 
 down:
 	-docker compose -f $(COMPOSE_FILE) stop -t 5
-	-docker compose -f $(COMPOSE_FILE) down --remove-orphans
+	-docker compose -f $(COMPOSE_FILE) down --volumes --remove-orphans
 	@if [ -f "$(TEST_COMPOSE_FILE)" ]; then \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) stop -t 5 || true; \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) down --volumes --remove-orphans || true; \
@@ -111,20 +111,35 @@ clean-state:
 .PHONY: clean-state
 
 CHAOS_SERVICE := chaos_monkey
-chaos_container = $(shell docker ps -q --filter "label=com.docker.compose.project=$(MAIN_PROJECT)" --filter "label=com.docker.compose.service=$(CHAOS_SERVICE)")
 
 chaos-kill-random:
-	@chaos="$(chaos_container)"; \
+	@chaos=$$(docker compose -f $(COMPOSE_FILE) ps --status running --quiet $(CHAOS_SERVICE)); \
 	if [ -z "$$chaos" ]; then echo "chaos monkey not running (enable chaos in config and 'make up')" >&2; exit 1; fi; \
-	docker exec "$$chaos" python3 -c "from manager import ChaosManager, excluded_from_env; print(ChaosManager(excluded_from_env()).kill_random_container())"
+	docker exec "$$chaos" python3 -c "from manager import ChaosManager, excluded_from_env; result = ChaosManager(excluded_from_env()).kill_random_container(); print(result); raise SystemExit(0 if result else 1)"
 .PHONY: chaos-kill-random
 
+CHAOS_TARGET := $(if $(CONTAINER),$(CONTAINER),$(word 2,$(MAKECMDGOALS)))
 chaos-kill:
-	@if [ -z "$(CONTAINER)" ]; then echo "Usage: make chaos-kill CONTAINER=<name>" >&2; exit 2; fi; \
-	chaos="$(chaos_container)"; \
+	@if [ -z "$(CHAOS_TARGET)" ]; then \
+		echo "Usage: make chaos-kill CONTAINER=<service>" >&2; \
+		echo "   or: make chaos-kill <service>" >&2; \
+		exit 2; \
+	fi; \
+	if ! docker compose -f $(COMPOSE_FILE) config --services | grep -Fxq "$(CHAOS_TARGET)"; then \
+		echo "Unknown compose service: $(CHAOS_TARGET)" >&2; \
+		exit 2; \
+	fi; \
+	chaos=$$(docker compose -f $(COMPOSE_FILE) ps --status running --quiet $(CHAOS_SERVICE)); \
 	if [ -z "$$chaos" ]; then echo "chaos monkey not running (enable chaos in config and 'make up')" >&2; exit 1; fi; \
-	docker exec "$$chaos" python3 -c "import sys; from manager import ChaosManager; print(ChaosManager().kill_container(sys.argv[1]))" "$(CONTAINER)"
+	docker exec "$$chaos" python3 -c "import sys; from manager import ChaosManager; result = ChaosManager().kill_container(sys.argv[1]); print(result); raise SystemExit(0 if result else 1)" "$(CHAOS_TARGET)"
 .PHONY: chaos-kill
+
+ifneq ($(filter chaos-kill,$(MAKECMDGOALS)),)
+ifneq ($(word 2,$(MAKECMDGOALS)),)
+$(word 2,$(MAKECMDGOALS)):
+	@:
+endif
+endif
 
 logs-test:
 	docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) logs -f --timestamps --no-color $(LOG_ARGS) | $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR)
@@ -161,13 +176,14 @@ monitor-test-recovery:
 		compose=(docker compose -f "$(COMPOSE_FILE)"); \
 		target="$(CONTAINER)"; \
 		timeout="$(MONITOR_TEST_TIMEOUT)"; \
-		if ! "$${compose[@]}" config --services | grep -Fxq "$$target"; then \
+		all_services=$$("$${compose[@]}" config --services); \
+		if ! grep -Fxq "$$target" <<<"$$all_services"; then \
 			echo "Unknown compose service: $$target" >&2; exit 2; \
 		fi; \
 		if [[ "$$target" == monitor_* ]]; then \
 			echo "Choose a non-monitor service to test worker recovery" >&2; exit 2; \
 		fi; \
-		monitors=$$("$${compose[@]}" config --services | grep "^monitor_"); \
+		monitors=$$(grep "^monitor_" <<<"$$all_services"); \
 		if [ -z "$$monitors" ]; then echo "No monitor services are configured" >&2; exit 1; fi; \
 		if [ $$("$${compose[@]}" ps --status running $$monitors --quiet | wc -l | tr -d " ") -eq 0 ]; then \
 			echo "No monitor container is running" >&2; exit 1; \

@@ -199,68 +199,10 @@ Variables de ejecución:
 
 ## Monitor y recuperación
 
-El bloque `monitor` de `config/main-config.yaml` habilita las réplicas que
-detectan caídas por heartbeat y recuperan containers con `docker start`:
-
-```yaml
-monitor:
-  enabled: true
-  count: 3
-  port: 9000
-  election_port: 9001
-  check_interval: 3
-  max_missed: 3
-  election_timeout: 5
-  coordinator_timeout: 10
-```
-
-Los procesos envían su heartbeat UDP a todas las réplicas. Los monitores usan
-elección Bully para coordinar cuál de ellos ejecuta las recuperaciones. Para
-acceder al daemon del host, los containers de monitor montan
-`/var/run/docker.sock`.
-
-Para deshabilitarlos en un escenario:
-
-```yaml
-monitor:
-  enabled: false
-```
-
-Ver solamente los logs de las réplicas del monitor:
-
-```bash
-make monitor-logs
-```
-
-Ver el estado de los containers y los eventos de los últimos cinco minutos:
-
-```bash
-make monitor-status
-```
-
-Para comprobar la recuperación de punta a punta, elegir un worker que esté
-corriendo. El comando lo detiene y espera que el líder lo inicie nuevamente:
-
-```bash
-make monitor-test-recovery CONTAINER=filter_usd_0
-```
-
-El resultado esperado incluye `monitor_node_failed`,
-`monitor_recovery_start`, `monitor_recovery_success` y finaliza con `PASS`.
-El timeout puede ajustarse con `MONITOR_TEST_TIMEOUT`; debe ser mayor que
-`check_interval * max_missed`.
-
-Para probar la elección de líder con Chaos Monkey, primero habilitar
-`settings.chaos.enabled` y levantar el sistema. Luego ejecutar:
-
-```bash
-make monitor-test-election
-```
-
-El comando mata al monitor de mayor ID, comprueba que el siguiente monitor gane
-la elección, que recupere al líder caído y que el cluster vuelva a converger en
-el monitor de mayor ID. El límite de espera se configura con
-`MONITOR_FAILOVER_TIMEOUT`.
+El sistema incluye réplicas de monitor con heartbeats UDP, elección Bully y
+recuperación de containers mediante Docker. La explicación de la arquitectura,
+la configuración y todos los casos de prueba manuales está en
+[src/monitor/README.md](src/monitor/README.md).
 
 ## Outputs
 

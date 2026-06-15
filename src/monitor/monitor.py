@@ -11,6 +11,7 @@ from monitor.recovery import docker_start
 DEFAULT_CHECK_INTERVAL = 3.0
 DEFAULT_MAX_MISSED = 3
 DEFAULT_COORDINATOR_TIMEOUT = 10.0
+DEFAULT_STARTUP_GRACE_PERIOD = 30.0
 THREAD_JOIN_TIMEOUT = 5.0
 
 
@@ -24,6 +25,7 @@ class Monitor:
         check_interval: float = DEFAULT_CHECK_INTERVAL,
         max_missed: int = DEFAULT_MAX_MISSED,
         coordinator_timeout: float = DEFAULT_COORDINATOR_TIMEOUT,
+        startup_grace_period: float = DEFAULT_STARTUP_GRACE_PERIOD,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if check_interval <= 0:
@@ -32,6 +34,8 @@ class Monitor:
             raise ValueError("max_missed must be at least 1")
         if coordinator_timeout <= 0:
             raise ValueError("coordinator_timeout must be greater than 0")
+        if startup_grace_period < 0:
+            raise ValueError("startup_grace_period must be at least 0")
 
         self._election_handler = election_handler
         self._heartbeat_receiver = heartbeat_receiver
@@ -40,7 +44,9 @@ class Monitor:
         self._check_interval = check_interval
         self._failure_timeout = max_missed * check_interval
         self._coordinator_timeout = coordinator_timeout
+        self._startup_grace_period = startup_grace_period
         self._clock = clock
+        self._started_at = clock()
 
         self._stop_event = threading.Event()
         self._last_recovery_by_node: dict[str, float] = {}
@@ -120,8 +126,8 @@ class Monitor:
             self._last_recovery_by_node[node_id] = now
 
     def _is_failed(self, node_id: str, now: float | None = None) -> bool:
+        current_time = self._clock() if now is None else now
         last_seen = self._heartbeat_receiver.last_seen(node_id)
         if last_seen is None:
-            return True
-        current_time = self._clock() if now is None else now
+            return current_time - self._started_at >= self._startup_grace_period
         return current_time - last_seen > self._failure_timeout
