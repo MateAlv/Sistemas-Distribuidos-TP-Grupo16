@@ -284,7 +284,9 @@ make monitor-test-election
 
 El target mata al monitor de mayor ID. Se espera que `monitor_2` gane
 temporalmente la elección, recupere `monitor_3` y que el cluster vuelva a
-converger con `monitor_3` como líder.
+converger con `monitor_3` como líder. La prueba también exige que el epoch de
+`monitor_3` sea mayor que el epoch temporal de `monitor_2`, y que todos los
+followers acepten exactamente ese nuevo epoch.
 
 Prueba paso a paso:
 
@@ -299,11 +301,12 @@ Los logs deben mostrar eventos equivalentes a:
 
 ```text
 monitor_election_started
-monitor_election_won | monitor_id=2
+monitor_election_won | monitor_id=2 | epoch=2
 monitor_node_failed | node_id=monitor_3
 monitor_recovery_start | node_id=monitor_3
 monitor_recovery_success | node_id=monitor_3
-monitor_coordinator_accepted ... leader_id=3
+monitor_election_won | monitor_id=3 | epoch=3
+monitor_coordinator_accepted ... leader_id=3 | epoch=3 | announced_epoch=3
 ```
 
 Confirmar la convergencia:
