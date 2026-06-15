@@ -54,11 +54,13 @@ def test_build_compose_adds_monitor_replicas_and_heartbeat_targets() -> None:
         env = _env(service)
         assert service["container_name"] == name
         assert service["volumes"] == [
-            "/var/run/docker.sock:/var/run/docker.sock"
+            "/var/run/docker.sock:/var/run/docker.sock",
+            f"./data/monitor/monitor_{monitor_id}:/data/monitor:rw",
         ]
         assert env["MONITOR_ID"] == str(monitor_id)
         assert env["MONITOR_COUNT"] == "3"
         assert env["MONITOR_HOSTS"] == monitor_hosts
+        assert env["MONITOR_STATE_PATH"] == "/data/monitor/epoch.json"
         assert env["STARTUP_GRACE_PERIOD"] == "30.0"
         assert env["PINNED_CONTAINER_NAMES"] == "true"
         assert set(env["NODES_TO_WATCH"].split(",")) == expected_nodes

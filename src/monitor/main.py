@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from common.heartbeat import HeartbeatSender
 from monitor.election import ElectionHandler
+from monitor.election.epoch_store import EpochStore
 from monitor.heartbeat import HeartbeatReceiver
 from monitor.monitor import (
     DEFAULT_CHECK_INTERVAL,
@@ -23,6 +24,7 @@ DEFAULT_ELECTION_PORT = 9001
 DEFAULT_ELECTION_TIMEOUT = 5.0
 DEFAULT_HEARTBEAT_TARGET_HOST = "monitor"
 DEFAULT_LOGGING_LEVEL = "INFO"
+DEFAULT_MONITOR_STATE_PATH = "/data/monitor/epoch.json"
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,7 @@ class MonitorConfig:
     nodes_to_watch: tuple[str, ...]
     heartbeat_target_hosts: tuple[str, ...]
     logging_level: str
+    state_path: str
 
 
 def main() -> int:
@@ -140,6 +143,7 @@ def load_config(env: Mapping[str, str] = os.environ) -> MonitorConfig:
         nodes_to_watch=nodes_to_watch,
         heartbeat_target_hosts=heartbeat_target_hosts,
         logging_level=env.get("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
+        state_path=env.get("MONITOR_STATE_PATH", DEFAULT_MONITOR_STATE_PATH),
     )
 
 
@@ -150,6 +154,7 @@ def build_monitor(config: MonitorConfig) -> Monitor:
         host=config.election_host,
         port=config.election_port,
         election_timeout=config.election_timeout,
+        epoch_store=EpochStore(config.state_path),
     )
     heartbeat_receiver = HeartbeatReceiver(
         host=config.monitor_host,

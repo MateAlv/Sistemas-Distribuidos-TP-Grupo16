@@ -213,6 +213,7 @@ monitor-test-election:
 		if [ -z "$$monitors" ]; then echo "No monitor services are configured" >&2; exit 1; fi; \
 		leader=$$(printf "%s\n" "$$monitors" | tail -1); \
 		successor=$$(printf "%s\n" "$$monitors" | tail -2 | head -1); \
+		monitor_count=$$(printf "%s\n" "$$monitors" | wc -l | tr -d " "); \
 		if [ "$$leader" = "$$successor" ]; then \
 			echo "At least two monitor replicas are required" >&2; exit 1; \
 		fi; \
@@ -229,10 +230,20 @@ monitor-test-election:
 		deadline=$$((SECONDS + $(MONITOR_FAILOVER_TIMEOUT))); \
 		while (( SECONDS < deadline )); do \
 			logs=$$("$${compose[@]}" logs --since "$$started_at" --no-color $$monitors 2>&1); \
-			if grep -Fq "monitor_election_won | monitor_id=$${successor#monitor_}" <<<"$$logs" && \
-				grep -Fq "monitor_recovery_success | node_id=$$leader" <<<"$$logs" && \
-				grep -Eq "monitor_coordinator_accepted.*leader_id=$${leader#monitor_}" <<<"$$logs"; then \
-				echo "PASS: $$successor took over, recovered $$leader, and the cluster reconverged"; \
+			takeover_epoch=$$(grep -E "monitor_election_won \\| monitor_id=$${successor#monitor_} \\| epoch=[0-9]+" <<<"$$logs" | \
+				sed -E "s/.*epoch=([0-9]+).*/\\1/" | tail -1 || true); \
+			recovered_epoch=$$(grep -E "monitor_election_won \\| monitor_id=$${leader#monitor_} \\| epoch=[0-9]+" <<<"$$logs" | \
+				sed -E "s/.*epoch=([0-9]+).*/\\1/" | tail -1 || true); \
+			accepted_count=0; \
+			if [ -n "$$recovered_epoch" ]; then \
+				accepted_count=$$(grep -E "monitor_coordinator_accepted.*leader_id=$${leader#monitor_}.*epoch=$$recovered_epoch.*announced_epoch=$$recovered_epoch" <<<"$$logs" | \
+					sed -E "s/.*monitor_id=([0-9]+).*/\\1/" | sort -u | wc -l | tr -d " " || true); \
+			fi; \
+			if [ -n "$$takeover_epoch" ] && [ -n "$$recovered_epoch" ] && \
+				(( recovered_epoch > takeover_epoch )) && \
+				(( accepted_count >= monitor_count - 1 )) && \
+				grep -Fq "monitor_recovery_success | node_id=$$leader" <<<"$$logs"; then \
+				echo "PASS: $$successor took over at epoch $$takeover_epoch, recovered $$leader, and the cluster reconverged at epoch $$recovered_epoch"; \
 				printf "%s\n" "$$logs" | \
 					grep -E "monitor_(election|coordinator)|monitor_node_failed.*node_id=$$leader|monitor_recovery_(start|success|failed).*node_id=$$leader" | \
 					$(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR); \
@@ -240,7 +251,7 @@ monitor-test-election:
 			fi; \
 			sleep 1; \
 		done; \
-		echo "FAIL: monitor failover did not complete within $(MONITOR_FAILOVER_TIMEOUT)s" >&2; \
+		echo "FAIL: monitor failover and epoch convergence did not complete within $(MONITOR_FAILOVER_TIMEOUT)s" >&2; \
 		"$${compose[@]}" logs --since "$$started_at" $$monitors >&2; \
 		exit 1'
 .PHONY: monitor-test-election

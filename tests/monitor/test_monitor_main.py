@@ -27,6 +27,7 @@ def test_load_config_uses_defaults_and_deduplicates_nodes() -> None:
     assert config.startup_grace_period == 30.0
     assert config.nodes_to_watch == ("worker_0", "monitor_1")
     assert config.heartbeat_target_hosts == ("monitor",)
+    assert config.state_path == "/data/monitor/epoch.json"
 
 
 def test_load_config_accepts_all_runtime_overrides() -> None:
@@ -42,6 +43,7 @@ def test_load_config_accepts_all_runtime_overrides() -> None:
             COORDINATOR_TIMEOUT="6",
             STARTUP_GRACE_PERIOD="45",
             MONITOR_HOSTS="monitor_1,monitor_2",
+            MONITOR_STATE_PATH="/tmp/monitor-2/epoch.json",
             LOGGING_LEVEL="DEBUG",
         )
     )
@@ -56,6 +58,7 @@ def test_load_config_accepts_all_runtime_overrides() -> None:
     assert config.coordinator_timeout == 6
     assert config.startup_grace_period == 45
     assert config.heartbeat_target_hosts == ("monitor_1", "monitor_2")
+    assert config.state_path == "/tmp/monitor-2/epoch.json"
     assert config.logging_level == "DEBUG"
 
 
