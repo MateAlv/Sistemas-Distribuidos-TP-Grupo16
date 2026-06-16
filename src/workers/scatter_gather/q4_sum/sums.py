@@ -3,6 +3,8 @@ import os
 import threading
 from collections import Counter, defaultdict
 
+from common.upstream_eof_counter import UpstreamEofCounter
+
 from common.batch_buffer import BatchBuffer
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal import (
@@ -74,7 +76,7 @@ class Q4SumWorker:
         self._incoming_by_client = defaultdict(lambda: defaultdict(Counter))
         self._outgoing_by_client = defaultdict(lambda: defaultdict(Counter))
         self._processed_by_client: dict[int, int] = {}
-        self._eofs_by_client: dict[int, set[int]] = defaultdict(set)
+        self._eof_counter = UpstreamEofCounter(Q4_FILTER_AMOUNT)
         self._forwarded_by_partition_by_client: dict[int, dict[int, int]] = {}
         self._closed_by_client: set[int] = set()
 
@@ -228,41 +230,19 @@ class Q4SumWorker:
         return len(edges)
 
     def _handle_eof(self, client_id: int, payload: bytes) -> None:
-        """Count one EOF from one q4_filter shard. Once every q4_filter shard has
-        sent us its EOF for this client, we have everything → plan and emit."""
         control = self._control_serializer.deserialize(payload)
-        should_emit = False
 
         with self._lock:
-            if client_id in self._closed_by_client:
-                return
-            if control.sender_id in self._eofs_by_client[client_id]:
-                logging.info(
-                    "q4_sum_duplicate_eof | id=%s | client_id=%s | "
-                    "source_prefilter_id=%s",
-                    ID,
-                    client_id,
-                    control.sender_id,
-                )
-                return
-
-            self._eofs_by_client[client_id].add(control.sender_id)
-            eof_count = len(self._eofs_by_client[client_id])
+            should_emit = self._eof_counter.on_eof(client_id, control.sender_id)
+            eof_count = self._eof_counter.count(client_id)
             processed_total = self._processed_by_client.get(client_id, 0)
-            if eof_count >= Q4_FILTER_AMOUNT:
-                should_emit = True
 
         logging.info(
             "q4_sum_eof_received | id=%s | client_id=%s | "
             "source_prefilter_id=%s | eof_count=%s | expected_eofs=%s | "
             "sender_expected_total=%s | processed_total=%s",
-            ID,
-            client_id,
-            control.sender_id,
-            eof_count,
-            Q4_FILTER_AMOUNT,
-            control.expected_total,
-            processed_total,
+            ID, client_id, control.sender_id, eof_count, Q4_FILTER_AMOUNT,
+            control.expected_total, processed_total,
         )
 
         if should_emit:
@@ -383,7 +363,7 @@ class Q4SumWorker:
             self._incoming_by_client.pop(client_id, None)
             self._outgoing_by_client.pop(client_id, None)
             self._processed_by_client.pop(client_id, None)
-            self._eofs_by_client.pop(client_id, None)
+            self._eof_counter.close(client_id)
             self._forwarded_by_partition_by_client.pop(client_id, None)
             self._closed_by_client.add(client_id)
 

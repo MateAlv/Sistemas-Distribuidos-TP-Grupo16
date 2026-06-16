@@ -3,6 +3,8 @@ import os
 import threading
 from collections import Counter, defaultdict
 
+from common.upstream_eof_counter import UpstreamEofCounter
+
 from common.batch_buffer import BatchBuffer
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal import (
@@ -69,7 +71,7 @@ class Q4JoinerWorker:
         self._incoming_by_client = defaultdict(lambda: defaultdict(Counter))
         self._outgoing_by_client = defaultdict(lambda: defaultdict(Counter))
         self._processed_by_client: dict[int, int] = {}
-        self._eofs_by_client: dict[int, set[int]] = defaultdict(set)
+        self._eof_counter = UpstreamEofCounter(Q4_SUM_AMOUNT)
         self._forwarded_by_partition_by_client: dict[int, dict[int, int]] = {}
         self._closed_by_client: set[int] = set()
 
@@ -207,41 +209,19 @@ class Q4JoinerWorker:
         return len(edges)
 
     def _handle_eof(self, client_id: int, payload: bytes) -> None:
-        """Count one EOF from one q4_sum shard. Once every q4_sum shard has sent
-        us its EOF for this client, all the block data is in → run the join."""
         control = self._control_serializer.deserialize(payload)
-        should_emit = False
 
         with self._lock:
-            if client_id in self._closed_by_client:
-                return
-            if control.sender_id in self._eofs_by_client[client_id]:
-                logging.info(
-                    "q4_joiner_duplicate_eof | id=%s | client_id=%s | "
-                    "edge_store_id=%s",
-                    ID,
-                    client_id,
-                    control.sender_id,
-                )
-                return
-
-            self._eofs_by_client[client_id].add(control.sender_id)
-            eof_count = len(self._eofs_by_client[client_id])
+            should_emit = self._eof_counter.on_eof(client_id, control.sender_id)
+            eof_count = self._eof_counter.count(client_id)
             processed_total = self._processed_by_client.get(client_id, 0)
-            if eof_count >= Q4_SUM_AMOUNT:
-                should_emit = True
 
         logging.info(
             "q4_joiner_eof_received | id=%s | client_id=%s | "
             "edge_store_id=%s | eof_count=%s | expected_eofs=%s | "
             "sender_expected_total=%s | processed_total=%s",
-            ID,
-            client_id,
-            control.sender_id,
-            eof_count,
-            Q4_SUM_AMOUNT,
-            control.expected_total,
-            processed_total,
+            ID, client_id, control.sender_id, eof_count, Q4_SUM_AMOUNT,
+            control.expected_total, processed_total,
         )
 
         if should_emit:
@@ -349,7 +329,7 @@ class Q4JoinerWorker:
             self._incoming_by_client.pop(client_id, None)
             self._outgoing_by_client.pop(client_id, None)
             self._processed_by_client.pop(client_id, None)
-            self._eofs_by_client.pop(client_id, None)
+            self._eof_counter.close(client_id)
             self._forwarded_by_partition_by_client.pop(client_id, None)
             self._closed_by_client.add(client_id)
 

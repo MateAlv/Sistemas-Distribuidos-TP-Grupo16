@@ -1,7 +1,7 @@
 import logging
 import os
 import threading
-from collections import defaultdict
+from common.upstream_eof_counter import UpstreamEofCounter
 
 from common.batch_buffer import BatchBuffer
 from common.logging_utils import should_log_progress
@@ -65,7 +65,7 @@ class Q4AggregatorWorker:
         self._pair_counts_by_client: dict[int, dict[tuple[str, str, str, str], int]] = {}
         self._qualified_pairs_by_client: dict[int, set[tuple[str, str, str, str]]] = {}
         self._processed_by_client: dict[int, int] = {}
-        self._eofs_by_client: dict[int, set[int]] = defaultdict(set)
+        self._eof_counter = UpstreamEofCounter(Q4_JOINER_AMOUNT)
         self._forwarded_by_partition_by_client: dict[int, dict[int, int]] = {}
         self._closed_by_client: set[int] = set()
 
@@ -223,41 +223,19 @@ class Q4AggregatorWorker:
         return len(batch)
 
     def _handle_eof(self, client_id: int, payload: bytes) -> None:
-        """Count one EOF from one joiner shard. Once every joiner has sent us its
-        EOF for this client, no more contributions can arrive → close the client."""
         control = self._control_serializer.deserialize(payload)
-        should_emit = False
 
         with self._lock:
-            if client_id in self._closed_by_client:
-                return
-            if control.sender_id in self._eofs_by_client[client_id]:
-                logging.info(
-                    "q4_aggregator_duplicate_eof | id=%s | client_id=%s | "
-                    "block_joiner_id=%s",
-                    ID,
-                    client_id,
-                    control.sender_id,
-                )
-                return
-
-            self._eofs_by_client[client_id].add(control.sender_id)
-            eof_count = len(self._eofs_by_client[client_id])
+            should_emit = self._eof_counter.on_eof(client_id, control.sender_id)
+            eof_count = self._eof_counter.count(client_id)
             processed_total = self._processed_by_client.get(client_id, 0)
-            if eof_count >= Q4_JOINER_AMOUNT:
-                should_emit = True
 
         logging.info(
             "q4_aggregator_eof_received | id=%s | client_id=%s | "
             "block_joiner_id=%s | eof_count=%s | expected_eofs=%s | "
             "sender_expected_total=%s | processed_total=%s",
-            ID,
-            client_id,
-            control.sender_id,
-            eof_count,
-            Q4_JOINER_AMOUNT,
-            control.expected_total,
-            processed_total,
+            ID, client_id, control.sender_id, eof_count, Q4_JOINER_AMOUNT,
+            control.expected_total, processed_total,
         )
 
         if should_emit:
@@ -320,7 +298,7 @@ class Q4AggregatorWorker:
             self._pair_counts_by_client.pop(client_id, None)
             self._qualified_pairs_by_client.pop(client_id, None)
             self._processed_by_client.pop(client_id, None)
-            self._eofs_by_client.pop(client_id, None)
+            self._eof_counter.close(client_id)
             self._forwarded_by_partition_by_client.pop(client_id, None)
             self._closed_by_client.add(client_id)
 

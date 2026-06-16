@@ -278,7 +278,8 @@ stats:
 .PHONY: stats
 
 # Dataset used by the full `make test` run and `make expected`.
-DATASET ?= HI-Medium
+# TEST_DATASET is kept as a backwards-compatible alias documented in README.
+DATASET ?= $(if $(TEST_DATASET),$(TEST_DATASET),HI-Medium)
 
 # Precompute the per-dataset reference results (data/datasets/<DATASET>/expected_results/).
 # Use FORCE=1 to regenerate. The expensive Q4 graph is computed once here, not per run.
@@ -292,6 +293,7 @@ expected:
 # (per-query PASS/FAIL + time, container count, peak CPU/RAM) as the last lines.
 # Parametrize like the test-qN targets, e.g.:
 #   DATASET=HI-Medium CLIENTS=2 USD_WORKERS=4 PREFETCH_COUNT=50 make test
+#   TEST_DATASET=HI-Medium CLIENTS=2 USD_WORKERS=4 PREFETCH_COUNT=50 make test
 test:
 	@echo ">>> regenerating $(TEST_COMPOSE_FILE) from $(TEST_CONFIG_FILE)"
 	$(PYTHON) $(COMPOSE_SCRIPT) --config $(TEST_CONFIG_FILE) \
@@ -320,8 +322,9 @@ test:
 	$(LOG_PYTHON) scripts/run_full_test.py
 .PHONY: test
 
-Q1_DATASET ?= LI-Mini
+Q1_DATASET ?= LI-Small
 test-q1:
+	@echo ">>> regenerating $(TEST_COMPOSE_FILE) for Q1 (dataset=$(Q1_DATASET))"
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q1-test --dataset $(Q1_DATASET) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
 		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
@@ -341,26 +344,30 @@ test-q1:
 		mkdir -p data/output; \
 		rm -f data/output/results_q*.csv; \
 		start_time=$$SECONDS; \
-		echo "Starting Q1 flow test (preset=q1-test, dataset=$(Q1_DATASET))..."; \
+		echo "Starting Q1 flow test (dataset=$(Q1_DATASET), CLIENTS=$(or $(CLIENTS),1))..."; \
 		$$compose up --build --remove-orphans --detach; \
+		$$compose logs --follow --timestamps --no-color \
+			| $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR) & LOG_PID=$$!; \
 		clients="$$($$compose config --services | grep "^client_" | tr "\n" " ")"; \
-		if [ -z "$$clients" ]; then echo "no client services found" >&2; exit 2; fi; \
-		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
+		if [ -z "$$clients" ]; then echo "no client services found" >&2; kill $$LOG_PID 2>/dev/null || true; exit 2; fi; \
+		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null || true; \
+		kill $$LOG_PID 2>/dev/null || true; \
+		wait $$LOG_PID 2>/dev/null || true; \
 		elapsed=$$((SECONDS - start_time)); \
+		echo ""; \
 		echo "Client finished in $${elapsed}s"; \
 		Q1_DATASET_DIR=data/datasets/$(Q1_DATASET) \
 		Q1_DATASET_TRANS=$(Q1_DATASET)_Trans.csv \
 			$(PYTHON) scripts/validate_q1_output.py \
 			&& echo "✓ Q1 test PASSED ($${elapsed}s)" \
-			|| { echo "✗ Q1 test FAILED ($${elapsed}s)"; exit 1; }; \
-		echo ""; \
-		echo "=== client_0 logs ==="; $$compose logs client_0'
+			|| { echo "✗ Q1 test FAILED ($${elapsed}s)"; exit 1; }'
 .PHONY: test-q1
 
-Q2_DATASET ?= LI-Mini
-Q2_SUM_WORKERS ?=
-CLIENTS ?=
+Q2_DATASET ?= LI-Small
+Q2_SUM_WORKERS ?= 4
+CLIENTS ?= 2
 test-q2:
+	@echo ">>> regenerating $(TEST_COMPOSE_FILE) for Q2 (dataset=$(Q2_DATASET))"
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q2-test --dataset $(Q2_DATASET) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
 		$(if $(Q2_SUM_WORKERS),--sum-q2-workers $(Q2_SUM_WORKERS)) \
@@ -381,24 +388,28 @@ test-q2:
 		mkdir -p data/output; \
 		rm -f data/output/results_q2_*.csv; \
 		start_time=$$SECONDS; \
-		echo "Starting Q2 flow test (preset=q2-test, dataset=$(Q2_DATASET), USD_WORKERS=$(or $(USD_WORKERS),1), Q2_SUM_WORKERS=$(or $(Q2_SUM_WORKERS),1), PREFETCH_COUNT=$(or $(PREFETCH_COUNT),1))..."; \
+		echo "Starting Q2 flow test (dataset=$(Q2_DATASET), Q2_SUM_WORKERS=$(or $(Q2_SUM_WORKERS),1), CLIENTS=$(or $(CLIENTS),1))..."; \
 		$$compose up --build --remove-orphans --detach; \
+		$$compose logs --follow --timestamps --no-color \
+			| $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR) & LOG_PID=$$!; \
 		clients="$$($$compose config --services | grep "^client_" | tr "\n" " ")"; \
-		if [ -z "$$clients" ]; then echo "no client services found" >&2; exit 2; fi; \
-		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
+		if [ -z "$$clients" ]; then echo "no client services found" >&2; kill $$LOG_PID 2>/dev/null || true; exit 2; fi; \
+		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null || true; \
+		kill $$LOG_PID 2>/dev/null || true; \
+		wait $$LOG_PID 2>/dev/null || true; \
 		elapsed=$$((SECONDS - start_time)); \
+		echo ""; \
 		echo "Client finished in $${elapsed}s"; \
 		Q2_DATASET_DIR=data/datasets/$(Q2_DATASET) \
 		Q2_DATASET_TRANS=$(Q2_DATASET)_Trans.csv \
 			$(PYTHON) scripts/validate_q2_output.py \
 			&& echo "✓ Q2 test PASSED ($${elapsed}s)" \
-			|| { echo "✗ Q2 test FAILED ($${elapsed}s)"; exit 1; }; \
-		echo ""; \
-		echo "=== client_0 logs ==="; $$compose logs client_0'
+			|| { echo "✗ Q2 test FAILED ($${elapsed}s)"; exit 1; }'
 .PHONY: test-q2
 
-Q3_DATASET ?= LI-Mini
+Q3_DATASET ?= LI-Small
 test-q3:
+	@echo ">>> regenerating $(TEST_COMPOSE_FILE) for Q3 (dataset=$(Q3_DATASET))"
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q3-test --dataset $(Q3_DATASET) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
 		$(if $(Q3_BARRIER_WORKERS),--q3-barrier-workers $(Q3_BARRIER_WORKERS)) \
@@ -419,28 +430,32 @@ test-q3:
 		mkdir -p data/output; \
 		rm -f data/output/results_q*.csv; \
 		start_time=$$SECONDS; \
-		echo "Starting Q3 flow test (preset=q3-test, dataset=$(Q3_DATASET))..."; \
+		echo "Starting Q3 flow test (dataset=$(Q3_DATASET), CLIENTS=$(or $(CLIENTS),1))..."; \
 		$$compose up --build --remove-orphans --detach; \
+		$$compose logs --follow --timestamps --no-color \
+			| $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR) & LOG_PID=$$!; \
 		clients="$$($$compose config --services | grep "^client_" | tr "\n" " ")"; \
-		if [ -z "$$clients" ]; then echo "no client services found" >&2; exit 2; fi; \
-		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
+		if [ -z "$$clients" ]; then echo "no client services found" >&2; kill $$LOG_PID 2>/dev/null || true; exit 2; fi; \
+		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null || true; \
+		kill $$LOG_PID 2>/dev/null || true; \
+		wait $$LOG_PID 2>/dev/null || true; \
 		elapsed=$$((SECONDS - start_time)); \
+		echo ""; \
 		echo "Client finished in $${elapsed}s"; \
 		Q3_DATASET_DIR=data/datasets/$(Q3_DATASET) \
 		Q3_DATASET_TRANS=$(Q3_DATASET)_Trans.csv \
 			$(PYTHON) scripts/validate_q3_output.py \
 			&& echo "✓ Q3 test PASSED ($${elapsed}s)" \
-			|| { echo "✗ Q3 test FAILED ($${elapsed}s)"; exit 1; }; \
-		echo ""; \
-		echo "=== client_0 logs ==="; $$compose logs client_0'
+			|| { echo "✗ Q3 test FAILED ($${elapsed}s)"; exit 1; }'
 .PHONY: test-q3
 
-Q5_DATASET ?= LI-Mini
-Q5_FORMAT_WORKERS ?=
-Q5_USD_WORKERS ?=
+Q5_DATASET ?= LI-Small
+Q5_FORMAT_WORKERS ?= 3
+Q5_USD_WORKERS ?= 3
 USD_WORKERS ?=
 PREFETCH_COUNT ?=
 test-q5:
+	@echo ">>> regenerating $(TEST_COMPOSE_FILE) for Q5 (dataset=$(Q5_DATASET))"
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q5-test --dataset $(Q5_DATASET) \
 		$(if $(Q5_FORMAT_WORKERS),--filter-q5-format-workers $(Q5_FORMAT_WORKERS)) \
 		$(if $(Q5_USD_WORKERS),--filter-q5-usd-workers $(Q5_USD_WORKERS)) \
@@ -462,20 +477,23 @@ test-q5:
 		mkdir -p data/output; \
 		rm -f data/output/results_q*.csv; \
 		start_time=$$SECONDS; \
-		echo "Starting Q5 flow test (preset=q5-test, dataset=$(Q5_DATASET))..."; \
+		echo "Starting Q5 flow test (dataset=$(Q5_DATASET), Q5_USD_WORKERS=$(or $(Q5_USD_WORKERS),1), PREFETCH_COUNT=$(or $(PREFETCH_COUNT),1), CLIENTS=$(or $(CLIENTS),1))..."; \
 		$$compose up --build --remove-orphans --detach; \
+		$$compose logs --follow --timestamps --no-color \
+			| $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR) & LOG_PID=$$!; \
 		clients="$$($$compose config --services | grep "^client_" | tr "\n" " ")"; \
-		if [ -z "$$clients" ]; then echo "no client services found" >&2; exit 2; fi; \
-		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
+		if [ -z "$$clients" ]; then echo "no client services found" >&2; kill $$LOG_PID 2>/dev/null || true; exit 2; fi; \
+		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null || true; \
+		kill $$LOG_PID 2>/dev/null || true; \
+		wait $$LOG_PID 2>/dev/null || true; \
 		elapsed=$$((SECONDS - start_time)); \
+		echo ""; \
 		echo "Client finished in $${elapsed}s"; \
 		Q5_DATASET_DIR=data/datasets/$(Q5_DATASET) \
 		Q5_DATASET_TRANS=$(Q5_DATASET)_Trans.csv \
 			$(PYTHON) scripts/validate_q5_output.py \
 			&& echo "✓ Q5 test PASSED ($${elapsed}s)" \
-			|| { echo "✗ Q5 test FAILED ($${elapsed}s)"; exit 1; }; \
-		echo ""; \
-		echo "=== client_0 logs ==="; $$compose logs client_0'
+			|| { echo "✗ Q5 test FAILED ($${elapsed}s)"; exit 1; }'
 .PHONY: test-q5
 
 test-unit:
