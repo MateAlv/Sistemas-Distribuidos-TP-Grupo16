@@ -23,7 +23,7 @@ services:
         condition: service_healthy
     environment:
     - FILE_INGESTOR_EXCHANGE=file_ingestor_exchange
-    - FILE_INGESTOR_PARTITIONS=1
+    - FILE_INGESTOR_PARTITIONS=3
     - FILE_SPLITTER_QUEUE_PREFIX=file_splitter
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
@@ -35,12 +35,12 @@ services:
     - GATEWAY_Q4_QUEUE=gateway_q4_results_queue
     - GATEWAY_Q5_QUEUE=join_q5_results_queue
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
   file_splitter_0:
     build:
       context: ./src/
@@ -60,12 +60,74 @@ services:
     - PYTHONUNBUFFERED=1
     - ACCOUNTS_LINE_BATCH_OUTPUT_QUEUE=accounts_line_batch_queue
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=file_splitter_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: file_splitter_0
+  file_splitter_1:
+    build:
+      context: ./src/
+      dockerfile: workers/file_splitter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - FILE_SPLITTER_INPUT_EXCHANGE=file_ingestor_exchange
+    - FILE_SPLITTER_QUEUE_PREFIX=file_splitter
+    - ID=1
+    - LINE_BATCH_OUTPUT_QUEUE=line_batch_queue
+    - LOGGING_LEVEL=INFO
+    - MAX_BATCH_BYTES=65536
+    - MAX_LINE_BYTES=16777216
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - ACCOUNTS_LINE_BATCH_OUTPUT_QUEUE=accounts_line_batch_queue
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=file_splitter_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: file_splitter_1
+  file_splitter_2:
+    build:
+      context: ./src/
+      dockerfile: workers/file_splitter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - FILE_SPLITTER_INPUT_EXCHANGE=file_ingestor_exchange
+    - FILE_SPLITTER_QUEUE_PREFIX=file_splitter
+    - ID=2
+    - LINE_BATCH_OUTPUT_QUEUE=line_batch_queue
+    - LOGGING_LEVEL=INFO
+    - MAX_BATCH_BYTES=65536
+    - MAX_LINE_BYTES=16777216
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - ACCOUNTS_LINE_BATCH_OUTPUT_QUEUE=accounts_line_batch_queue
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=file_splitter_2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: file_splitter_2
   file_ingestor_0:
     build:
       context: ./src/
@@ -84,12 +146,151 @@ services:
     - PYTHONUNBUFFERED=1
     - TRANSACTION_OUTPUT_EXCHANGE=transaction_fanout_exchange
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=file_ingestor_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: file_ingestor_0
+  file_ingestor_1:
+    build:
+      context: ./src/
+      dockerfile: workers/file_ingestor/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - ID=1
+    - FILE_INGESTOR_CONTROL_EXCHANGE=file_ingestor_control
+    - FILE_INGESTOR_RESPONSE_QUEUE_PREFIX=file_ingestor_response
+    - LINE_BATCH_INPUT_QUEUE=line_batch_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - TRANSACTION_OUTPUT_EXCHANGE=transaction_fanout_exchange
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=file_ingestor_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: file_ingestor_1
+  file_ingestor_2:
+    build:
+      context: ./src/
+      dockerfile: workers/file_ingestor/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - ID=2
+    - FILE_INGESTOR_CONTROL_EXCHANGE=file_ingestor_control
+    - FILE_INGESTOR_RESPONSE_QUEUE_PREFIX=file_ingestor_response
+    - LINE_BATCH_INPUT_QUEUE=line_batch_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - TRANSACTION_OUTPUT_EXCHANGE=transaction_fanout_exchange
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=file_ingestor_2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: file_ingestor_2
+  file_ingestor_3:
+    build:
+      context: ./src/
+      dockerfile: workers/file_ingestor/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - ID=3
+    - FILE_INGESTOR_CONTROL_EXCHANGE=file_ingestor_control
+    - FILE_INGESTOR_RESPONSE_QUEUE_PREFIX=file_ingestor_response
+    - LINE_BATCH_INPUT_QUEUE=line_batch_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - TRANSACTION_OUTPUT_EXCHANGE=transaction_fanout_exchange
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=file_ingestor_3
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: file_ingestor_3
+  file_ingestor_4:
+    build:
+      context: ./src/
+      dockerfile: workers/file_ingestor/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - ID=4
+    - FILE_INGESTOR_CONTROL_EXCHANGE=file_ingestor_control
+    - FILE_INGESTOR_RESPONSE_QUEUE_PREFIX=file_ingestor_response
+    - LINE_BATCH_INPUT_QUEUE=line_batch_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - TRANSACTION_OUTPUT_EXCHANGE=transaction_fanout_exchange
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=file_ingestor_4
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: file_ingestor_4
+  file_ingestor_5:
+    build:
+      context: ./src/
+      dockerfile: workers/file_ingestor/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - ID=5
+    - FILE_INGESTOR_CONTROL_EXCHANGE=file_ingestor_control
+    - FILE_INGESTOR_RESPONSE_QUEUE_PREFIX=file_ingestor_response
+    - LINE_BATCH_INPUT_QUEUE=line_batch_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - TRANSACTION_OUTPUT_EXCHANGE=transaction_fanout_exchange
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=file_ingestor_5
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: file_ingestor_5
   filter_usd_0:
     build:
       context: ./src/
@@ -99,7 +300,7 @@ services:
         condition: service_healthy
     environment:
     - CONFIGURATION=USD
-    - FILTER_AMOUNT=1
+    - FILTER_AMOUNT=6
     - FILTER_DATE_QUEUE=filter_date_queue
     - FILTER_PREFIX=filter
     - FILTER_Q1_QUEUE=filter_q1_queue
@@ -111,7 +312,7 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q3_BARRIER_AMOUNT=1
+    - Q3_BARRIER_AMOUNT=2
     - Q3_CANDIDATES_QUEUE=q3_candidates_queue
     - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
     - SUM_PREFIX=sum_q3
@@ -122,17 +323,268 @@ services:
     - USD_ENABLE_DATE=1
     - DATE_ENABLE_Q3=1
     - DATE_ENABLE_Q4=1
-    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_AMOUNT=6
     - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
     - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
     - TRANSACTION_EXCHANGE=transaction_fanout_exchange
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_usd_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_usd_0
+  filter_usd_1:
+    build:
+      context: ./src/
+      dockerfile: workers/filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - CONFIGURATION=USD
+    - FILTER_AMOUNT=6
+    - FILTER_DATE_QUEUE=filter_date_queue
+    - FILTER_PREFIX=filter
+    - FILTER_Q1_QUEUE=filter_q1_queue
+    - FILTER_Q3_QUEUE=filter_q3_queue
+    - FILTER_Q5_USD_QUEUE=filter_q5_usd_queue
+    - GATEWAY_QUEUE=gateway_results_queue
+    - ID=1
+    - INPUT_QUEUE=filter_usd_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q3_BARRIER_AMOUNT=2
+    - Q3_CANDIDATES_QUEUE=q3_candidates_queue
+    - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
+    - SUM_PREFIX=sum_q3
+    - SUM_Q2_QUEUE=sum_q2_queue
+    - SUM_Q3_QUEUE=sum_q3_queue
+    - USD_ENABLE_Q1=1
+    - USD_ENABLE_Q2=1
+    - USD_ENABLE_DATE=1
+    - DATE_ENABLE_Q3=1
+    - DATE_ENABLE_Q4=1
+    - Q4_FILTER_AMOUNT=6
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
+    - TRANSACTION_EXCHANGE=transaction_fanout_exchange
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_usd_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_usd_1
+  filter_usd_2:
+    build:
+      context: ./src/
+      dockerfile: workers/filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - CONFIGURATION=USD
+    - FILTER_AMOUNT=6
+    - FILTER_DATE_QUEUE=filter_date_queue
+    - FILTER_PREFIX=filter
+    - FILTER_Q1_QUEUE=filter_q1_queue
+    - FILTER_Q3_QUEUE=filter_q3_queue
+    - FILTER_Q5_USD_QUEUE=filter_q5_usd_queue
+    - GATEWAY_QUEUE=gateway_results_queue
+    - ID=2
+    - INPUT_QUEUE=filter_usd_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q3_BARRIER_AMOUNT=2
+    - Q3_CANDIDATES_QUEUE=q3_candidates_queue
+    - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
+    - SUM_PREFIX=sum_q3
+    - SUM_Q2_QUEUE=sum_q2_queue
+    - SUM_Q3_QUEUE=sum_q3_queue
+    - USD_ENABLE_Q1=1
+    - USD_ENABLE_Q2=1
+    - USD_ENABLE_DATE=1
+    - DATE_ENABLE_Q3=1
+    - DATE_ENABLE_Q4=1
+    - Q4_FILTER_AMOUNT=6
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
+    - TRANSACTION_EXCHANGE=transaction_fanout_exchange
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_usd_2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_usd_2
+  filter_usd_3:
+    build:
+      context: ./src/
+      dockerfile: workers/filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - CONFIGURATION=USD
+    - FILTER_AMOUNT=6
+    - FILTER_DATE_QUEUE=filter_date_queue
+    - FILTER_PREFIX=filter
+    - FILTER_Q1_QUEUE=filter_q1_queue
+    - FILTER_Q3_QUEUE=filter_q3_queue
+    - FILTER_Q5_USD_QUEUE=filter_q5_usd_queue
+    - GATEWAY_QUEUE=gateway_results_queue
+    - ID=3
+    - INPUT_QUEUE=filter_usd_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q3_BARRIER_AMOUNT=2
+    - Q3_CANDIDATES_QUEUE=q3_candidates_queue
+    - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
+    - SUM_PREFIX=sum_q3
+    - SUM_Q2_QUEUE=sum_q2_queue
+    - SUM_Q3_QUEUE=sum_q3_queue
+    - USD_ENABLE_Q1=1
+    - USD_ENABLE_Q2=1
+    - USD_ENABLE_DATE=1
+    - DATE_ENABLE_Q3=1
+    - DATE_ENABLE_Q4=1
+    - Q4_FILTER_AMOUNT=6
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
+    - TRANSACTION_EXCHANGE=transaction_fanout_exchange
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_usd_3
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_usd_3
+  filter_usd_4:
+    build:
+      context: ./src/
+      dockerfile: workers/filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - CONFIGURATION=USD
+    - FILTER_AMOUNT=6
+    - FILTER_DATE_QUEUE=filter_date_queue
+    - FILTER_PREFIX=filter
+    - FILTER_Q1_QUEUE=filter_q1_queue
+    - FILTER_Q3_QUEUE=filter_q3_queue
+    - FILTER_Q5_USD_QUEUE=filter_q5_usd_queue
+    - GATEWAY_QUEUE=gateway_results_queue
+    - ID=4
+    - INPUT_QUEUE=filter_usd_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q3_BARRIER_AMOUNT=2
+    - Q3_CANDIDATES_QUEUE=q3_candidates_queue
+    - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
+    - SUM_PREFIX=sum_q3
+    - SUM_Q2_QUEUE=sum_q2_queue
+    - SUM_Q3_QUEUE=sum_q3_queue
+    - USD_ENABLE_Q1=1
+    - USD_ENABLE_Q2=1
+    - USD_ENABLE_DATE=1
+    - DATE_ENABLE_Q3=1
+    - DATE_ENABLE_Q4=1
+    - Q4_FILTER_AMOUNT=6
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
+    - TRANSACTION_EXCHANGE=transaction_fanout_exchange
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_usd_4
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_usd_4
+  filter_usd_5:
+    build:
+      context: ./src/
+      dockerfile: workers/filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - CONFIGURATION=USD
+    - FILTER_AMOUNT=6
+    - FILTER_DATE_QUEUE=filter_date_queue
+    - FILTER_PREFIX=filter
+    - FILTER_Q1_QUEUE=filter_q1_queue
+    - FILTER_Q3_QUEUE=filter_q3_queue
+    - FILTER_Q5_USD_QUEUE=filter_q5_usd_queue
+    - GATEWAY_QUEUE=gateway_results_queue
+    - ID=5
+    - INPUT_QUEUE=filter_usd_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q3_BARRIER_AMOUNT=2
+    - Q3_CANDIDATES_QUEUE=q3_candidates_queue
+    - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
+    - SUM_PREFIX=sum_q3
+    - SUM_Q2_QUEUE=sum_q2_queue
+    - SUM_Q3_QUEUE=sum_q3_queue
+    - USD_ENABLE_Q1=1
+    - USD_ENABLE_Q2=1
+    - USD_ENABLE_DATE=1
+    - DATE_ENABLE_Q3=1
+    - DATE_ENABLE_Q4=1
+    - Q4_FILTER_AMOUNT=6
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
+    - TRANSACTION_EXCHANGE=transaction_fanout_exchange
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_usd_5
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_usd_5
   filter_q1_0:
     build:
       context: ./src/
@@ -142,7 +594,7 @@ services:
         condition: service_healthy
     environment:
     - CONFIGURATION=Q1
-    - FILTER_AMOUNT=1
+    - FILTER_AMOUNT=3
     - FILTER_DATE_QUEUE=filter_date_queue
     - FILTER_PREFIX=filter
     - FILTER_Q1_QUEUE=filter_q1_queue
@@ -154,7 +606,7 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q3_BARRIER_AMOUNT=1
+    - Q3_BARRIER_AMOUNT=2
     - Q3_CANDIDATES_QUEUE=q3_candidates_queue
     - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
     - SUM_PREFIX=sum_q3
@@ -165,16 +617,118 @@ services:
     - USD_ENABLE_DATE=1
     - DATE_ENABLE_Q3=1
     - DATE_ENABLE_Q4=1
-    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_AMOUNT=6
     - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
     - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_q1_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_q1_0
+  filter_q1_1:
+    build:
+      context: ./src/
+      dockerfile: workers/filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - CONFIGURATION=Q1
+    - FILTER_AMOUNT=3
+    - FILTER_DATE_QUEUE=filter_date_queue
+    - FILTER_PREFIX=filter
+    - FILTER_Q1_QUEUE=filter_q1_queue
+    - FILTER_Q3_QUEUE=filter_q3_queue
+    - FILTER_Q5_USD_QUEUE=filter_q5_usd_queue
+    - GATEWAY_QUEUE=gateway_results_queue
+    - ID=1
+    - INPUT_QUEUE=filter_q1_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q3_BARRIER_AMOUNT=2
+    - Q3_CANDIDATES_QUEUE=q3_candidates_queue
+    - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
+    - SUM_PREFIX=sum_q3
+    - SUM_Q2_QUEUE=sum_q2_queue
+    - SUM_Q3_QUEUE=sum_q3_queue
+    - USD_ENABLE_Q1=1
+    - USD_ENABLE_Q2=1
+    - USD_ENABLE_DATE=1
+    - DATE_ENABLE_Q3=1
+    - DATE_ENABLE_Q4=1
+    - Q4_FILTER_AMOUNT=6
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_q1_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_q1_1
+  filter_q1_2:
+    build:
+      context: ./src/
+      dockerfile: workers/filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - CONFIGURATION=Q1
+    - FILTER_AMOUNT=3
+    - FILTER_DATE_QUEUE=filter_date_queue
+    - FILTER_PREFIX=filter
+    - FILTER_Q1_QUEUE=filter_q1_queue
+    - FILTER_Q3_QUEUE=filter_q3_queue
+    - FILTER_Q5_USD_QUEUE=filter_q5_usd_queue
+    - GATEWAY_QUEUE=gateway_results_queue
+    - ID=2
+    - INPUT_QUEUE=filter_q1_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q3_BARRIER_AMOUNT=2
+    - Q3_CANDIDATES_QUEUE=q3_candidates_queue
+    - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
+    - SUM_PREFIX=sum_q3
+    - SUM_Q2_QUEUE=sum_q2_queue
+    - SUM_Q3_QUEUE=sum_q3_queue
+    - USD_ENABLE_Q1=1
+    - USD_ENABLE_Q2=1
+    - USD_ENABLE_DATE=1
+    - DATE_ENABLE_Q3=1
+    - DATE_ENABLE_Q4=1
+    - Q4_FILTER_AMOUNT=6
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_q1_2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_q1_2
   filter_date_0:
     build:
       context: ./src/
@@ -184,7 +738,7 @@ services:
         condition: service_healthy
     environment:
     - CONFIGURATION=DATE
-    - FILTER_AMOUNT=1
+    - FILTER_AMOUNT=4
     - FILTER_DATE_QUEUE=filter_date_queue
     - FILTER_PREFIX=filter
     - FILTER_Q1_QUEUE=filter_q1_queue
@@ -196,7 +750,7 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q3_BARRIER_AMOUNT=1
+    - Q3_BARRIER_AMOUNT=2
     - Q3_CANDIDATES_QUEUE=q3_candidates_queue
     - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
     - SUM_PREFIX=sum_q3
@@ -207,16 +761,166 @@ services:
     - USD_ENABLE_DATE=1
     - DATE_ENABLE_Q3=1
     - DATE_ENABLE_Q4=1
-    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_AMOUNT=6
     - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
     - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_date_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_date_0
+  filter_date_1:
+    build:
+      context: ./src/
+      dockerfile: workers/filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - CONFIGURATION=DATE
+    - FILTER_AMOUNT=4
+    - FILTER_DATE_QUEUE=filter_date_queue
+    - FILTER_PREFIX=filter
+    - FILTER_Q1_QUEUE=filter_q1_queue
+    - FILTER_Q3_QUEUE=filter_q3_queue
+    - FILTER_Q5_USD_QUEUE=filter_q5_usd_queue
+    - GATEWAY_QUEUE=gateway_results_queue
+    - ID=1
+    - INPUT_QUEUE=filter_date_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q3_BARRIER_AMOUNT=2
+    - Q3_CANDIDATES_QUEUE=q3_candidates_queue
+    - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
+    - SUM_PREFIX=sum_q3
+    - SUM_Q2_QUEUE=sum_q2_queue
+    - SUM_Q3_QUEUE=sum_q3_queue
+    - USD_ENABLE_Q1=1
+    - USD_ENABLE_Q2=1
+    - USD_ENABLE_DATE=1
+    - DATE_ENABLE_Q3=1
+    - DATE_ENABLE_Q4=1
+    - Q4_FILTER_AMOUNT=6
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_date_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_date_1
+  filter_date_2:
+    build:
+      context: ./src/
+      dockerfile: workers/filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - CONFIGURATION=DATE
+    - FILTER_AMOUNT=4
+    - FILTER_DATE_QUEUE=filter_date_queue
+    - FILTER_PREFIX=filter
+    - FILTER_Q1_QUEUE=filter_q1_queue
+    - FILTER_Q3_QUEUE=filter_q3_queue
+    - FILTER_Q5_USD_QUEUE=filter_q5_usd_queue
+    - GATEWAY_QUEUE=gateway_results_queue
+    - ID=2
+    - INPUT_QUEUE=filter_date_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q3_BARRIER_AMOUNT=2
+    - Q3_CANDIDATES_QUEUE=q3_candidates_queue
+    - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
+    - SUM_PREFIX=sum_q3
+    - SUM_Q2_QUEUE=sum_q2_queue
+    - SUM_Q3_QUEUE=sum_q3_queue
+    - USD_ENABLE_Q1=1
+    - USD_ENABLE_Q2=1
+    - USD_ENABLE_DATE=1
+    - DATE_ENABLE_Q3=1
+    - DATE_ENABLE_Q4=1
+    - Q4_FILTER_AMOUNT=6
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_date_2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_date_2
+  filter_date_3:
+    build:
+      context: ./src/
+      dockerfile: workers/filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - CONFIGURATION=DATE
+    - FILTER_AMOUNT=4
+    - FILTER_DATE_QUEUE=filter_date_queue
+    - FILTER_PREFIX=filter
+    - FILTER_Q1_QUEUE=filter_q1_queue
+    - FILTER_Q3_QUEUE=filter_q3_queue
+    - FILTER_Q5_USD_QUEUE=filter_q5_usd_queue
+    - GATEWAY_QUEUE=gateway_results_queue
+    - ID=3
+    - INPUT_QUEUE=filter_date_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q3_BARRIER_AMOUNT=2
+    - Q3_CANDIDATES_QUEUE=q3_candidates_queue
+    - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
+    - SUM_PREFIX=sum_q3
+    - SUM_Q2_QUEUE=sum_q2_queue
+    - SUM_Q3_QUEUE=sum_q3_queue
+    - USD_ENABLE_Q1=1
+    - USD_ENABLE_Q2=1
+    - USD_ENABLE_DATE=1
+    - DATE_ENABLE_Q3=1
+    - DATE_ENABLE_Q4=1
+    - Q4_FILTER_AMOUNT=6
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_date_3
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_date_3
   filter_q5_format_0:
     build:
       context: ./src/
@@ -226,7 +930,7 @@ services:
         condition: service_healthy
     environment:
     - CONFIGURATION=Q5
-    - FILTER_AMOUNT=1
+    - FILTER_AMOUNT=3
     - FILTER_DATE_QUEUE=filter_date_queue
     - FILTER_PREFIX=filter
     - FILTER_Q1_QUEUE=filter_q1_queue
@@ -238,7 +942,7 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q3_BARRIER_AMOUNT=1
+    - Q3_BARRIER_AMOUNT=2
     - Q3_CANDIDATES_QUEUE=q3_candidates_queue
     - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
     - SUM_PREFIX=sum_q3
@@ -249,17 +953,121 @@ services:
     - USD_ENABLE_DATE=1
     - DATE_ENABLE_Q3=1
     - DATE_ENABLE_Q4=1
-    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_AMOUNT=6
     - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
     - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
     - TRANSACTION_EXCHANGE=transaction_fanout_exchange
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_q5_format_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_q5_format_0
+  filter_q5_format_1:
+    build:
+      context: ./src/
+      dockerfile: workers/filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - CONFIGURATION=Q5
+    - FILTER_AMOUNT=3
+    - FILTER_DATE_QUEUE=filter_date_queue
+    - FILTER_PREFIX=filter
+    - FILTER_Q1_QUEUE=filter_q1_queue
+    - FILTER_Q3_QUEUE=filter_q3_queue
+    - FILTER_Q5_USD_QUEUE=filter_q5_usd_queue
+    - GATEWAY_QUEUE=gateway_results_queue
+    - ID=1
+    - INPUT_QUEUE=filter_q5_format_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q3_BARRIER_AMOUNT=2
+    - Q3_CANDIDATES_QUEUE=q3_candidates_queue
+    - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
+    - SUM_PREFIX=sum_q3
+    - SUM_Q2_QUEUE=sum_q2_queue
+    - SUM_Q3_QUEUE=sum_q3_queue
+    - USD_ENABLE_Q1=1
+    - USD_ENABLE_Q2=1
+    - USD_ENABLE_DATE=1
+    - DATE_ENABLE_Q3=1
+    - DATE_ENABLE_Q4=1
+    - Q4_FILTER_AMOUNT=6
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
+    - TRANSACTION_EXCHANGE=transaction_fanout_exchange
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_q5_format_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_q5_format_1
+  filter_q5_format_2:
+    build:
+      context: ./src/
+      dockerfile: workers/filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - CONFIGURATION=Q5
+    - FILTER_AMOUNT=3
+    - FILTER_DATE_QUEUE=filter_date_queue
+    - FILTER_PREFIX=filter
+    - FILTER_Q1_QUEUE=filter_q1_queue
+    - FILTER_Q3_QUEUE=filter_q3_queue
+    - FILTER_Q5_USD_QUEUE=filter_q5_usd_queue
+    - GATEWAY_QUEUE=gateway_results_queue
+    - ID=2
+    - INPUT_QUEUE=filter_q5_format_queue
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q3_BARRIER_AMOUNT=2
+    - Q3_CANDIDATES_QUEUE=q3_candidates_queue
+    - SCATTER_GATHER_MAPPER_QUEUE=scatter_gather_mapper_queue
+    - SUM_PREFIX=sum_q3
+    - SUM_Q2_QUEUE=sum_q2_queue
+    - SUM_Q3_QUEUE=sum_q3_queue
+    - USD_ENABLE_Q1=1
+    - USD_ENABLE_Q2=1
+    - USD_ENABLE_DATE=1
+    - DATE_ENABLE_Q3=1
+    - DATE_ENABLE_Q4=1
+    - Q4_FILTER_AMOUNT=6
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
+    - TRANSACTION_EXCHANGE=transaction_fanout_exchange
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_q5_format_2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_q5_format_2
   rates_service:
     build:
       context: .
@@ -272,12 +1080,12 @@ services:
     - RATES_REFERENCE_OVERLAY=q5
     - PYTHONUNBUFFERED=1
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
     volumes:
     - ./data/rates:/data/rates:rw
   filter_q5_usd_0:
@@ -288,9 +1096,9 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_AMOUNT=2
     - AGGREGATION_PREFIX=aggregation_q5
-    - FILTER_Q5_USD_AMOUNT=1
+    - FILTER_Q5_USD_AMOUNT=3
     - ID=0
     - INPUT_QUEUE=filter_q5_usd_queue
     - MOM_HOST=rabbitmq
@@ -299,12 +1107,74 @@ services:
     - Q5_START_DATE=2022-09-01
     - Q5_END_DATE=2022-09-05
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_q5_usd_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_q5_usd_0
+  filter_q5_usd_1:
+    build:
+      context: ./src/
+      dockerfile: workers/filter_q5_usd/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=2
+    - AGGREGATION_PREFIX=aggregation_q5
+    - FILTER_Q5_USD_AMOUNT=3
+    - ID=1
+    - INPUT_QUEUE=filter_q5_usd_queue
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - RATES_REQUEST_QUEUE=rates_requests
+    - Q5_START_DATE=2022-09-01
+    - Q5_END_DATE=2022-09-05
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_q5_usd_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_q5_usd_1
+  filter_q5_usd_2:
+    build:
+      context: ./src/
+      dockerfile: workers/filter_q5_usd/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=2
+    - AGGREGATION_PREFIX=aggregation_q5
+    - FILTER_Q5_USD_AMOUNT=3
+    - ID=2
+    - INPUT_QUEUE=filter_q5_usd_queue
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - RATES_REQUEST_QUEUE=rates_requests
+    - Q5_START_DATE=2022-09-01
+    - Q5_END_DATE=2022-09-05
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=filter_q5_usd_2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: filter_q5_usd_2
   sum_q2_0:
     build:
       context: ./src/
@@ -313,22 +1183,26 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_AMOUNT=3
     - AGGREGATION_PREFIX=aggregation_q2
     - CONFIGURATION=Q2
     - ID=0
     - INPUT_QUEUE=sum_q2_queue
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
+    - SUM_AMOUNT=4
     - SUM_PREFIX=sum_q2
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=sum_q2_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: sum_q2_0
   sum_q2_1:
     build:
       context: ./src/
@@ -337,22 +1211,26 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_AMOUNT=3
     - AGGREGATION_PREFIX=aggregation_q2
     - CONFIGURATION=Q2
     - ID=1
     - INPUT_QUEUE=sum_q2_queue
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
+    - SUM_AMOUNT=4
     - SUM_PREFIX=sum_q2
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=sum_q2_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: sum_q2_1
   sum_q2_2:
     build:
       context: ./src/
@@ -361,22 +1239,54 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_AMOUNT=3
     - AGGREGATION_PREFIX=aggregation_q2
     - CONFIGURATION=Q2
     - ID=2
     - INPUT_QUEUE=sum_q2_queue
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
+    - SUM_AMOUNT=4
     - SUM_PREFIX=sum_q2
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=sum_q2_2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: sum_q2_2
+  sum_q2_3:
+    build:
+      context: ./src/
+      dockerfile: workers/sum/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=3
+    - AGGREGATION_PREFIX=aggregation_q2
+    - CONFIGURATION=Q2
+    - ID=3
+    - INPUT_QUEUE=sum_q2_queue
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=4
+    - SUM_PREFIX=sum_q2
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=sum_q2_3
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: sum_q2_3
   sum_q3_0:
     build:
       context: ./src/
@@ -385,22 +1295,26 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_AMOUNT=3
     - AGGREGATION_PREFIX=aggregation_q3
     - CONFIGURATION=Q3
     - ID=0
     - INPUT_QUEUE=sum_q3_queue
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
+    - SUM_AMOUNT=6
     - SUM_PREFIX=sum_q3
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=sum_q3_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: sum_q3_0
   sum_q3_1:
     build:
       context: ./src/
@@ -409,22 +1323,26 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_AMOUNT=3
     - AGGREGATION_PREFIX=aggregation_q3
     - CONFIGURATION=Q3
     - ID=1
     - INPUT_QUEUE=sum_q3_queue
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
+    - SUM_AMOUNT=6
     - SUM_PREFIX=sum_q3
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=sum_q3_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: sum_q3_1
   sum_q3_2:
     build:
       context: ./src/
@@ -433,22 +1351,110 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_AMOUNT=3
     - AGGREGATION_PREFIX=aggregation_q3
     - CONFIGURATION=Q3
     - ID=2
     - INPUT_QUEUE=sum_q3_queue
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
+    - SUM_AMOUNT=6
     - SUM_PREFIX=sum_q3
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=sum_q3_2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: sum_q3_2
+  sum_q3_3:
+    build:
+      context: ./src/
+      dockerfile: workers/sum/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=3
+    - AGGREGATION_PREFIX=aggregation_q3
+    - CONFIGURATION=Q3
+    - ID=3
+    - INPUT_QUEUE=sum_q3_queue
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=6
+    - SUM_PREFIX=sum_q3
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=sum_q3_3
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: sum_q3_3
+  sum_q3_4:
+    build:
+      context: ./src/
+      dockerfile: workers/sum/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=3
+    - AGGREGATION_PREFIX=aggregation_q3
+    - CONFIGURATION=Q3
+    - ID=4
+    - INPUT_QUEUE=sum_q3_queue
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=6
+    - SUM_PREFIX=sum_q3
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=sum_q3_4
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: sum_q3_4
+  sum_q3_5:
+    build:
+      context: ./src/
+      dockerfile: workers/sum/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=3
+    - AGGREGATION_PREFIX=aggregation_q3
+    - CONFIGURATION=Q3
+    - ID=5
+    - INPUT_QUEUE=sum_q3_queue
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=6
+    - SUM_PREFIX=sum_q3
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=sum_q3_5
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: sum_q3_5
   aggregation_q2_0:
     build:
       context: ./src/
@@ -457,22 +1463,82 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_AMOUNT=3
     - AGGREGATION_PREFIX=aggregation_q2
     - CONFIGURATION=Q2
     - ID=0
     - MOM_HOST=rabbitmq
     - OUTPUT_QUEUE=join_q2_queue
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
+    - SUM_AMOUNT=4
     - SUM_PREFIX=sum_q2
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=aggregation_q2_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: aggregation_q2_0
+  aggregation_q2_1:
+    build:
+      context: ./src/
+      dockerfile: workers/aggregator/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=3
+    - AGGREGATION_PREFIX=aggregation_q2
+    - CONFIGURATION=Q2
+    - ID=1
+    - MOM_HOST=rabbitmq
+    - OUTPUT_QUEUE=join_q2_queue
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=4
+    - SUM_PREFIX=sum_q2
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=aggregation_q2_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: aggregation_q2_1
+  aggregation_q2_2:
+    build:
+      context: ./src/
+      dockerfile: workers/aggregator/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=3
+    - AGGREGATION_PREFIX=aggregation_q2
+    - CONFIGURATION=Q2
+    - ID=2
+    - MOM_HOST=rabbitmq
+    - OUTPUT_QUEUE=join_q2_queue
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=4
+    - SUM_PREFIX=sum_q2
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=aggregation_q2_2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: aggregation_q2_2
   join_q2:
     build:
       context: ./src/
@@ -481,7 +1547,7 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_AMOUNT=3
     - AGGREGATION_PREFIX=aggregation_q2
     - CONFIGURATION=Q2
     - ID=0
@@ -489,15 +1555,19 @@ services:
     - MOM_HOST=rabbitmq
     - OUTPUT_QUEUE=q2_enrich_queue
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
+    - SUM_AMOUNT=4
     - SUM_PREFIX=sum_q2
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=join_q2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: join_q2
   q2_bank_name_joiner:
     build:
       context: ./src/
@@ -514,12 +1584,16 @@ services:
     - PYTHONUNBUFFERED=1
     - Q2_INPUT_QUEUE=q2_enrich_queue
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q2_bank_name_joiner
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q2_bank_name_joiner
   aggregation_q3_0:
     build:
       context: ./src/
@@ -528,22 +1602,82 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_AMOUNT=3
     - AGGREGATION_PREFIX=aggregation_q3
     - CONFIGURATION=Q3
     - ID=0
     - MOM_HOST=rabbitmq
     - OUTPUT_QUEUE=join_q3_queue
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
+    - SUM_AMOUNT=6
     - SUM_PREFIX=sum_q3
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=aggregation_q3_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: aggregation_q3_0
+  aggregation_q3_1:
+    build:
+      context: ./src/
+      dockerfile: workers/aggregator/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=3
+    - AGGREGATION_PREFIX=aggregation_q3
+    - CONFIGURATION=Q3
+    - ID=1
+    - MOM_HOST=rabbitmq
+    - OUTPUT_QUEUE=join_q3_queue
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=6
+    - SUM_PREFIX=sum_q3
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=aggregation_q3_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: aggregation_q3_1
+  aggregation_q3_2:
+    build:
+      context: ./src/
+      dockerfile: workers/aggregator/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=3
+    - AGGREGATION_PREFIX=aggregation_q3
+    - CONFIGURATION=Q3
+    - ID=2
+    - MOM_HOST=rabbitmq
+    - OUTPUT_QUEUE=join_q3_queue
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=6
+    - SUM_PREFIX=sum_q3
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=aggregation_q3_2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: aggregation_q3_2
   join_q3:
     build:
       context: ./src/
@@ -552,7 +1686,7 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_AMOUNT=3
     - AGGREGATION_PREFIX=aggregation_q3
     - CONFIGURATION=Q3
     - ID=0
@@ -560,15 +1694,22 @@ services:
     - MOM_HOST=rabbitmq
     - OUTPUT_QUEUE=join_q3_results_queue
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=3
+    - SUM_AMOUNT=6
     - SUM_PREFIX=sum_q3
+    - Q3_BARRIER_AMOUNT=2
+    - Q3_AVERAGES_EXCHANGE=q3_averages_exchange
+    - Q3_AVERAGES_ROUTING_PREFIX=q3_averages
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=join_q3
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: join_q3
   q3_barrier_0:
     build:
       context: ./src/
@@ -583,15 +1724,54 @@ services:
     - PYTHONUNBUFFERED=1
     - Q3_AVERAGES_QUEUE=join_q3_results_queue
     - Q3_CANDIDATES_QUEUE=q3_candidates_queue
-    - Q3_BARRIER_AMOUNT=1
+    - Q3_BARRIER_AMOUNT=2
     - Q3_THRESHOLD_DIVISOR=100
+    - Q3_AVERAGES_EXCHANGE=q3_averages_exchange
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_AVERAGES_ROUTING_PREFIX=q3_averages
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q3_barrier_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q3_barrier_0
+  q3_barrier_1:
+    build:
+      context: ./src/
+      dockerfile: workers/q3_barrier/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - ID=1
+    - GATEWAY_Q3_QUEUE=gateway_q3_results_queue
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q3_AVERAGES_QUEUE=join_q3_results_queue
+    - Q3_CANDIDATES_QUEUE=q3_candidates_queue
+    - Q3_BARRIER_AMOUNT=2
+    - Q3_THRESHOLD_DIVISOR=100
+    - Q3_AVERAGES_EXCHANGE=q3_averages_exchange
+    - Q3_CANDIDATES_EXCHANGE=q3_candidates_exchange
+    - Q3_AVERAGES_ROUTING_PREFIX=q3_averages
+    - Q3_CANDIDATES_ROUTING_PREFIX=q3_candidates
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q3_barrier_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q3_barrier_1
   aggregation_q5_0:
     build:
       context: ./src/
@@ -600,22 +1780,54 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_AMOUNT=2
     - AGGREGATION_PREFIX=aggregation_q5
     - CONFIGURATION=Q5
     - ID=0
     - MOM_HOST=rabbitmq
     - OUTPUT_QUEUE=join_q5_queue
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=1
+    - SUM_AMOUNT=3
     - SUM_PREFIX=filter_q5_usd
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=aggregation_q5_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: aggregation_q5_0
+  aggregation_q5_1:
+    build:
+      context: ./src/
+      dockerfile: workers/aggregator/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - AGGREGATION_AMOUNT=2
+    - AGGREGATION_PREFIX=aggregation_q5
+    - CONFIGURATION=Q5
+    - ID=1
+    - MOM_HOST=rabbitmq
+    - OUTPUT_QUEUE=join_q5_queue
+    - PYTHONUNBUFFERED=1
+    - SUM_AMOUNT=3
+    - SUM_PREFIX=filter_q5_usd
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=aggregation_q5_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: aggregation_q5_1
   join_q5:
     build:
       context: ./src/
@@ -624,7 +1836,7 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_AMOUNT=2
     - AGGREGATION_PREFIX=aggregation_q5
     - CONFIGURATION=Q5
     - ID=0
@@ -632,15 +1844,19 @@ services:
     - MOM_HOST=rabbitmq
     - OUTPUT_QUEUE=join_q5_results_queue
     - PYTHONUNBUFFERED=1
-    - SUM_AMOUNT=1
+    - SUM_AMOUNT=3
     - SUM_PREFIX=filter_q5_usd
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=join_q5
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: join_q5
   q4_filter_0:
     build:
       context: ./src/
@@ -653,20 +1869,24 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_AMOUNT=6
     - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
     - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
     - Q4_FILTER_PREFIX=q4_filter
     - Q4_SUM_EXCHANGE=q4_sum_exchange
-    - Q4_SUM_AMOUNT=3
+    - Q4_SUM_AMOUNT=4
     - Q4_SUM_ROUTING_PREFIX=q4_sum
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_filter_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_filter_0
   q4_filter_1:
     build:
       context: ./src/
@@ -679,20 +1899,24 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_AMOUNT=6
     - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
     - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
     - Q4_FILTER_PREFIX=q4_filter
     - Q4_SUM_EXCHANGE=q4_sum_exchange
-    - Q4_SUM_AMOUNT=3
+    - Q4_SUM_AMOUNT=4
     - Q4_SUM_ROUTING_PREFIX=q4_sum
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_filter_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_filter_1
   q4_filter_2:
     build:
       context: ./src/
@@ -705,20 +1929,114 @@ services:
     - LOGGING_LEVEL=INFO
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_AMOUNT=6
     - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
     - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
     - Q4_FILTER_PREFIX=q4_filter
     - Q4_SUM_EXCHANGE=q4_sum_exchange
-    - Q4_SUM_AMOUNT=3
+    - Q4_SUM_AMOUNT=4
     - Q4_SUM_ROUTING_PREFIX=q4_sum
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_filter_2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_filter_2
+  q4_filter_3:
+    build:
+      context: ./src/
+      dockerfile: workers/scatter_gather/q4_filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - ID=3
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q4_FILTER_AMOUNT=6
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q4_FILTER_PREFIX=q4_filter
+    - Q4_SUM_EXCHANGE=q4_sum_exchange
+    - Q4_SUM_AMOUNT=4
+    - Q4_SUM_ROUTING_PREFIX=q4_sum
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_filter_3
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_filter_3
+  q4_filter_4:
+    build:
+      context: ./src/
+      dockerfile: workers/scatter_gather/q4_filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - ID=4
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q4_FILTER_AMOUNT=6
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q4_FILTER_PREFIX=q4_filter
+    - Q4_SUM_EXCHANGE=q4_sum_exchange
+    - Q4_SUM_AMOUNT=4
+    - Q4_SUM_ROUTING_PREFIX=q4_sum
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_filter_4
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_filter_4
+  q4_filter_5:
+    build:
+      context: ./src/
+      dockerfile: workers/scatter_gather/q4_filter/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - ID=5
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q4_FILTER_AMOUNT=6
+    - Q4_FILTER_INPUT_EXCHANGE=q4_filter_input_exchange
+    - Q4_FILTER_INPUT_ROUTING_PREFIX=q4_filter
+    - Q4_FILTER_PREFIX=q4_filter
+    - Q4_SUM_EXCHANGE=q4_sum_exchange
+    - Q4_SUM_AMOUNT=4
+    - Q4_SUM_ROUTING_PREFIX=q4_sum
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_filter_5
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_filter_5
   q4_sum_0:
     build:
       context: ./src/
@@ -733,17 +2051,21 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_SUM_EXCHANGE=q4_sum_exchange
     - Q4_SUM_ROUTING_PREFIX=q4_sum
-    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_AMOUNT=6
     - Q4_JOINER_EXCHANGE=q4_joiner_exchange
-    - Q4_JOINER_AMOUNT=6
+    - Q4_JOINER_AMOUNT=8
     - Q4_JOINER_ROUTING_PREFIX=q4_joiner
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_sum_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_sum_0
   q4_sum_1:
     build:
       context: ./src/
@@ -758,17 +2080,21 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_SUM_EXCHANGE=q4_sum_exchange
     - Q4_SUM_ROUTING_PREFIX=q4_sum
-    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_AMOUNT=6
     - Q4_JOINER_EXCHANGE=q4_joiner_exchange
-    - Q4_JOINER_AMOUNT=6
+    - Q4_JOINER_AMOUNT=8
     - Q4_JOINER_ROUTING_PREFIX=q4_joiner
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_sum_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_sum_1
   q4_sum_2:
     build:
       context: ./src/
@@ -783,17 +2109,50 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_SUM_EXCHANGE=q4_sum_exchange
     - Q4_SUM_ROUTING_PREFIX=q4_sum
-    - Q4_FILTER_AMOUNT=3
+    - Q4_FILTER_AMOUNT=6
     - Q4_JOINER_EXCHANGE=q4_joiner_exchange
-    - Q4_JOINER_AMOUNT=6
+    - Q4_JOINER_AMOUNT=8
     - Q4_JOINER_ROUTING_PREFIX=q4_joiner
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_sum_2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_sum_2
+  q4_sum_3:
+    build:
+      context: ./src/
+      dockerfile: workers/scatter_gather/q4_sum/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - ID=3
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q4_SUM_EXCHANGE=q4_sum_exchange
+    - Q4_SUM_ROUTING_PREFIX=q4_sum
+    - Q4_FILTER_AMOUNT=6
+    - Q4_JOINER_EXCHANGE=q4_joiner_exchange
+    - Q4_JOINER_AMOUNT=8
+    - Q4_JOINER_ROUTING_PREFIX=q4_joiner
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_sum_3
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_sum_3
   q4_joiner_0:
     build:
       context: ./src/
@@ -808,17 +2167,21 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_JOINER_EXCHANGE=q4_joiner_exchange
     - Q4_JOINER_ROUTING_PREFIX=q4_joiner
-    - Q4_SUM_AMOUNT=3
+    - Q4_SUM_AMOUNT=4
     - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
-    - Q4_AGGREGATOR_AMOUNT=6
+    - Q4_AGGREGATOR_AMOUNT=8
     - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_joiner_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_joiner_0
   q4_joiner_1:
     build:
       context: ./src/
@@ -833,17 +2196,21 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_JOINER_EXCHANGE=q4_joiner_exchange
     - Q4_JOINER_ROUTING_PREFIX=q4_joiner
-    - Q4_SUM_AMOUNT=3
+    - Q4_SUM_AMOUNT=4
     - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
-    - Q4_AGGREGATOR_AMOUNT=6
+    - Q4_AGGREGATOR_AMOUNT=8
     - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_joiner_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_joiner_1
   q4_joiner_2:
     build:
       context: ./src/
@@ -858,17 +2225,21 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_JOINER_EXCHANGE=q4_joiner_exchange
     - Q4_JOINER_ROUTING_PREFIX=q4_joiner
-    - Q4_SUM_AMOUNT=3
+    - Q4_SUM_AMOUNT=4
     - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
-    - Q4_AGGREGATOR_AMOUNT=6
+    - Q4_AGGREGATOR_AMOUNT=8
     - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_joiner_2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_joiner_2
   q4_joiner_3:
     build:
       context: ./src/
@@ -883,17 +2254,21 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_JOINER_EXCHANGE=q4_joiner_exchange
     - Q4_JOINER_ROUTING_PREFIX=q4_joiner
-    - Q4_SUM_AMOUNT=3
+    - Q4_SUM_AMOUNT=4
     - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
-    - Q4_AGGREGATOR_AMOUNT=6
+    - Q4_AGGREGATOR_AMOUNT=8
     - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_joiner_3
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_joiner_3
   q4_joiner_4:
     build:
       context: ./src/
@@ -908,17 +2283,21 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_JOINER_EXCHANGE=q4_joiner_exchange
     - Q4_JOINER_ROUTING_PREFIX=q4_joiner
-    - Q4_SUM_AMOUNT=3
+    - Q4_SUM_AMOUNT=4
     - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
-    - Q4_AGGREGATOR_AMOUNT=6
+    - Q4_AGGREGATOR_AMOUNT=8
     - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_joiner_4
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_joiner_4
   q4_joiner_5:
     build:
       context: ./src/
@@ -933,17 +2312,79 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_JOINER_EXCHANGE=q4_joiner_exchange
     - Q4_JOINER_ROUTING_PREFIX=q4_joiner
-    - Q4_SUM_AMOUNT=3
+    - Q4_SUM_AMOUNT=4
     - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
-    - Q4_AGGREGATOR_AMOUNT=6
+    - Q4_AGGREGATOR_AMOUNT=8
     - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_joiner_5
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_joiner_5
+  q4_joiner_6:
+    build:
+      context: ./src/
+      dockerfile: workers/scatter_gather/q4_joiner/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - ID=6
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q4_JOINER_EXCHANGE=q4_joiner_exchange
+    - Q4_JOINER_ROUTING_PREFIX=q4_joiner
+    - Q4_SUM_AMOUNT=4
+    - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
+    - Q4_AGGREGATOR_AMOUNT=8
+    - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_joiner_6
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_joiner_6
+  q4_joiner_7:
+    build:
+      context: ./src/
+      dockerfile: workers/scatter_gather/q4_joiner/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - ID=7
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q4_JOINER_EXCHANGE=q4_joiner_exchange
+    - Q4_JOINER_ROUTING_PREFIX=q4_joiner
+    - Q4_SUM_AMOUNT=4
+    - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
+    - Q4_AGGREGATOR_AMOUNT=8
+    - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_joiner_7
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_joiner_7
   q4_aggregator_0:
     build:
       context: ./src/
@@ -958,17 +2399,21 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
     - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
-    - Q4_JOINER_AMOUNT=6
+    - Q4_JOINER_AMOUNT=8
     - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
-    - Q4_DEDUPER_AMOUNT=3
+    - Q4_DEDUPER_AMOUNT=2
     - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_aggregator_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_aggregator_0
   q4_aggregator_1:
     build:
       context: ./src/
@@ -983,17 +2428,21 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
     - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
-    - Q4_JOINER_AMOUNT=6
+    - Q4_JOINER_AMOUNT=8
     - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
-    - Q4_DEDUPER_AMOUNT=3
+    - Q4_DEDUPER_AMOUNT=2
     - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_aggregator_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_aggregator_1
   q4_aggregator_2:
     build:
       context: ./src/
@@ -1008,17 +2457,21 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
     - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
-    - Q4_JOINER_AMOUNT=6
+    - Q4_JOINER_AMOUNT=8
     - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
-    - Q4_DEDUPER_AMOUNT=3
+    - Q4_DEDUPER_AMOUNT=2
     - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_aggregator_2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_aggregator_2
   q4_aggregator_3:
     build:
       context: ./src/
@@ -1033,17 +2486,21 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
     - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
-    - Q4_JOINER_AMOUNT=6
+    - Q4_JOINER_AMOUNT=8
     - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
-    - Q4_DEDUPER_AMOUNT=3
+    - Q4_DEDUPER_AMOUNT=2
     - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_aggregator_3
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_aggregator_3
   q4_aggregator_4:
     build:
       context: ./src/
@@ -1058,17 +2515,21 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
     - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
-    - Q4_JOINER_AMOUNT=6
+    - Q4_JOINER_AMOUNT=8
     - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
-    - Q4_DEDUPER_AMOUNT=3
+    - Q4_DEDUPER_AMOUNT=2
     - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_aggregator_4
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_aggregator_4
   q4_aggregator_5:
     build:
       context: ./src/
@@ -1083,17 +2544,79 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
     - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
-    - Q4_JOINER_AMOUNT=6
+    - Q4_JOINER_AMOUNT=8
     - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
-    - Q4_DEDUPER_AMOUNT=3
+    - Q4_DEDUPER_AMOUNT=2
     - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_aggregator_5
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_aggregator_5
+  q4_aggregator_6:
+    build:
+      context: ./src/
+      dockerfile: workers/scatter_gather/q4_aggregator/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - ID=6
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
+    - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
+    - Q4_JOINER_AMOUNT=8
+    - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
+    - Q4_DEDUPER_AMOUNT=2
+    - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_aggregator_6
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_aggregator_6
+  q4_aggregator_7:
+    build:
+      context: ./src/
+      dockerfile: workers/scatter_gather/q4_aggregator/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - ID=7
+    - LOGGING_LEVEL=INFO
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - Q4_AGGREGATOR_EXCHANGE=q4_aggregator_exchange
+    - Q4_AGGREGATOR_ROUTING_PREFIX=q4_aggregator
+    - Q4_JOINER_AMOUNT=8
+    - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
+    - Q4_DEDUPER_AMOUNT=2
+    - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
+    - FLOW_LOG_ENABLED=1
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
+    - FLOW_LOG_FIRST_MESSAGES=1
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_aggregator_7
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_aggregator_7
   q4_deduper_0:
     build:
       context: ./src/
@@ -1108,17 +2631,21 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
     - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
-    - Q4_AGGREGATOR_AMOUNT=6
-    - Q4_DEDUPER_AMOUNT=3
+    - Q4_AGGREGATOR_AMOUNT=8
+    - Q4_DEDUPER_AMOUNT=2
     - Q4_DEDUPER_RESPONSE_QUEUE_PREFIX=q4_deduper_response
     - GATEWAY_Q4_QUEUE=gateway_q4_results_queue
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_deduper_0
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_deduper_0
   q4_deduper_1:
     build:
       context: ./src/
@@ -1133,42 +2660,99 @@ services:
     - PYTHONUNBUFFERED=1
     - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
     - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
-    - Q4_AGGREGATOR_AMOUNT=6
-    - Q4_DEDUPER_AMOUNT=3
+    - Q4_AGGREGATOR_AMOUNT=8
+    - Q4_DEDUPER_AMOUNT=2
     - Q4_DEDUPER_RESPONSE_QUEUE_PREFIX=q4_deduper_response
     - GATEWAY_Q4_QUEUE=gateway_q4_results_queue
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
-  q4_deduper_2:
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
+    - NODE_NAME=q4_deduper_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    container_name: q4_deduper_1
+  monitor_1:
     build:
       context: ./src/
-      dockerfile: workers/scatter_gather/q4_deduper/Dockerfile
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
+      dockerfile: monitor/Dockerfile
     environment:
-    - ID=2
+    - MONITOR_ID=1
+    - MONITOR_COUNT=3
+    - MONITOR_PORT=9000
+    - ELECTION_PORT=9001
+    - MONITOR_CHECK_INTERVAL=3
+    - MAX_MISSED=3
+    - ELECTION_TIMEOUT=5
+    - COORDINATOR_TIMEOUT=10
+    - NODES_TO_WATCH=file_splitter_0,file_splitter_1,file_splitter_2,file_ingestor_0,file_ingestor_1,file_ingestor_2,file_ingestor_3,file_ingestor_4,file_ingestor_5,filter_usd_0,filter_usd_1,filter_usd_2,filter_usd_3,filter_usd_4,filter_usd_5,filter_q1_0,filter_q1_1,filter_q1_2,filter_date_0,filter_date_1,filter_date_2,filter_date_3,filter_q5_format_0,filter_q5_format_1,filter_q5_format_2,filter_q5_usd_0,filter_q5_usd_1,filter_q5_usd_2,sum_q2_0,sum_q2_1,sum_q2_2,sum_q2_3,sum_q3_0,sum_q3_1,sum_q3_2,sum_q3_3,sum_q3_4,sum_q3_5,aggregation_q2_0,aggregation_q2_1,aggregation_q2_2,join_q2,q2_bank_name_joiner,aggregation_q3_0,aggregation_q3_1,aggregation_q3_2,join_q3,q3_barrier_0,q3_barrier_1,aggregation_q5_0,aggregation_q5_1,join_q5,q4_filter_0,q4_filter_1,q4_filter_2,q4_filter_3,q4_filter_4,q4_filter_5,q4_sum_0,q4_sum_1,q4_sum_2,q4_sum_3,q4_joiner_0,q4_joiner_1,q4_joiner_2,q4_joiner_3,q4_joiner_4,q4_joiner_5,q4_joiner_6,q4_joiner_7,q4_aggregator_0,q4_aggregator_1,q4_aggregator_2,q4_aggregator_3,q4_aggregator_4,q4_aggregator_5,q4_aggregator_6,q4_aggregator_7,q4_deduper_0,q4_deduper_1,monitor_1,monitor_2,monitor_3
+    - PINNED_CONTAINER_NAMES=true
     - LOGGING_LEVEL=INFO
-    - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - Q4_DEDUPER_EXCHANGE=q4_deduper_exchange
-    - Q4_DEDUPER_ROUTING_PREFIX=q4_deduper
-    - Q4_AGGREGATOR_AMOUNT=6
-    - Q4_DEDUPER_AMOUNT=3
-    - Q4_DEDUPER_RESPONSE_QUEUE_PREFIX=q4_deduper_response
-    - GATEWAY_Q4_QUEUE=gateway_q4_results_queue
-    - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
-    - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - NODE_NAME=monitor_1
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    expose:
+    - 9000/udp
+    - '9001'
+    volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+    container_name: monitor_1
+  monitor_2:
+    build:
+      context: ./src/
+      dockerfile: monitor/Dockerfile
+    environment:
+    - MONITOR_ID=2
+    - MONITOR_COUNT=3
+    - MONITOR_PORT=9000
+    - ELECTION_PORT=9001
+    - MONITOR_CHECK_INTERVAL=3
+    - MAX_MISSED=3
+    - ELECTION_TIMEOUT=5
+    - COORDINATOR_TIMEOUT=10
+    - NODES_TO_WATCH=file_splitter_0,file_splitter_1,file_splitter_2,file_ingestor_0,file_ingestor_1,file_ingestor_2,file_ingestor_3,file_ingestor_4,file_ingestor_5,filter_usd_0,filter_usd_1,filter_usd_2,filter_usd_3,filter_usd_4,filter_usd_5,filter_q1_0,filter_q1_1,filter_q1_2,filter_date_0,filter_date_1,filter_date_2,filter_date_3,filter_q5_format_0,filter_q5_format_1,filter_q5_format_2,filter_q5_usd_0,filter_q5_usd_1,filter_q5_usd_2,sum_q2_0,sum_q2_1,sum_q2_2,sum_q2_3,sum_q3_0,sum_q3_1,sum_q3_2,sum_q3_3,sum_q3_4,sum_q3_5,aggregation_q2_0,aggregation_q2_1,aggregation_q2_2,join_q2,q2_bank_name_joiner,aggregation_q3_0,aggregation_q3_1,aggregation_q3_2,join_q3,q3_barrier_0,q3_barrier_1,aggregation_q5_0,aggregation_q5_1,join_q5,q4_filter_0,q4_filter_1,q4_filter_2,q4_filter_3,q4_filter_4,q4_filter_5,q4_sum_0,q4_sum_1,q4_sum_2,q4_sum_3,q4_joiner_0,q4_joiner_1,q4_joiner_2,q4_joiner_3,q4_joiner_4,q4_joiner_5,q4_joiner_6,q4_joiner_7,q4_aggregator_0,q4_aggregator_1,q4_aggregator_2,q4_aggregator_3,q4_aggregator_4,q4_aggregator_5,q4_aggregator_6,q4_aggregator_7,q4_deduper_0,q4_deduper_1,monitor_1,monitor_2,monitor_3
+    - PINNED_CONTAINER_NAMES=true
+    - LOGGING_LEVEL=INFO
+    - PYTHONUNBUFFERED=1
+    - NODE_NAME=monitor_2
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    expose:
+    - 9000/udp
+    - '9001'
+    volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+    container_name: monitor_2
+  monitor_3:
+    build:
+      context: ./src/
+      dockerfile: monitor/Dockerfile
+    environment:
+    - MONITOR_ID=3
+    - MONITOR_COUNT=3
+    - MONITOR_PORT=9000
+    - ELECTION_PORT=9001
+    - MONITOR_CHECK_INTERVAL=3
+    - MAX_MISSED=3
+    - ELECTION_TIMEOUT=5
+    - COORDINATOR_TIMEOUT=10
+    - NODES_TO_WATCH=file_splitter_0,file_splitter_1,file_splitter_2,file_ingestor_0,file_ingestor_1,file_ingestor_2,file_ingestor_3,file_ingestor_4,file_ingestor_5,filter_usd_0,filter_usd_1,filter_usd_2,filter_usd_3,filter_usd_4,filter_usd_5,filter_q1_0,filter_q1_1,filter_q1_2,filter_date_0,filter_date_1,filter_date_2,filter_date_3,filter_q5_format_0,filter_q5_format_1,filter_q5_format_2,filter_q5_usd_0,filter_q5_usd_1,filter_q5_usd_2,sum_q2_0,sum_q2_1,sum_q2_2,sum_q2_3,sum_q3_0,sum_q3_1,sum_q3_2,sum_q3_3,sum_q3_4,sum_q3_5,aggregation_q2_0,aggregation_q2_1,aggregation_q2_2,join_q2,q2_bank_name_joiner,aggregation_q3_0,aggregation_q3_1,aggregation_q3_2,join_q3,q3_barrier_0,q3_barrier_1,aggregation_q5_0,aggregation_q5_1,join_q5,q4_filter_0,q4_filter_1,q4_filter_2,q4_filter_3,q4_filter_4,q4_filter_5,q4_sum_0,q4_sum_1,q4_sum_2,q4_sum_3,q4_joiner_0,q4_joiner_1,q4_joiner_2,q4_joiner_3,q4_joiner_4,q4_joiner_5,q4_joiner_6,q4_joiner_7,q4_aggregator_0,q4_aggregator_1,q4_aggregator_2,q4_aggregator_3,q4_aggregator_4,q4_aggregator_5,q4_aggregator_6,q4_aggregator_7,q4_deduper_0,q4_deduper_1,monitor_1,monitor_2,monitor_3
+    - PINNED_CONTAINER_NAMES=true
+    - LOGGING_LEVEL=INFO
+    - PYTHONUNBUFFERED=1
+    - NODE_NAME=monitor_3
+    - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
+    - MONITOR_PORT=9000
+    expose:
+    - 9000/udp
+    - '9001'
+    volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+    container_name: monitor_3
   client_0:
     build:
       context: ./src/
@@ -1176,48 +2760,89 @@ services:
     depends_on:
     - gateway
     - file_splitter_0
+    - file_splitter_1
+    - file_splitter_2
     - file_ingestor_0
+    - file_ingestor_1
+    - file_ingestor_2
+    - file_ingestor_3
+    - file_ingestor_4
+    - file_ingestor_5
     - filter_usd_0
+    - filter_usd_1
+    - filter_usd_2
+    - filter_usd_3
+    - filter_usd_4
+    - filter_usd_5
     - filter_q1_0
+    - filter_q1_1
+    - filter_q1_2
     - filter_date_0
+    - filter_date_1
+    - filter_date_2
+    - filter_date_3
     - filter_q5_format_0
+    - filter_q5_format_1
+    - filter_q5_format_2
     - rates_service
     - filter_q5_usd_0
+    - filter_q5_usd_1
+    - filter_q5_usd_2
     - sum_q2_0
     - sum_q2_1
     - sum_q2_2
+    - sum_q2_3
     - sum_q3_0
     - sum_q3_1
     - sum_q3_2
+    - sum_q3_3
+    - sum_q3_4
+    - sum_q3_5
     - aggregation_q2_0
+    - aggregation_q2_1
+    - aggregation_q2_2
     - join_q2
     - q2_bank_name_joiner
     - aggregation_q3_0
+    - aggregation_q3_1
+    - aggregation_q3_2
     - join_q3
     - q3_barrier_0
+    - q3_barrier_1
     - aggregation_q5_0
+    - aggregation_q5_1
     - join_q5
     - q4_filter_0
     - q4_filter_1
     - q4_filter_2
+    - q4_filter_3
+    - q4_filter_4
+    - q4_filter_5
     - q4_sum_0
     - q4_sum_1
     - q4_sum_2
+    - q4_sum_3
     - q4_joiner_0
     - q4_joiner_1
     - q4_joiner_2
     - q4_joiner_3
     - q4_joiner_4
     - q4_joiner_5
+    - q4_joiner_6
+    - q4_joiner_7
     - q4_aggregator_0
     - q4_aggregator_1
     - q4_aggregator_2
     - q4_aggregator_3
     - q4_aggregator_4
     - q4_aggregator_5
+    - q4_aggregator_6
+    - q4_aggregator_7
     - q4_deduper_0
     - q4_deduper_1
-    - q4_deduper_2
+    - monitor_1
+    - monitor_2
+    - monitor_3
     environment:
     - ACCOUNTS_FILE=LI-Small_accounts.csv
     - TRANSACTIONS_FILE=LI-Small_Trans.csv
@@ -1233,12 +2858,12 @@ services:
     - SERVER_HOST=gateway
     - SERVER_PORT=5678
     - FLOW_LOG_ENABLED=1
-    - FLOW_LOG_EVERY_MESSAGES=100
-    - FLOW_LOG_EVERY_BYTES=8388608
+    - FLOW_LOG_EVERY_MESSAGES=100000
+    - FLOW_LOG_EVERY_BYTES=2147483648
     - FLOW_LOG_FIRST_MESSAGES=1
-    - WORKER_LOG_EVERY_MESSAGES=100
-    - CHUNK_LOG_EVERY=100
-    - RESULT_LOG_EVERY=100
+    - WORKER_LOG_EVERY_MESSAGES=100000
+    - CHUNK_LOG_EVERY=10000
+    - RESULT_LOG_EVERY=100000
     volumes:
     - ./data/datasets/LI-Small:/data/input:ro
     - ./data/output:/data/output:rw

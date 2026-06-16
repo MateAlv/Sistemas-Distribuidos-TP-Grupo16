@@ -12,6 +12,8 @@ COMPOSE_SCRIPT := scripts/generate_compose.py
 LOG_FORMATTER := scripts/pretty_logs.py
 LOG_COLOR ?= always
 LOG_ARGS ?=
+MONITOR_TEST_TIMEOUT ?= 30
+MONITOR_FAILOVER_TIMEOUT ?= 45
 SCENARIO_ARG := $(word 2,$(MAKECMDGOALS))
 TEST_Q1_SUCCESS_PATTERN := Forward pass successful - Mate | filter=Q1
 TEST_CLIENT_DONE_PATTERN := client_results_finished
@@ -80,7 +82,7 @@ rebuild:
 
 down:
 	-docker compose -f $(COMPOSE_FILE) stop -t 5
-	-docker compose -f $(COMPOSE_FILE) down --remove-orphans
+	-docker compose -f $(COMPOSE_FILE) down --volumes --remove-orphans
 	@if [ -f "$(TEST_COMPOSE_FILE)" ]; then \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) stop -t 5 || true; \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) down --volumes --remove-orphans || true; \
@@ -108,6 +110,37 @@ clean-state:
 	find data/datasets -mindepth 1 -maxdepth 1 -type d -name 'client-*' -exec rm -rf {} +
 .PHONY: clean-state
 
+CHAOS_SERVICE := chaos_monkey
+
+chaos-kill-random:
+	@chaos=$$(docker compose -f $(COMPOSE_FILE) ps --status running --quiet $(CHAOS_SERVICE)); \
+	if [ -z "$$chaos" ]; then echo "chaos monkey not running (enable chaos in config and 'make up')" >&2; exit 1; fi; \
+	docker exec "$$chaos" python3 -c "from manager import ChaosManager, excluded_from_env; result = ChaosManager(excluded_from_env()).kill_random_container(); print(result); raise SystemExit(0 if result else 1)"
+.PHONY: chaos-kill-random
+
+CHAOS_TARGET := $(if $(CONTAINER),$(CONTAINER),$(word 2,$(MAKECMDGOALS)))
+chaos-kill:
+	@if [ -z "$(CHAOS_TARGET)" ]; then \
+		echo "Usage: make chaos-kill CONTAINER=<service>" >&2; \
+		echo "   or: make chaos-kill <service>" >&2; \
+		exit 2; \
+	fi; \
+	if ! docker compose -f $(COMPOSE_FILE) config --services | grep -Fxq "$(CHAOS_TARGET)"; then \
+		echo "Unknown compose service: $(CHAOS_TARGET)" >&2; \
+		exit 2; \
+	fi; \
+	chaos=$$(docker compose -f $(COMPOSE_FILE) ps --status running --quiet $(CHAOS_SERVICE)); \
+	if [ -z "$$chaos" ]; then echo "chaos monkey not running (enable chaos in config and 'make up')" >&2; exit 1; fi; \
+	docker exec "$$chaos" python3 -c "import sys; from manager import ChaosManager; result = ChaosManager().kill_container(sys.argv[1]); print(result); raise SystemExit(0 if result else 1)" "$(CHAOS_TARGET)"
+.PHONY: chaos-kill
+
+ifneq ($(filter chaos-kill,$(MAKECMDGOALS)),)
+ifneq ($(word 2,$(MAKECMDGOALS)),)
+$(word 2,$(MAKECMDGOALS)):
+	@:
+endif
+endif
+
 logs-test:
 	docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) logs -f --timestamps --no-color $(LOG_ARGS) | $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR)
 .PHONY: logs-test
@@ -115,6 +148,113 @@ logs-test:
 logs:
 	docker compose -f $(COMPOSE_FILE) logs --timestamps --no-color $(LOG_ARGS) | $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR)
 .PHONY: logs
+
+monitor-logs:
+	@services=$$(docker compose -f $(COMPOSE_FILE) config --services | grep '^monitor_'); \
+	if [ -z "$$services" ]; then echo "No monitor services are configured" >&2; exit 1; fi; \
+	docker compose -f $(COMPOSE_FILE) logs --follow --timestamps --no-color $$services | \
+		$(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR)
+.PHONY: monitor-logs
+
+monitor-status:
+	@services=$$(docker compose -f $(COMPOSE_FILE) config --services | grep '^monitor_'); \
+	if [ -z "$$services" ]; then echo "No monitor services are configured" >&2; exit 1; fi; \
+	echo "=== Monitor containers ==="; \
+	docker compose -f $(COMPOSE_FILE) ps $$services; \
+	echo; \
+	echo "=== Recent monitor events ==="; \
+	docker compose -f $(COMPOSE_FILE) logs --since 5m --timestamps --no-color $$services | \
+		$(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR)
+.PHONY: monitor-status
+
+monitor-test-recovery:
+	@if [ -z "$(CONTAINER)" ]; then \
+		echo "Usage: make monitor-test-recovery CONTAINER=<service>" >&2; \
+		exit 2; \
+	fi
+	@bash -lc 'set -euo pipefail; \
+		compose=(docker compose -f "$(COMPOSE_FILE)"); \
+		target="$(CONTAINER)"; \
+		timeout="$(MONITOR_TEST_TIMEOUT)"; \
+		all_services=$$("$${compose[@]}" config --services); \
+		if ! grep -Fxq "$$target" <<<"$$all_services"; then \
+			echo "Unknown compose service: $$target" >&2; exit 2; \
+		fi; \
+		if [[ "$$target" == monitor_* ]]; then \
+			echo "Choose a non-monitor service to test worker recovery" >&2; exit 2; \
+		fi; \
+		monitors=$$(grep "^monitor_" <<<"$$all_services"); \
+		if [ -z "$$monitors" ]; then echo "No monitor services are configured" >&2; exit 1; fi; \
+		if [ $$("$${compose[@]}" ps --status running $$monitors --quiet | wc -l | tr -d " ") -eq 0 ]; then \
+			echo "No monitor container is running" >&2; exit 1; \
+		fi; \
+		started_at=$$(date -u +"%Y-%m-%dT%H:%M:%SZ"); \
+		echo "Stopping $$target and waiting up to $${timeout}s for monitor recovery..."; \
+		"$${compose[@]}" stop -t 0 "$$target" >/dev/null; \
+		deadline=$$((SECONDS + timeout)); \
+		while (( SECONDS < deadline )); do \
+			if [ "$$("$${compose[@]}" ps --status running --quiet "$$target" | wc -l | tr -d " ")" -gt 0 ]; then \
+				echo "PASS: $$target was restarted by the monitor"; \
+				"$${compose[@]}" logs --since "$$started_at" --timestamps --no-color $$monitors | \
+					$(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR); \
+				exit 0; \
+			fi; \
+			sleep 1; \
+		done; \
+		echo "FAIL: $$target was not restarted within $${timeout}s" >&2; \
+		"$${compose[@]}" logs --since "$$started_at" $$monitors >&2; \
+		exit 1'
+.PHONY: monitor-test-recovery
+
+monitor-test-election:
+	@bash -lc 'set -euo pipefail; \
+		compose=(docker compose -f "$(COMPOSE_FILE)"); \
+		monitors=$$("$${compose[@]}" config --services | grep "^monitor_" | sort -t_ -k2,2n); \
+		if [ -z "$$monitors" ]; then echo "No monitor services are configured" >&2; exit 1; fi; \
+		leader=$$(printf "%s\n" "$$monitors" | tail -1); \
+		successor=$$(printf "%s\n" "$$monitors" | tail -2 | head -1); \
+		monitor_count=$$(printf "%s\n" "$$monitors" | wc -l | tr -d " "); \
+		if [ "$$leader" = "$$successor" ]; then \
+			echo "At least two monitor replicas are required" >&2; exit 1; \
+		fi; \
+		chaos=$$("$${compose[@]}" ps --status running --quiet "$(CHAOS_SERVICE)"); \
+		if [ -z "$$chaos" ]; then \
+			echo "Chaos monkey is not running. Enable settings.chaos and start the stack." >&2; \
+			exit 1; \
+		fi; \
+		started_at=$$(date -u +"%Y-%m-%dT%H:%M:%SZ"); \
+		echo "Killing leader $$leader through Chaos Monkey..."; \
+		docker exec "$$chaos" python3 -c \
+			"import sys; from manager import ChaosManager; sys.exit(0 if ChaosManager().kill_container(sys.argv[1]) else 1)" \
+			"$$leader"; \
+		deadline=$$((SECONDS + $(MONITOR_FAILOVER_TIMEOUT))); \
+		while (( SECONDS < deadline )); do \
+			logs=$$("$${compose[@]}" logs --since "$$started_at" --no-color $$monitors 2>&1); \
+			takeover_epoch=$$(grep -E "monitor_election_won \\| monitor_id=$${successor#monitor_} \\| epoch=[0-9]+" <<<"$$logs" | \
+				sed -E "s/.*epoch=([0-9]+).*/\\1/" | tail -1 || true); \
+			recovered_epoch=$$(grep -E "monitor_election_won \\| monitor_id=$${leader#monitor_} \\| epoch=[0-9]+" <<<"$$logs" | \
+				sed -E "s/.*epoch=([0-9]+).*/\\1/" | tail -1 || true); \
+			accepted_count=0; \
+			if [ -n "$$recovered_epoch" ]; then \
+				accepted_count=$$(grep -E "monitor_coordinator_accepted.*leader_id=$${leader#monitor_}.*epoch=$$recovered_epoch.*announced_epoch=$$recovered_epoch" <<<"$$logs" | \
+					sed -E "s/.*monitor_id=([0-9]+).*/\\1/" | sort -u | wc -l | tr -d " " || true); \
+			fi; \
+			if [ -n "$$takeover_epoch" ] && [ -n "$$recovered_epoch" ] && \
+				(( recovered_epoch > takeover_epoch )) && \
+				(( accepted_count >= monitor_count - 1 )) && \
+				grep -Fq "monitor_recovery_success | node_id=$$leader" <<<"$$logs"; then \
+				echo "PASS: $$successor took over at epoch $$takeover_epoch, recovered $$leader, and the cluster reconverged at epoch $$recovered_epoch"; \
+				printf "%s\n" "$$logs" | \
+					grep -E "monitor_(election|coordinator)|monitor_node_failed.*node_id=$$leader|monitor_recovery_(start|success|failed).*node_id=$$leader" | \
+					$(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR); \
+				exit 0; \
+			fi; \
+			sleep 1; \
+		done; \
+		echo "FAIL: monitor failover and epoch convergence did not complete within $(MONITOR_FAILOVER_TIMEOUT)s" >&2; \
+		"$${compose[@]}" logs --since "$$started_at" $$monitors >&2; \
+		exit 1'
+.PHONY: monitor-test-election
 
 rabbit-screen:
 	@bash -lc 'set -euo pipefail; \

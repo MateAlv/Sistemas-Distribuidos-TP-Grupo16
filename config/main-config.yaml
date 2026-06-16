@@ -10,6 +10,19 @@ settings:
   result_line_max_bytes: 1048576
   connect_timeout_seconds: 30
   io_timeout_seconds: 3600
+  chaos:
+    enabled: false
+    interval: 30
+
+monitor:
+  enabled: true
+  count: 3
+  port: 9000
+  election_port: 9001
+  check_interval: 3
+  max_missed: 3
+  election_timeout: 5
+  coordinator_timeout: 10
 
 workers:
   file_splitters: 3

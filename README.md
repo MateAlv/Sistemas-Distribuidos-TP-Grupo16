@@ -197,6 +197,13 @@ Variables de ejecución:
 | `CHUNK_LOG_EVERY` | Cada cuantos chunks cliente/gateway loguear progreso. Default: `100`. |
 | `RESULT_LOG_EVERY` | Cada cuantas lineas de resultado gateway->cliente loguear progreso. Default: `100`. |
 
+## Monitor y recuperación
+
+El sistema incluye réplicas de monitor con heartbeats UDP, elección Bully y
+recuperación de containers mediante Docker. La explicación de la arquitectura,
+la configuración y todos los casos de prueba manuales está en
+[src/monitor/README.md](src/monitor/README.md).
+
 ## Outputs
 
 Los resultados se escriben en `data/output/`:

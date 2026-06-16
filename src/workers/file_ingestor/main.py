@@ -2,6 +2,7 @@ import logging
 import os
 import signal
 
+from common.heartbeat import HeartbeatSender
 from file_ingestor import FileIngestor, FileIngestorConfig
 
 
@@ -24,7 +25,14 @@ def main() -> int:
 
     initialize_log(config.logging_level)
     ingestor = FileIngestor(config)
-    signal.signal(signal.SIGTERM, lambda *_: ingestor.stop())
+    heartbeat = HeartbeatSender()
+    heartbeat.start()
+
+    def shutdown(*_):
+        heartbeat.stop()
+        ingestor.stop()
+
+    signal.signal(signal.SIGTERM, shutdown)
     ingestor.start()
     return 0
 

@@ -53,6 +53,7 @@ SERVICE_COLORS = (
     ("scatter_gather_linker_", 44),
     ("scatter_gather_detector_", 196),
     ("rates_service", 172),
+    ("monitor_", 81),
 )
 
 FALLBACK_COLORS = (33, 35, 37, 41, 43, 47, 49, 69, 111, 147, 203, 209)

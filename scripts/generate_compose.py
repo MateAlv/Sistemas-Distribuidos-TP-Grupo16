@@ -78,6 +78,14 @@ OBSERVABILITY_DEFAULTS = {
     "CHUNK_LOG_EVERY": "10000",
     "RESULT_LOG_EVERY": "100000",
 }
+DEFAULT_MONITOR_COUNT = 3
+DEFAULT_MONITOR_PORT = 9000
+DEFAULT_ELECTION_PORT = 9001
+DEFAULT_MONITOR_CHECK_INTERVAL = 3.0
+DEFAULT_MAX_MISSED = 3
+DEFAULT_ELECTION_TIMEOUT = 5.0
+DEFAULT_COORDINATOR_TIMEOUT = 10.0
+DEFAULT_STARTUP_GRACE_PERIOD = 30.0
 
 
 def main() -> int:
@@ -151,6 +159,8 @@ def parse_args():
     parser.add_argument("--q3-barrier-workers", type=int, default=None, help="Override q3_barrier worker count (sharded by client_id).")
     parser.add_argument("--prefetch", type=int, default=None, help="PREFETCH_COUNT for filter/sum services.")
     parser.add_argument("--clients", type=int, default=None, help="Number of client containers to spawn. Each gets a distinct client_id sharing the first configured dataset.")
+    parser.add_argument("--chaos", action="store_true", default=None, help="Add the chaos monkey service that kills random workers.")
+    parser.add_argument("--chaos-interval", type=int, default=None, help="Seconds between chaos monkey kills.")
     parser.add_argument("--skip-output", action="store_true", help="Do not write docker-compose.yaml.")
     parser.add_argument("--skip-test-output", action="store_true", help="Do not write docker-compose.test.yaml.")
     parser.set_defaults(skip_output=False, skip_test_output=False)
@@ -313,6 +323,10 @@ def apply_cli_overrides(config: dict, args, path: Path) -> None:
         workers["q3_barrier"] = args.q3_barrier_workers
     if args.prefetch is not None:
         settings["filter_prefetch_count"] = args.prefetch
+    if args.chaos:
+        settings.setdefault("chaos", {})["enabled"] = True
+    if args.chaos_interval is not None:
+        settings.setdefault("chaos", {})["interval"] = args.chaos_interval
     if args.clients is not None:
         if args.clients < 1:
             raise ValueError("clients must be >= 1")
@@ -398,6 +412,39 @@ def validate_config(config: dict, path: Path) -> None:
         if int(value) <= 0:
             raise ValueError(f"{path}: {key} must be greater than 0")
 
+    monitor = config.get("monitor", {})
+    if monitor.get("enabled", False):
+        monitor_count = int(monitor.get("count", DEFAULT_MONITOR_COUNT))
+        if monitor_count < 1 or monitor_count > 255:
+            raise ValueError(f"{path}: monitor.count must be in range [1, 255]")
+        for key, default in (
+            ("port", DEFAULT_MONITOR_PORT),
+            ("election_port", DEFAULT_ELECTION_PORT),
+        ):
+            value = int(monitor.get(key, default))
+            if value < 1 or value > 65535:
+                raise ValueError(
+                    f"{path}: monitor.{key} must be in range [1, 65535]"
+                )
+        for key, default in (
+            ("check_interval", DEFAULT_MONITOR_CHECK_INTERVAL),
+            ("election_timeout", DEFAULT_ELECTION_TIMEOUT),
+            ("coordinator_timeout", DEFAULT_COORDINATOR_TIMEOUT),
+        ):
+            if float(monitor.get(key, default)) <= 0:
+                raise ValueError(
+                    f"{path}: monitor.{key} must be greater than 0"
+                )
+        startup_grace_period = float(
+            monitor.get("startup_grace_period", DEFAULT_STARTUP_GRACE_PERIOD)
+        )
+        if startup_grace_period < 0:
+            raise ValueError(
+                f"{path}: monitor.startup_grace_period must be at least 0"
+            )
+        if int(monitor.get("max_missed", DEFAULT_MAX_MISSED)) <= 0:
+            raise ValueError(f"{path}: monitor.max_missed must be greater than 0")
+
     joiners = workers.get("joiners", {})
     for key in ("q2", "q3"):
         value = int(joiners.get(key, 1))
@@ -423,6 +470,8 @@ def write_compose(config: dict, path: Path, expose_ports: bool) -> None:
 def build_compose(config: dict, expose_ports: bool) -> dict:
     workers = config.get("workers", {})
     settings = config.get("settings", {})
+    monitor_config = config.get("monitor", {})
+    monitor_enabled = bool(monitor_config.get("enabled", False))
     enabled_queries = set(config.get("queries", ["q1", "q2", "q3", "q4", "q5"]))
     q1_enabled = "q1" in enabled_queries
     q2_enabled = "q2" in enabled_queries
@@ -671,18 +720,65 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 settings=settings,
             )
 
+    heartbeat_node_names = [
+        name
+        for name in services
+        if name not in {"rabbitmq", "gateway", "rates_service"}
+    ]
+    monitor_names = []
+    if monitor_enabled:
+        monitor_count = int(
+            monitor_config.get("count", DEFAULT_MONITOR_COUNT)
+        )
+        monitor_names = [
+            f"monitor_{monitor_id}"
+            for monitor_id in range(1, monitor_count + 1)
+        ]
+        nodes_to_watch = [*heartbeat_node_names, *monitor_names]
+        for monitor_id, name in enumerate(monitor_names, start=1):
+            services[name] = monitor_service(
+                monitor_id=monitor_id,
+                monitor_count=monitor_count,
+                nodes_to_watch=nodes_to_watch,
+                monitor_config=monitor_config,
+                settings=settings,
+            )
+        heartbeat_node_names.extend(monitor_names)
+
     client_dependencies = [
         name for name in services if name not in {"rabbitmq", "gateway"}
     ]
     client_dependencies.insert(0, "gateway")
+    client_names = []
     for client_index, account in enumerate(config["client_accounts"]):
         client_id = int(account.get("client_id", client_index))
-        services[f"client_{client_id}"] = client_service(
+        name = f"client_{client_id}"
+        client_names.append(name)
+        services[name] = client_service(
             client_id=client_id,
             account=account,
             settings=settings,
             depends_on=client_dependencies,
         )
+
+    monitor_hosts = ",".join(monitor_names)
+    monitor_port = int(
+        monitor_config.get("port", DEFAULT_MONITOR_PORT)
+    )
+    for name in heartbeat_node_names:
+        service = services[name]
+        service["container_name"] = name
+        service.setdefault("environment", []).append(f"NODE_NAME={name}")
+        if monitor_enabled:
+            service["environment"].extend(
+                [
+                    f"MONITOR_HOSTS={monitor_hosts}",
+                    f"MONITOR_PORT={monitor_port}",
+                ]
+            )
+
+    if settings.get("chaos", {}).get("enabled", False):
+        services["chaos_monkey"] = chaos_monkey_service(settings, client_names)
 
     return {"services": services}
 
@@ -1268,6 +1364,80 @@ def client_service(client_id: int, account: dict, settings: dict, depends_on: li
             "./data/output:/data/output:rw",
         ],
     )
+
+
+def chaos_monkey_service(settings: dict, client_names: list[str]) -> dict:
+    chaos = settings.get("chaos", {})
+    return {
+        "build": {"context": "./chaos_monkey", "dockerfile": "Dockerfile"},
+        "environment": [
+            "PYTHONUNBUFFERED=1",
+            "CHAOS_ENABLED=true",
+            f"CHAOS_INTERVAL={int(chaos.get('interval', 30))}",
+        ],
+        "volumes": ["/var/run/docker.sock:/var/run/docker.sock"],
+        "depends_on": {name: {"condition": "service_started"} for name in client_names},
+    }
+
+
+def monitor_service(
+    monitor_id: int,
+    monitor_count: int,
+    nodes_to_watch: list[str],
+    monitor_config: dict,
+    settings: dict,
+) -> dict:
+    monitor_port = int(
+        monitor_config.get("port", DEFAULT_MONITOR_PORT)
+    )
+    election_port = int(
+        monitor_config.get("election_port", DEFAULT_ELECTION_PORT)
+    )
+    return {
+        "build": {
+            "context": "./src/",
+            "dockerfile": "monitor/Dockerfile",
+        },
+        "environment": [
+            f"MONITOR_ID={monitor_id}",
+            f"MONITOR_COUNT={monitor_count}",
+            f"MONITOR_PORT={monitor_port}",
+            f"ELECTION_PORT={election_port}",
+            (
+                "MONITOR_CHECK_INTERVAL="
+                f"{monitor_config.get('check_interval', DEFAULT_MONITOR_CHECK_INTERVAL)}"
+            ),
+            (
+                "MAX_MISSED="
+                f"{monitor_config.get('max_missed', DEFAULT_MAX_MISSED)}"
+            ),
+            (
+                "ELECTION_TIMEOUT="
+                f"{monitor_config.get('election_timeout', DEFAULT_ELECTION_TIMEOUT)}"
+            ),
+            (
+                "COORDINATOR_TIMEOUT="
+                f"{monitor_config.get('coordinator_timeout', DEFAULT_COORDINATOR_TIMEOUT)}"
+            ),
+            (
+                "STARTUP_GRACE_PERIOD="
+                f"{monitor_config.get('startup_grace_period', DEFAULT_STARTUP_GRACE_PERIOD)}"
+            ),
+            "MONITOR_STATE_PATH=/data/monitor/epoch.json",
+            f"NODES_TO_WATCH={','.join(nodes_to_watch)}",
+            "PINNED_CONTAINER_NAMES=true",
+            f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
+            "PYTHONUNBUFFERED=1",
+        ],
+        "expose": [
+            f"{monitor_port}/udp",
+            str(election_port),
+        ],
+        "volumes": [
+            "/var/run/docker.sock:/var/run/docker.sock",
+            f"./data/monitor/monitor_{monitor_id}:/data/monitor:rw",
+        ],
+    }
 
 
 def base_service(dockerfile: str, depends_on, environment: list[str], volumes: list[str] | None = None) -> dict:
