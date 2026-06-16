@@ -278,7 +278,8 @@ stats:
 .PHONY: stats
 
 # Dataset used by the full `make test` run and `make expected`.
-DATASET ?= HI-Small
+# TEST_DATASET is kept as a backwards-compatible alias documented in README.
+DATASET ?= $(if $(TEST_DATASET),$(TEST_DATASET),HI-Medium)
 
 # Precompute the per-dataset reference results (data/datasets/<DATASET>/expected_results/).
 # Use FORCE=1 to regenerate. The expensive Q4 graph is computed once here, not per run.
@@ -292,6 +293,7 @@ expected:
 # (per-query PASS/FAIL + time, container count, peak CPU/RAM) as the last lines.
 # Parametrize like the test-qN targets, e.g.:
 #   DATASET=HI-Medium CLIENTS=2 USD_WORKERS=4 PREFETCH_COUNT=50 make test
+#   TEST_DATASET=HI-Medium CLIENTS=2 USD_WORKERS=4 PREFETCH_COUNT=50 make test
 test:
 	@echo ">>> regenerating $(TEST_COMPOSE_FILE) from $(TEST_CONFIG_FILE)"
 	$(PYTHON) $(COMPOSE_SCRIPT) --config $(TEST_CONFIG_FILE) \
@@ -320,7 +322,7 @@ test:
 	$(LOG_PYTHON) scripts/run_full_test.py
 .PHONY: test
 
-Q1_DATASET ?= HI-Small
+Q1_DATASET ?= LI-Small
 test-q1:
 	@echo ">>> regenerating $(TEST_COMPOSE_FILE) for Q1 (dataset=$(Q1_DATASET))"
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q1-test --dataset $(Q1_DATASET) \
@@ -361,7 +363,7 @@ test-q1:
 			|| { echo "✗ Q1 test FAILED ($${elapsed}s)"; exit 1; }'
 .PHONY: test-q1
 
-Q2_DATASET ?= HI-Small
+Q2_DATASET ?= LI-Small
 Q2_SUM_WORKERS ?= 4
 CLIENTS ?= 2
 test-q2:
@@ -405,7 +407,7 @@ test-q2:
 			|| { echo "✗ Q2 test FAILED ($${elapsed}s)"; exit 1; }'
 .PHONY: test-q2
 
-Q3_DATASET ?= HI-Small
+Q3_DATASET ?= LI-Small
 test-q3:
 	@echo ">>> regenerating $(TEST_COMPOSE_FILE) for Q3 (dataset=$(Q3_DATASET))"
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q3-test --dataset $(Q3_DATASET) \
@@ -447,7 +449,7 @@ test-q3:
 			|| { echo "✗ Q3 test FAILED ($${elapsed}s)"; exit 1; }'
 .PHONY: test-q3
 
-Q5_DATASET ?= HI-Small
+Q5_DATASET ?= LI-Small
 Q5_FORMAT_WORKERS ?= 3
 Q5_USD_WORKERS ?= 3
 USD_WORKERS ?=
