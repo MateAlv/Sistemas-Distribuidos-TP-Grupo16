@@ -314,7 +314,7 @@ test:
 	$(LOG_PYTHON) scripts/run_full_test.py
 .PHONY: test
 
-Q1_DATASET ?= HI-Small
+Q1_DATASET ?= LI-Small
 test-q1:
 	@echo ">>> regenerating $(TEST_COMPOSE_FILE) for Q1 (dataset=$(Q1_DATASET))"
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q1-test --dataset $(Q1_DATASET) \
@@ -355,7 +355,7 @@ test-q1:
 			|| { echo "✗ Q1 test FAILED ($${elapsed}s)"; exit 1; }'
 .PHONY: test-q1
 
-Q2_DATASET ?= HI-Small
+Q2_DATASET ?= LI-Small
 Q2_SUM_WORKERS ?= 4
 CLIENTS ?= 2
 test-q2:
@@ -399,7 +399,7 @@ test-q2:
 			|| { echo "✗ Q2 test FAILED ($${elapsed}s)"; exit 1; }'
 .PHONY: test-q2
 
-Q3_DATASET ?= HI-Small
+Q3_DATASET ?= LI-Small
 test-q3:
 	@echo ">>> regenerating $(TEST_COMPOSE_FILE) for Q3 (dataset=$(Q3_DATASET))"
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q3-test --dataset $(Q3_DATASET) \
@@ -441,7 +441,7 @@ test-q3:
 			|| { echo "✗ Q3 test FAILED ($${elapsed}s)"; exit 1; }'
 .PHONY: test-q3
 
-Q5_DATASET ?= HI-Small
+Q5_DATASET ?= LI-Small
 Q5_FORMAT_WORKERS ?= 3
 Q5_USD_WORKERS ?= 3
 USD_WORKERS ?=
