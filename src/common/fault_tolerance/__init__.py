@@ -11,7 +11,7 @@ from common.fault_tolerance.handler import (
 from common.fault_tolerance.inbox import Inbox, InboxStatus, Watermark
 from common.fault_tolerance.outbox import Outbox, OutboxEntry
 from common.fault_tolerance.snapshot import LastState, Snapshot
-from common.fault_tolerance.wal import InputApplied, InputDone, Wal, WalRecord
+from common.fault_tolerance.wal import InputApplied, InputDone, RecordType, Wal, WalRecord
 from common.fault_tolerance.worker_state import WorkerState
 
 __all__ = [
@@ -25,6 +25,7 @@ __all__ = [
     "OutboxEntry",
     "PersistentStateHandler",
     "Snapshot",
+    "RecordType",
     "Wal",
     "WalRecord",
     "Watermark",
