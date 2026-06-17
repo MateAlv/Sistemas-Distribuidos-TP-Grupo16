@@ -5,10 +5,8 @@ decision D5). inbox_done is implemented as the watermark tracker (decision D1):
 per (client_id, sender_id) keep `biggest` + `pending` holes. inbox_applied is a
 small set of (sender_id, seq) currently applied-but-not-committed (decision D2).
 
-Does NO file IO: to_dict()/from_dict() only. LastState serializes it; WAL deltas
+Does NO file IO: to_dict()/from_dict() only. LastState serializes it; WAL differences
 are fed back via mark_applied/mark_done by PersistentStateHandler.
-
-OWNER: you (state-handler workstream).
 """
 
 from __future__ import annotations
