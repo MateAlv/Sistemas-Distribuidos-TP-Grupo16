@@ -493,10 +493,6 @@ test-unit:
 	docker run --rm test-runner
 .PHONY: test-unit
 
-# Corre la suite de tests dentro del contenedor de Dockerfile.test (mismo
-# entorno que CI). Por defecto corre tests/; se puede acotar con PYTEST_ARGS.
-# Uso: make run-tests
-#      make run-tests PYTEST_ARGS="tests/gateway -q"
 PYTEST_ARGS ?= tests/
 run-tests:
 	docker build -f Dockerfile.test -t test-runner .
