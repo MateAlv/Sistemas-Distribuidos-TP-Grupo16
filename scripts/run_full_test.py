@@ -12,7 +12,10 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
+
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import reference_results as ref
@@ -20,8 +23,6 @@ import reference_results as ref
 ROOT = Path(__file__).resolve().parents[1]
 PRETTY_LOGS = ROOT / "scripts" / "pretty_logs.py"
 
-DATASET = os.environ.get("DATASET", "HI-Medium")
-DATASET_ROOT = os.environ.get("DATASET_ROOT", "data/datasets")
 LOG_COLOR = os.environ.get("LOG_COLOR", "always")
 TEST_PROJECT = os.environ.get("TEST_PROJECT", "distribuidos-test")
 MAIN_PROJECT = os.environ.get("MAIN_PROJECT", Path.cwd().name.lower())
@@ -45,6 +46,13 @@ _CLIENT_ID_RE = re.compile(r"client_id=(\d+)")
 BAR = "=" * 60
 
 
+@dataclass(frozen=True)
+class ClientInput:
+    client_id: int
+    dataset_dir: Path
+    trans_name: str
+
+
 def compose(*args):
     return ["docker", "compose", "-p", TEST_PROJECT, "-f", COMPOSE_FILE, *args]
 
@@ -55,6 +63,126 @@ def run(cmd, **kwargs):
 
 def quiet(cmd):
     return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+# --------------------------------------------------------------------------- #
+# compose client inputs
+# --------------------------------------------------------------------------- #
+def _compose_path():
+    path = Path(COMPOSE_FILE)
+    if path.is_absolute():
+        return path
+    return ROOT / path
+
+
+def _env_dict(environment):
+    if isinstance(environment, dict):
+        return {str(k): str(v) for k, v in environment.items()}
+    if isinstance(environment, list):
+        env = {}
+        for item in environment:
+            if isinstance(item, str) and "=" in item:
+                key, value = item.split("=", 1)
+                env[key] = value
+        return env
+    return {}
+
+
+def _volume_source_for_target(volumes, target):
+    target = target.rstrip("/")
+    for volume in volumes or []:
+        if isinstance(volume, str):
+            parts = volume.split(":")
+            if len(parts) >= 2 and parts[1].rstrip("/") == target:
+                return parts[0]
+        elif isinstance(volume, dict):
+            volume_target = str(volume.get("target", "")).rstrip("/")
+            if volume_target == target:
+                return volume.get("source")
+    return None
+
+
+def _resolve_compose_path(path, compose_path):
+    path = Path(path)
+    if path.is_absolute():
+        return path
+    return (compose_path.parent / path).resolve()
+
+
+def _client_id(service_name, env):
+    raw = env.get("CLIENT_ID")
+    if raw is None:
+        raw = service_name.rsplit("_", 1)[-1]
+    return int(raw)
+
+
+def load_client_inputs():
+    compose_path = _compose_path()
+    if not compose_path.exists():
+        raise FileNotFoundError(f"compose file not found: {compose_path}")
+    with compose_path.open("r", encoding="utf-8") as file:
+        compose_doc = yaml.safe_load(file) or {}
+
+    services = compose_doc.get("services", {})
+    if not isinstance(services, dict):
+        raise ValueError(f"{compose_path}: services must be a mapping")
+
+    clients = []
+    for service_name, service in sorted(services.items()):
+        if not service_name.startswith("client_"):
+            continue
+        service = service or {}
+        env = _env_dict(service.get("environment", {}))
+        trans_name = env.get("TRANSACTIONS_FILE")
+        if not trans_name:
+            raise ValueError(f"{compose_path}: {service_name} missing TRANSACTIONS_FILE")
+        data_dir = env.get("DATA_DIR", "/data/input")
+        mount_source = _volume_source_for_target(service.get("volumes", []), data_dir)
+        if not mount_source:
+            raise ValueError(
+                f"{compose_path}: {service_name} has no host volume mounted at {data_dir}"
+            )
+
+        trans_path = Path(trans_name)
+        dataset_dir = _resolve_compose_path(mount_source, compose_path) / trans_path.parent
+        clients.append(ClientInput(
+            client_id=_client_id(service_name, env),
+            dataset_dir=dataset_dir.resolve(),
+            trans_name=trans_path.name,
+        ))
+
+    if not clients:
+        raise ValueError(f"{compose_path}: no client_* services found")
+    return sorted(clients, key=lambda client: client.client_id)
+
+
+def _input_key(client_input):
+    return (client_input.dataset_dir, client_input.trans_name)
+
+
+def _input_label(client_input):
+    try:
+        dataset_dir = client_input.dataset_dir.relative_to(ROOT)
+    except ValueError:
+        dataset_dir = client_input.dataset_dir
+    return f"{dataset_dir}/{client_input.trans_name}"
+
+
+def dataset_summary(client_inputs):
+    unique = []
+    seen = set()
+    for client_input in client_inputs:
+        key = _input_key(client_input)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(client_input)
+    if len(unique) == 1:
+        return _input_label(unique[0])
+    return ", ".join(
+        f"client {client_input.client_id}: {_input_label(client_input)}"
+        for client_input in client_inputs
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -210,37 +338,114 @@ class TimingWatcher(threading.Thread):
 # --------------------------------------------------------------------------- #
 # validation
 # --------------------------------------------------------------------------- #
-def ensure_reference():
-    missing = [q for q in QUERIES if not ref.expected_path(Path(DATASET_ROOT) / DATASET, q).exists()]
-    if not missing:
-        return
-    print(f"Reference results missing for {missing}; precomputing for {DATASET}...")
-    run([sys.executable, str(ROOT / "scripts" / "precompute_expected.py"),
-         "--dataset", DATASET, "--dataset-root", DATASET_ROOT])
+def ensure_reference(client_inputs):
+    ok = True
+    seen = set()
+    for client_input in client_inputs:
+        key = _input_key(client_input)
+        if key in seen:
+            continue
+        seen.add(key)
+        missing = [
+            q for q in QUERIES
+            if not ref.expected_path(client_input.dataset_dir, q).exists()
+        ]
+        if not missing:
+            continue
+        print(
+            f"Reference results missing for {missing}; "
+            f"precomputing for {_input_label(client_input)}..."
+        )
+        proc = run([
+            sys.executable,
+            str(ROOT / "scripts" / "precompute_expected.py"),
+            "--dataset", client_input.dataset_dir.name,
+            "--dataset-root", str(client_input.dataset_dir.parent),
+            "--trans", client_input.trans_name,
+            "--queries", ",".join(missing),
+        ])
+        ok = ok and proc.returncode == 0
+    return ok
 
 
-def validate_all():
+def _print_counter_examples(label, counter):
+    for row in list(counter)[:5]:
+        print(f"      {label}: {row}")
+
+
+def validate_query_for_clients(query, client_inputs, output_dir="data/output"):
+    print("=" * 60)
+    print(f"{query.upper()} FLOW VALIDATION")
+    print("=" * 60)
+    all_ok = True
+    for client_input in client_inputs:
+        print(f"\n  Client {client_input.client_id}: {_input_label(client_input)}")
+        try:
+            expected = ref.expected_counter(
+                query,
+                client_input.dataset_dir,
+                client_input.trans_name,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"    ERROR computing/loading expected {query} rows: {e}")
+            all_ok = False
+            continue
+
+        src = ref.expected_path(client_input.dataset_dir, query)
+        print(f"    Reference: {src if src.exists() else 'computed from dataset'}")
+        print(f"    {ref._describe(query, expected)}")
+
+        output_file = Path(output_dir) / f"results_{query}_{client_input.client_id}.csv"
+        if not output_file.exists():
+            print(f"    ERROR: missing output file {output_file}")
+            all_ok = False
+            continue
+
+        try:
+            actual = ref.load_counter(query, output_file)
+        except Exception as e:  # noqa: BLE001
+            print(f"    ERROR reading {output_file.name}: {e}")
+            all_ok = False
+            continue
+
+        print(f"    Actual: {ref._summarize_actual(query, actual)}")
+        missing, unexpected = ref.compare(expected, actual)
+        if missing or unexpected:
+            print(ref.red(
+                f"    ERROR: differs from reference "
+                f"(missing={sum(missing.values())}, "
+                f"unexpected={sum(unexpected.values())})"
+            ))
+            _print_counter_examples("missing", missing)
+            _print_counter_examples("unexpected", unexpected)
+            all_ok = False
+        else:
+            print(ref.green("    ✓ matches reference"))
+
+    print("=" * 60)
+    if all_ok:
+        print(ref.green(f"✓✓✓ {query.upper()} TEST PASSED ✓✓✓"))
+    else:
+        print(ref.red(f"✗✗✗ {query.upper()} TEST FAILED ✗✗✗"))
+    return all_ok
+
+
+def validate_all(client_inputs):
     results = {}
-    dataset_dir = f"{DATASET_ROOT}/{DATASET}"
-    trans = f"{DATASET}_Trans.csv"
     for q in QUERIES:
-        env = dict(os.environ)
-        env[f"{q.upper()}_DATASET_DIR"] = dataset_dir
-        env[f"{q.upper()}_DATASET_TRANS"] = trans
-        proc = run([sys.executable, str(ROOT / "scripts" / f"validate_{q}_output.py")], env=env)
-        results[q] = proc.returncode == 0
+        results[q] = validate_query_for_clients(q, client_inputs)
     return results
 
 
 # --------------------------------------------------------------------------- #
 # summary footer
 # --------------------------------------------------------------------------- #
-def print_summary(results, timings, sampler, wall, timed_out, num_clients):
+def print_summary(results, timings, sampler, wall, timed_out, num_clients, inputs_label):
     print()
     print(BAR)
     print("FULL PIPELINE TEST SUMMARY")
     print(BAR)
-    print(f"Dataset: {DATASET}   Clients: {num_clients}")
+    print(f"Inputs: {inputs_label}   Clients: {num_clients}")
     print()
     print(f"{'Query':<8}{'Result':<10}{'Pipeline time':<16}")
     for q in QUERIES:
@@ -284,12 +489,20 @@ def print_summary(results, timings, sampler, wall, timed_out, num_clients):
 # main
 # --------------------------------------------------------------------------- #
 def main():
+    try:
+        client_inputs = load_client_inputs()
+    except Exception as e:  # noqa: BLE001
+        print(f"ERROR loading client inputs from {COMPOSE_FILE}: {e}", file=sys.stderr)
+        return 2
+    inputs_label = dataset_summary(client_inputs)
+
     log_fd, log_path = tempfile.mkstemp(prefix=f"{TEST_PROJECT}.", suffix=".log")
     os.close(log_fd)
     print(f"test_log_file={log_path}")
 
     cleanup_all()
-    ensure_reference()
+    if not ensure_reference(client_inputs):
+        return 2
 
     log_proc = None
     sampler = MetricsSampler(TEST_PROJECT, METRICS_INTERVAL)
@@ -298,7 +511,7 @@ def main():
     start = time.monotonic()
 
     try:
-        print(f"Building and starting full test stack ({DATASET})...")
+        print(f"Building and starting full test stack ({inputs_label})...")
         if run(compose("up", "--build", "--remove-orphans", "--detach")).returncode != 0:
             print("ERROR: docker compose up failed", file=sys.stderr)
             return 2
@@ -344,10 +557,10 @@ def main():
 
     wall = time.monotonic() - start
     print()
-    results = validate_all()
+    results = validate_all(client_inputs)
     overall = print_summary(
         results, (watcher.done_at if watcher else {}), sampler, wall,
-        timed_out, num_clients)
+        timed_out, num_clients, inputs_label)
 
     if KEEP_CONTAINERS:
         print(f"KEEP_CONTAINERS set — leaving stack up. Tear down with:\n"

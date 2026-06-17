@@ -277,25 +277,19 @@ stats:
 	docker stats
 .PHONY: stats
 
-# Dataset used by the full `make test` run and `make expected`.
-DATASET ?= HI-Small
 
-# Precompute the per-dataset reference results (data/datasets/<DATASET>/expected_results/).
-# Use FORCE=1 to regenerate. The expensive Q4 graph is computed once here, not per run.
 expected:
+	@if [ -z "$(DATASET)" ]; then \
+		echo "Usage: make expected DATASET=<dataset>"; \
+		exit 2; \
+	fi
 	$(PYTHON) scripts/precompute_expected.py --dataset $(DATASET) $(if $(FORCE),--force)
 .PHONY: expected
 
-# Full end-to-end test: kills leftover TP containers, runs the WHOLE pipeline
-# (Q1-Q5) from the full test config, validates every query's output for every
-# client against the precomputed reference, and prints a metrics footer
-# (per-query PASS/FAIL + time, container count, peak CPU/RAM) as the last lines.
-# Parametrize like the test-qN targets, e.g.:
-#   DATASET=HI-Medium CLIENTS=2 USD_WORKERS=4 PREFETCH_COUNT=50 make test
 test:
 	@echo ">>> regenerating $(TEST_COMPOSE_FILE) from $(TEST_CONFIG_FILE)"
 	$(PYTHON) $(COMPOSE_SCRIPT) --config $(TEST_CONFIG_FILE) \
-		$(if $(DATASET),--dataset $(DATASET)) \
+		$(if $(TEST_DATASET),--dataset $(TEST_DATASET)) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
 		$(if $(Q2_SUM_WORKERS),--sum-q2-workers $(Q2_SUM_WORKERS)) \
 		$(if $(Q5_FORMAT_WORKERS),--filter-q5-format-workers $(Q5_FORMAT_WORKERS)) \
@@ -312,7 +306,7 @@ test:
 		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
 		$(if $(CLIENTS),--clients $(CLIENTS)) \
 		--test-output $(TEST_COMPOSE_FILE) --skip-output
-	DATASET=$(DATASET) DATASET_ROOT=data/datasets LOG_COLOR=$(LOG_COLOR) \
+	LOG_COLOR=$(LOG_COLOR) \
 	TEST_PROJECT=$(TEST_PROJECT) MAIN_PROJECT=$(MAIN_PROJECT) \
 	TEST_COMPOSE_FILE=$(TEST_COMPOSE_FILE) \
 	TEST_CLIENT_WAIT_TIMEOUT=$(TEST_CLIENT_WAIT_TIMEOUT) \
