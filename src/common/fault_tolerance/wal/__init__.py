@@ -14,6 +14,11 @@ from common.fault_tolerance.wal.reader import (
     decode_input_done,
     decode_record,
 )
+from common.fault_tolerance.wal.replay import (
+    ReplayResult,
+    WALReplayer,
+    apply_replay_record,
+)
 from common.fault_tolerance.wal.record import RecordType
 from common.fault_tolerance.wal.wal import Wal
 from common.fault_tolerance.wal.wal_record import WalRecord
@@ -27,11 +32,14 @@ __all__ = [
     "InputApplied",
     "InputDone",
     "RecordType",
+    "ReplayResult",
     "Wal",
     "WalRecord",
     "WALRawRecord",
     "WALReader",
+    "WALReplayer",
     "WALWriter",
+    "apply_replay_record",
     "decode_checkpoint",
     "decode_client_cleanup_started",
     "decode_eof_sent",
