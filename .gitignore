@@ -6,6 +6,7 @@ __pycache__/
 *.log
 
 docker-compose.test.yaml
+docker-compose.yaml
 
 data/datasets/**/*
 !data/datasets/.gitkeep
