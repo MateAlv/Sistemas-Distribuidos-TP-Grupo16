@@ -61,7 +61,8 @@ def test_round_trip_preserves_state():
     wm = Watermark()
     wm.observe(1)
     wm.observe(5)
-    restored = Watermark.from_dict(wm.to_dict())
+    restored, offset = Watermark.deserialize(wm.serialize())
+    assert offset == len(wm.serialize())
     assert restored.biggest == 5
     assert restored.pending == {2, 3, 4}
     assert restored.is_duplicate(2) is False

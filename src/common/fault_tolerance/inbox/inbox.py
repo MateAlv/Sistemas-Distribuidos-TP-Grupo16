@@ -6,13 +6,21 @@ whose outputs are not yet published+committed. `done` is a watermark per
 (client_id, sender_id), the bounded-memory replacement for storing every
 finished id.
 
-Holds no files: persistence is via to_dict()/from_dict() (JSON-safe shapes, so
-any serializer works); transitions are driven by PersistentStateHandler after
-each WAL write.
+Holds no files: persistence is via binary serialize()/deserialize(); transitions
+are driven by PersistentStateHandler after each WAL write.
+
+Binary layout produced by serialize() is two sections, applied then done:
+    applied: u32 client_count, per client:
+        u32 client_id, u32 pair_count, per pair: u32 sender_id, u32 seq
+    done: u32 client_count, per client:
+        u32 client_id, u32 sender_count, per sender: u32 sender_id, Watermark
 """
 
 from __future__ import annotations
 
+import struct
+
+from common.fault_tolerance._encoding import UINT32_FORMAT, read_uint32
 from common.fault_tolerance.inbox.inbox_status import InboxStatus
 from common.fault_tolerance.inbox.watermark import Watermark
 
@@ -48,33 +56,48 @@ class Inbox:
         self._applied.pop(client_id, None)
         self._done.pop(client_id, None)
 
-    def to_dict(self) -> dict:
-        return {
-            "applied": {
-                str(client_id): sorted(pairs)
-                for client_id, pairs in self._applied.items()
-            },
-            "done": {
-                str(client_id): {
-                    str(sender_id): watermark.to_dict()
-                    for sender_id, watermark in senders.items()
-                }
-                for client_id, senders in self._done.items()
-            },
-        }
+    def serialize(self) -> bytes:
+        chunks = [struct.pack(UINT32_FORMAT, len(self._applied))]
+        for client_id, pairs in self._applied.items():
+            chunks.append(struct.pack(UINT32_FORMAT, client_id))
+            chunks.append(struct.pack(UINT32_FORMAT, len(pairs)))
+            for sender_id, seq in sorted(pairs):
+                chunks.append(struct.pack(UINT32_FORMAT, sender_id))
+                chunks.append(struct.pack(UINT32_FORMAT, seq))
+
+        chunks.append(struct.pack(UINT32_FORMAT, len(self._done)))
+        for client_id, senders in self._done.items():
+            chunks.append(struct.pack(UINT32_FORMAT, client_id))
+            chunks.append(struct.pack(UINT32_FORMAT, len(senders)))
+            for sender_id, watermark in senders.items():
+                chunks.append(struct.pack(UINT32_FORMAT, sender_id))
+                chunks.append(watermark.serialize())
+        return b"".join(chunks)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Inbox":
+    def deserialize(cls, data: bytes) -> "Inbox":
         inbox = cls()
-        inbox._applied = {
-            int(client_id): {(sender_id, seq) for sender_id, seq in pairs}
-            for client_id, pairs in data.get("applied", {}).items()
-        }
-        inbox._done = {
-            int(client_id): {
-                int(sender_id): Watermark.from_dict(wm)
-                for sender_id, wm in senders.items()
-            }
-            for client_id, senders in data.get("done", {}).items()
-        }
+        offset = 0
+
+        applied_clients, offset = read_uint32(data, offset)
+        for _ in range(applied_clients):
+            client_id, offset = read_uint32(data, offset)
+            pair_count, offset = read_uint32(data, offset)
+            pairs = set()
+            for _ in range(pair_count):
+                sender_id, offset = read_uint32(data, offset)
+                seq, offset = read_uint32(data, offset)
+                pairs.add((sender_id, seq))
+            inbox._applied[client_id] = pairs
+
+        done_clients, offset = read_uint32(data, offset)
+        for _ in range(done_clients):
+            client_id, offset = read_uint32(data, offset)
+            sender_count, offset = read_uint32(data, offset)
+            senders: dict[int, Watermark] = {}
+            for _ in range(sender_count):
+                sender_id, offset = read_uint32(data, offset)
+                watermark, offset = Watermark.deserialize(data, offset)
+                senders[sender_id] = watermark
+            inbox._done[client_id] = senders
         return inbox

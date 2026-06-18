@@ -64,6 +64,11 @@ def test_drop_client_forgets_everything():
     assert inbox.classify(CLIENT, SENDER, 1) is InboxStatus.NEW
 
 
+def test_round_trip_empty():
+    restored = Inbox.deserialize(Inbox().serialize())
+    assert restored.classify(CLIENT, SENDER, 1) is InboxStatus.NEW
+
+
 def test_round_trip_preserves_classification():
     inbox = Inbox()
     inbox.mark_applied(CLIENT, 0, 1)
@@ -72,7 +77,7 @@ def test_round_trip_preserves_classification():
     inbox.mark_done(CLIENT, 0, 5)
     inbox.mark_applied(CLIENT, 1, 9)      # still applied, not done
 
-    restored = Inbox.from_dict(inbox.to_dict())
+    restored = Inbox.deserialize(inbox.serialize())
 
     assert restored.classify(CLIENT, 0, 1) is InboxStatus.DONE
     assert restored.classify(CLIENT, 0, 3) is InboxStatus.NEW
