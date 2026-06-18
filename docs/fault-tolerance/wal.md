@@ -281,3 +281,38 @@ La suite cubre:
 - lectura y truncamiento con `WALReader`;
 - fachada `Wal`;
 - reconstrucción con `WALReplayer`.
+
+## Smoke Test Manual
+
+Además de la suite unitaria, existe un script para probar la API del WAL de
+forma manual y sin RabbitMQ:
+
+```bash
+./scripts/smoke_wal.py
+```
+
+El script crea un directorio temporal, escribe records reales en `wal.current`
+y muestra paso a paso qué espera recuperar. Cubre los casos principales:
+
+- input completado con `INPUT_APPLIED` + `INPUT_DONE`;
+- caída simulada después de `INPUT_APPLIED`, dejando outbox pendiente;
+- replay desde checkpoint;
+- rotación de `wal.current` a `wal.previous`.
+
+Para inspeccionar los archivos generados:
+
+```bash
+./scripts/smoke_wal.py --state-dir /tmp/wal-smoke
+```
+
+Para avanzar escenario por escenario:
+
+```bash
+./scripts/smoke_wal.py --step --state-dir /tmp/wal-smoke
+```
+
+El modo compacto imprime solo los resultados:
+
+```bash
+./scripts/smoke_wal.py --quiet
+```
