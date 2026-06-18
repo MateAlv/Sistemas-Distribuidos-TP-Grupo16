@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
 class Snapshot:
     """Full worker state at a point in time: one file per worker, all clients
-    inside. wal_checkpoint_record is the last WAL record already folded in, so
-    recovery replays only the records after it."""
+    inside. Each section is bytes produced by its component's serialize().
+    wal_checkpoint_record marks where recovery resumes replaying the WAL."""
 
     wal_checkpoint_record: int
-    worker_state: dict = field(default_factory=dict)
-    inbox: dict = field(default_factory=dict)
-    outbox: dict = field(default_factory=dict)
-    eof_state: dict = field(default_factory=dict)
-    counters: dict = field(default_factory=dict)
-    closed_clients: set = field(default_factory=set)
+    worker_state: bytes = b""
+    inbox: bytes = b""
+    outbox: bytes = b""
+    eof_state: bytes = b""
+    counters: bytes = b""
+    closed_clients: bytes = b""
