@@ -525,8 +525,11 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
         )
 
     file_ingestor_count = counts["file_ingestors"]
+    named_volumes: dict[str, None] = {}
     for index in range(file_ingestor_count):
-        services[f"file_ingestor_{index}"] = file_ingestor_service(index, file_ingestor_count, settings)
+        vol_name = f"file_ingestor_{index}_state"
+        named_volumes[vol_name] = None
+        services[f"file_ingestor_{index}"] = file_ingestor_service(index, file_ingestor_count, settings, vol_name)
 
     filter_specs = []
     if usd_enabled:
@@ -602,6 +605,8 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
 
     if q2_enabled:
         for index in range(counts["aggregation_q2"]):
+            vol_name = f"aggregation_q2_{index}_state"
+            named_volumes[vol_name] = None
             services[f"aggregation_q2_{index}"] = aggregator_service(
                 configuration="Q2",
                 index=index,
@@ -610,6 +615,7 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 output_queue=JOIN_Q2_QUEUE,
                 sum_amount=counts["sum_q2"],
                 sum_prefix=SUM_Q2_PREFIX,
+                state_volume=vol_name,
             )
 
         services["join_q2"] = joiner_service(
@@ -631,6 +637,8 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
 
     if q3_enabled:
         for index in range(counts["aggregation_q3"]):
+            vol_name = f"aggregation_q3_{index}_state"
+            named_volumes[vol_name] = None
             services[f"aggregation_q3_{index}"] = aggregator_service(
                 configuration="Q3",
                 index=index,
@@ -639,6 +647,7 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 output_queue=JOIN_Q3_QUEUE,
                 sum_amount=counts["sum_q3"],
                 sum_prefix=SUM_Q3_PREFIX,
+                state_volume=vol_name,
             )
 
         services["join_q3"] = joiner_service(
@@ -663,6 +672,8 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
 
     if q5_enabled:
         for index in range(counts["aggregation_q5"]):
+            vol_name = f"aggregation_q5_{index}_state"
+            named_volumes[vol_name] = None
             services[f"aggregation_q5_{index}"] = aggregator_service(
                 configuration="Q5",
                 index=index,
@@ -671,6 +682,7 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 output_queue=JOIN_Q5_QUEUE,
                 sum_amount=counts["filter_q5_usd"],
                 sum_prefix="filter_q5_usd",
+                state_volume=vol_name,
             )
 
         services["join_q5"] = joiner_service(
@@ -780,7 +792,10 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
     if settings.get("chaos", {}).get("enabled", False):
         services["chaos_monkey"] = chaos_monkey_service(settings, client_names)
 
-    return {"services": services}
+    compose: dict = {"services": services}
+    if named_volumes:
+        compose["volumes"] = named_volumes
+    return compose
 
 
 def rabbitmq_service(expose_ports: bool) -> dict:
@@ -829,7 +844,7 @@ def gateway_service(file_ingestor_count: int, settings: dict, enabled_queries: s
     )
 
 
-def file_ingestor_service(index: int, total: int, settings: dict) -> dict:
+def file_ingestor_service(index: int, total: int, settings: dict, state_volume: str) -> dict:
     return base_service(
         "workers/file_ingestor/Dockerfile",
         depends_on=depends_on_rabbitmq(),
@@ -843,7 +858,10 @@ def file_ingestor_service(index: int, total: int, settings: dict) -> dict:
             f"MOM_HOST={MOM_HOST}",
             "PYTHONUNBUFFERED=1",
             f"TRANSACTION_OUTPUT_EXCHANGE={TRANSACTION_EXCHANGE}",
+            "STATE_DIR=/worker_state",
+            "SNAPSHOT_INTERVAL=1000",
         ],
+        volumes=[f"{state_volume}:/worker_state"],
     )
 
 
@@ -1031,6 +1049,7 @@ def aggregator_service(
     output_queue: str,
     sum_amount: int,
     sum_prefix: str,
+    state_volume: str,
 ) -> dict:
     return base_service(
         "workers/aggregator/Dockerfile",
@@ -1045,7 +1064,10 @@ def aggregator_service(
             "PYTHONUNBUFFERED=1",
             f"SUM_AMOUNT={sum_amount}",
             f"SUM_PREFIX={sum_prefix}",
+            "STATE_DIR=/worker_state",
+            "SNAPSHOT_INTERVAL=1000",
         ],
+        volumes=[f"{state_volume}:/worker_state"],
     )
 
 
