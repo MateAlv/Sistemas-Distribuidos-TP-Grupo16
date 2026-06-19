@@ -8,12 +8,8 @@ arrive, and the whole tracker is dropped when the client closes.
 
 from __future__ import annotations
 
-import struct
 
-from common.fault_tolerance._encoding import UINT32_FORMAT, read_uint32
-
-
-class Watermark:
+class DeduplicationTracker:
     def __init__(self, biggest: int = 0, pending: set[int] | None = None) -> None:
         self.biggest = biggest
         self.pending = pending if pending is not None else set()
@@ -28,20 +24,9 @@ class Watermark:
         else:
             self.pending.discard(seq)
 
-    def serialize(self) -> bytes:
-        chunks = [
-            struct.pack(UINT32_FORMAT, self.biggest),
-            struct.pack(UINT32_FORMAT, len(self.pending)),
-        ]
-        chunks.extend(struct.pack(UINT32_FORMAT, seq) for seq in sorted(self.pending))
-        return b"".join(chunks)
+    def to_dict(self) -> dict:
+        return {"biggest": self.biggest, "pending": sorted(self.pending)}
 
     @classmethod
-    def deserialize(cls, data: bytes, offset: int = 0) -> tuple["Watermark", int]:
-        biggest, offset = read_uint32(data, offset)
-        pending_count, offset = read_uint32(data, offset)
-        pending = set()
-        for _ in range(pending_count):
-            seq, offset = read_uint32(data, offset)
-            pending.add(seq)
-        return cls(biggest=biggest, pending=pending), offset
+    def from_dict(cls, data: dict) -> "DeduplicationTracker":
+        return cls(biggest=data["biggest"], pending=set(data["pending"]))
