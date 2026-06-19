@@ -3,28 +3,11 @@
 Keyed as outbox[client_id][input_id] -> [OutboxEntry], so a whole input's
 outputs are added and removed together. Entries are stored ready to publish.
 
-Binary layout produced by serialize():
-    u32 client_count
-    per client:
-        u32 client_id
-        u32 input_count
-        per input:
-            u16 len + input_id
-            u16 entry_count
-            per entry: OutboxEntry.serialize()
+Holds no files: persistence is via to_dict()/from_dict() (plain picklable data).
 """
 
 from __future__ import annotations
 
-import struct
-
-from common.fault_tolerance._encoding import (
-    UINT16_FORMAT,
-    UINT32_FORMAT,
-    read_length_prefixed_u16,
-    read_uint16,
-    read_uint32,
-)
 from common.fault_tolerance.outbox.outbox_entry import OutboxEntry
 
 
@@ -57,35 +40,41 @@ class Outbox:
     def drop_client(self, client_id: int) -> None:
         self._pending.pop(client_id, None)
 
-    def serialize(self) -> bytes:
-        chunks = [struct.pack(UINT32_FORMAT, len(self._pending))]
-        for client_id, inputs in self._pending.items():
-            chunks.append(struct.pack(UINT32_FORMAT, client_id))
-            chunks.append(struct.pack(UINT32_FORMAT, len(inputs)))
-            for input_id, entries in inputs.items():
-                input_id_bytes = input_id.encode()
-                chunks.append(struct.pack(UINT16_FORMAT, len(input_id_bytes)))
-                chunks.append(input_id_bytes)
-                chunks.append(struct.pack(UINT16_FORMAT, len(entries)))
-                chunks.extend(entry.serialize() for entry in entries)
-        return b"".join(chunks)
+    def to_dict(self) -> dict:
+        return {
+            client_id: {
+                input_id: [_entry_to_dict(entry) for entry in entries]
+                for input_id, entries in inputs.items()
+            }
+            for client_id, inputs in self._pending.items()
+        }
 
     @classmethod
-    def deserialize(cls, data: bytes) -> "Outbox":
+    def from_dict(cls, data: dict) -> "Outbox":
         outbox = cls()
-        offset = 0
-        client_count, offset = read_uint32(data, offset)
-        for _ in range(client_count):
-            client_id, offset = read_uint32(data, offset)
-            input_count, offset = read_uint32(data, offset)
-            inputs: dict[str, list[OutboxEntry]] = {}
-            for _ in range(input_count):
-                input_id_bytes, offset = read_length_prefixed_u16(data, offset)
-                entry_count, offset = read_uint16(data, offset)
-                entries = []
-                for _ in range(entry_count):
-                    entry, offset = OutboxEntry.deserialize(data, offset)
-                    entries.append(entry)
-                inputs[input_id_bytes.decode()] = entries
-            outbox._pending[client_id] = inputs
+        outbox._pending = {
+            client_id: {
+                input_id: [_entry_from_dict(entry) for entry in entries]
+                for input_id, entries in inputs.items()
+            }
+            for client_id, inputs in data.items()
+        }
         return outbox
+
+
+def _entry_to_dict(entry: OutboxEntry) -> dict:
+    return {
+        "output_id": entry.output_id,
+        "input_id": entry.input_id,
+        "destination": entry.destination,
+        "body": entry.body,
+    }
+
+
+def _entry_from_dict(data: dict) -> OutboxEntry:
+    return OutboxEntry(
+        output_id=data["output_id"],
+        input_id=data["input_id"],
+        destination=data["destination"],
+        body=data["body"],
+    )
