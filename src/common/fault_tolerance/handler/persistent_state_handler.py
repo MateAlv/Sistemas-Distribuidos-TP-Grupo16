@@ -62,8 +62,8 @@ class PersistentStateHandler:
         from_record = REPLAY_ALL
         if snapshot is not None:
             self.worker_state.restore(snapshot.worker_state)
-            self.inbox = Inbox.deserialize(snapshot.inbox)
-            self.outbox = Outbox.deserialize(snapshot.outbox)
+            self.inbox = Inbox.from_dict(snapshot.inbox)
+            self.outbox = Outbox.from_dict(snapshot.outbox)
             from_record = snapshot.wal_checkpoint_record
 
         applied = 0
@@ -119,8 +119,8 @@ class PersistentStateHandler:
         snapshot = Snapshot(
             wal_checkpoint_record=REPLAY_ALL,
             worker_state=self.worker_state.snapshot(),
-            inbox=self.inbox.serialize(),
-            outbox=self.outbox.serialize(),
+            inbox=self.inbox.to_dict(),
+            outbox=self.outbox.to_dict(),
         )
         self.last_state.commit(snapshot)
         self.wal.rotate()
