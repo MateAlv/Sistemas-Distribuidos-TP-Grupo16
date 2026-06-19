@@ -70,7 +70,7 @@ def test_add_overwrites_same_input():
 
 
 def test_round_trip_empty():
-    restored = Outbox.deserialize(Outbox().serialize())
+    restored = Outbox.from_dict(Outbox().to_dict())
     assert restored.all_pending() == []
 
 
@@ -80,7 +80,7 @@ def test_round_trip_preserves_structure_and_bytes():
     outbox.add(1, "b", [_entry("1b#0", "b"), _entry("1b#1", "b", body=b"")])
     outbox.add(2, "a", [_entry("2a#0", "a", body=b"\xff" * 300)])
 
-    restored = Outbox.deserialize(outbox.serialize())
+    restored = Outbox.from_dict(outbox.to_dict())
 
     assert restored.entries_for_input(1, "a") == outbox.entries_for_input(1, "a")
     assert restored.entries_for_input(1, "b") == outbox.entries_for_input(1, "b")

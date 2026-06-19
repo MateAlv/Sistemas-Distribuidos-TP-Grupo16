@@ -11,5 +11,5 @@ class InputApplied:
     client_id: int
     sender_id: int
     seq: int
-    state_change: bytes
+    state_change: dict
     outputs: list[OutboxEntry]

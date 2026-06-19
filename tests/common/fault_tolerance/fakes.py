@@ -9,12 +9,9 @@ and call recover().
 from __future__ import annotations
 
 import copy
-import struct
 
 from common.fault_tolerance.snapshot import Snapshot
 from common.fault_tolerance.wal import WalRecord
-
-_INT = ">q"
 
 
 class CrashError(RuntimeError):
@@ -76,15 +73,15 @@ class FakeWorkerState:
     def __init__(self) -> None:
         self.total = 0
 
-    def snapshot(self) -> bytes:
-        return struct.pack(_INT, self.total)
+    def snapshot(self) -> dict:
+        return {"total": self.total}
 
-    def restore(self, data: bytes) -> None:
-        self.total = struct.unpack(_INT, data)[0] if data else 0
+    def restore(self, data: dict) -> None:
+        self.total = data.get("total", 0) if data else 0
 
-    def apply_change(self, change: bytes) -> None:
-        self.total += struct.unpack(_INT, change)[0]
+    def apply_change(self, change: dict) -> None:
+        self.total += change["delta"]
 
 
-def change(value: int) -> bytes:
-    return struct.pack(_INT, value)
+def change(value: int) -> dict:
+    return {"delta": value}
