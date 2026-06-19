@@ -525,8 +525,11 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
         )
 
     file_ingestor_count = counts["file_ingestors"]
+    named_volumes: dict[str, None] = {}
     for index in range(file_ingestor_count):
-        services[f"file_ingestor_{index}"] = file_ingestor_service(index, file_ingestor_count, settings)
+        vol_name = f"file_ingestor_{index}_state"
+        named_volumes[vol_name] = None
+        services[f"file_ingestor_{index}"] = file_ingestor_service(index, file_ingestor_count, settings, vol_name)
 
     filter_specs = []
     if usd_enabled:
@@ -780,7 +783,10 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
     if settings.get("chaos", {}).get("enabled", False):
         services["chaos_monkey"] = chaos_monkey_service(settings, client_names)
 
-    return {"services": services}
+    compose: dict = {"services": services}
+    if named_volumes:
+        compose["volumes"] = named_volumes
+    return compose
 
 
 def rabbitmq_service(expose_ports: bool) -> dict:
@@ -829,7 +835,7 @@ def gateway_service(file_ingestor_count: int, settings: dict, enabled_queries: s
     )
 
 
-def file_ingestor_service(index: int, total: int, settings: dict) -> dict:
+def file_ingestor_service(index: int, total: int, settings: dict, state_volume: str) -> dict:
     return base_service(
         "workers/file_ingestor/Dockerfile",
         depends_on=depends_on_rabbitmq(),
@@ -843,7 +849,10 @@ def file_ingestor_service(index: int, total: int, settings: dict) -> dict:
             f"MOM_HOST={MOM_HOST}",
             "PYTHONUNBUFFERED=1",
             f"TRANSACTION_OUTPUT_EXCHANGE={TRANSACTION_EXCHANGE}",
+            "STATE_DIR=/worker_state",
+            "SNAPSHOT_INTERVAL=1000",
         ],
+        volumes=[f"{state_volume}:/worker_state"],
     )
 
 
