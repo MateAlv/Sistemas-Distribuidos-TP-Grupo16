@@ -171,52 +171,12 @@ class TestWriteInputDone:
         assert record_type == RecordType.INPUT_DONE
 
 
-class TestWriteCheckpoint:
-    def test_payload_encodes_lsn(self, wal_path: Path) -> None:
-        w = _make_writer(wal_path)
-        w.write_checkpoint(snapshot_lsn=12345)
-        w.close()
-
-        data = wal_path.read_bytes()
-        record_type, payload, _ = _read_record(data)
-        assert record_type == RecordType.CHECKPOINT
-        lsn_value = struct.unpack(">Q", payload)[0]
-        assert lsn_value == 12345
-
-
-class TestWriteEofSent:
-    def test_record_type_and_fields(self, wal_path: Path) -> None:
-        w = _make_writer(wal_path)
-        w.write_eof_sent(client_id=3, fragment=7, node_id=2)
-        w.close()
-
-        data = wal_path.read_bytes()
-        record_type, payload, _ = _read_record(data)
-        assert record_type == RecordType.EOF_SENT
-        client_id, fragment, node_id = struct.unpack(">IIB", payload)
-        assert client_id == 3
-        assert fragment == 7
-        assert node_id == 2
-
-
-class TestWriteClientCleanupStarted:
-    def test_record_type_and_client_id(self, wal_path: Path) -> None:
-        w = _make_writer(wal_path)
-        w.write_client_cleanup_started(client_id=99)
-        w.close()
-
-        data = wal_path.read_bytes()
-        record_type, payload, _ = _read_record(data)
-        assert record_type == RecordType.CLIENT_CLEANUP_STARTED
-        assert struct.unpack(">I", payload)[0] == 99
-
-
 class TestFsyncIsCalledPerRecord:
     def test_fsync_called_once_per_write(self, wal_path: Path) -> None:
         calls: list[int] = []
         w = WALWriter(wal_path, fsync_fn=lambda fd: calls.append(fd))
         w.write_input_done(InputDone("id", 1, 0, 1))
-        w.write_checkpoint(0)
+        w.write_input_done(InputDone("id2", 1, 0, 2))
         w.close()
         assert len(calls) == 2
 

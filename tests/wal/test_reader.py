@@ -6,13 +6,7 @@ import pytest
 from common.fault_tolerance.outbox.outbox_entry import OutboxEntry
 from common.fault_tolerance.wal.input_applied import InputApplied
 from common.fault_tolerance.wal.input_done import InputDone
-from common.fault_tolerance.wal.reader import (
-    Checkpoint,
-    ClientCleanupStarted,
-    EofSent,
-    WALReader,
-    decode_record,
-)
+from common.fault_tolerance.wal.reader import WALReader, decode_record
 from common.fault_tolerance.wal.record import HEADER_FORMAT, RecordType
 from common.fault_tolerance.wal.writer import WALWriter
 
@@ -54,21 +48,12 @@ def test_reader_round_trips_records_written_by_writer(wal_path: Path) -> None:
     writer = _writer(wal_path)
     writer.write_input_applied(input_applied)
     writer.write_input_done(input_done)
-    writer.write_client_cleanup_started(7)
-    writer.write_eof_sent(client_id=7, fragment=99, node_id=2)
-    writer.write_checkpoint(snapshot_lsn=1234)
     writer.close()
 
     raw_records = list(WALReader(wal_path).records())
     decoded = [decode_record(record) for record in raw_records]
 
-    assert decoded == [
-        input_applied,
-        input_done,
-        ClientCleanupStarted(client_id=7),
-        EofSent(client_id=7, fragment=99, node_id=2),
-        Checkpoint(snapshot_lsn=1234),
-    ]
+    assert decoded == [input_applied, input_done]
 
 
 def test_records_after_filters_by_lsn(wal_path: Path) -> None:

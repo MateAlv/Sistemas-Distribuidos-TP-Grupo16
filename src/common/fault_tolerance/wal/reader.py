@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Union
 
 from common.fault_tolerance._encoding import (
-    read_exact,
     read_length_prefixed_u16,
     read_length_prefixed_u32,
     read_uint16,
@@ -19,9 +18,6 @@ from common.fault_tolerance.wal.input_applied import InputApplied
 from common.fault_tolerance.wal.input_done import InputDone
 from common.fault_tolerance.wal.record import HEADER_FORMAT, HEADER_SIZE, RecordType
 
-UINT64_FORMAT = ">Q"
-UINT64_SIZE = struct.calcsize(UINT64_FORMAT)
-
 
 @dataclass(frozen=True)
 class WALRawRecord:
@@ -30,30 +26,7 @@ class WALRawRecord:
     payload: bytes
 
 
-@dataclass(frozen=True)
-class ClientCleanupStarted:
-    client_id: int
-
-
-@dataclass(frozen=True)
-class EofSent:
-    client_id: int
-    fragment: int
-    node_id: int
-
-
-@dataclass(frozen=True)
-class Checkpoint:
-    snapshot_lsn: int
-
-
-DecodedRecord = Union[
-    InputApplied,
-    InputDone,
-    ClientCleanupStarted,
-    EofSent,
-    Checkpoint,
-]
+DecodedRecord = Union[InputApplied, InputDone]
 
 
 class WALReader:
@@ -99,12 +72,6 @@ def decode_record(record: WALRawRecord) -> DecodedRecord:
         return decode_input_applied(record.payload)
     if record.record_type == RecordType.INPUT_DONE:
         return decode_input_done(record.payload)
-    if record.record_type == RecordType.CLIENT_CLEANUP_STARTED:
-        return decode_client_cleanup_started(record.payload)
-    if record.record_type == RecordType.EOF_SENT:
-        return decode_eof_sent(record.payload)
-    if record.record_type == RecordType.CHECKPOINT:
-        return decode_checkpoint(record.payload)
     raise ValueError(f"unsupported WAL record type {record.record_type!r}")
 
 
@@ -146,30 +113,6 @@ def decode_input_done(payload: bytes) -> InputDone:
         sender_id=sender_id,
         seq=seq,
     )
-
-
-def decode_client_cleanup_started(payload: bytes) -> ClientCleanupStarted:
-    client_id, offset = read_uint32(payload, 0)
-    _ensure_consumed(payload, offset)
-    return ClientCleanupStarted(client_id=client_id)
-
-
-def decode_eof_sent(payload: bytes) -> EofSent:
-    client_id, offset = read_uint32(payload, 0)
-    fragment, offset = read_uint32(payload, offset)
-    raw_node_id, offset = read_exact(payload, offset, 1)
-    _ensure_consumed(payload, offset)
-    return EofSent(
-        client_id=client_id,
-        fragment=fragment,
-        node_id=raw_node_id[0],
-    )
-
-
-def decode_checkpoint(payload: bytes) -> Checkpoint:
-    raw_snapshot_lsn, offset = read_exact(payload, 0, UINT64_SIZE)
-    _ensure_consumed(payload, offset)
-    return Checkpoint(snapshot_lsn=struct.unpack(UINT64_FORMAT, raw_snapshot_lsn)[0])
 
 
 def _decode_text(field: str, data: bytes) -> str:

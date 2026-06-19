@@ -22,9 +22,6 @@ def test_record_type_values_are_stable(record_type: RecordType) -> None:
     expected = {
         RecordType.INPUT_APPLIED: 0x01,
         RecordType.INPUT_DONE: 0x02,
-        RecordType.CLIENT_CLEANUP_STARTED: 0x03,
-        RecordType.EOF_SENT: 0x04,
-        RecordType.CHECKPOINT: 0x05,
     }
     assert record_type == expected[record_type]
 
