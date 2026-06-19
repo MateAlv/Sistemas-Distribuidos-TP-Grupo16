@@ -20,6 +20,10 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from common.fault_tolerance.handler.action import Action
+from common.fault_tolerance.handler.sender_sequencer import (
+    LogicalOutput,
+    SenderSequencer,
+)
 from common.fault_tolerance.handler.worker_loop_instruction import (
     WorkerLoopInstruction,
 )
@@ -34,7 +38,9 @@ from common.fault_tolerance.worker_state import WorkerState
 # optimization, not a correctness requirement (the inbox guards double-apply).
 REPLAY_ALL = -1
 
-BusinessFn = Callable[[bytes], "tuple[bytes, list[OutboxEntry]]"]
+# business_fn returns its state change plus logical (destination, body) outputs;
+# the handler stamps each output with a durable id via the SenderSequencer.
+BusinessFn = Callable[[bytes], "tuple[dict, list[LogicalOutput]]"]
 
 
 class PersistentStateHandler:
@@ -55,6 +61,7 @@ class PersistentStateHandler:
         self.wal = wal if wal is not None else Wal(state_dir)
         self.inbox = Inbox()
         self.outbox = Outbox()
+        self.sequencer = SenderSequencer(node_id)
         self.applied_since_snapshot = 0
 
     def recover(self) -> None:
@@ -64,6 +71,7 @@ class PersistentStateHandler:
             self.worker_state.restore(snapshot.worker_state)
             self.inbox = Inbox.from_dict(snapshot.inbox)
             self.outbox = Outbox.from_dict(snapshot.outbox)
+            self.sequencer = SenderSequencer.from_dict(self.node_id, snapshot.sequencer)
             from_record = snapshot.wal_checkpoint_record
 
         applied = 0
@@ -89,10 +97,12 @@ class PersistentStateHandler:
             return WorkerLoopInstruction(Action.ACK)
 
         if status is InboxStatus.NEW:
-            state_change, outputs = business_fn(payload)
+            state_change, logical_outputs = business_fn(payload)
+            outputs = self.sequencer.stamp(client_id, msg_id, logical_outputs)
             self.wal.append(
                 InputApplied(msg_id, client_id, sender_id, seq, state_change, outputs)
             )
+            self.sequencer.advance(client_id, len(outputs))
             self.worker_state.apply_change(state_change)
             self.inbox.mark_applied(client_id, sender_id, seq)
             self.outbox.add(client_id, msg_id, outputs)
@@ -121,6 +131,7 @@ class PersistentStateHandler:
             worker_state=self.worker_state.snapshot(),
             inbox=self.inbox.to_dict(),
             outbox=self.outbox.to_dict(),
+            sequencer=self.sequencer.to_dict(),
         )
         self.last_state.commit(snapshot)
         self.wal.rotate()
@@ -136,6 +147,7 @@ class PersistentStateHandler:
                 self.worker_state.apply_change(record.state_change)
                 self.inbox.mark_applied(record.client_id, record.sender_id, record.seq)
                 self.outbox.add(record.client_id, record.msg_id, record.outputs)
+                self.sequencer.observe(record.outputs)
                 return True
             return False
 
