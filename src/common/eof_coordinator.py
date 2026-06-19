@@ -538,6 +538,32 @@ class EofCoordinator:
         )
         return FlushAction(is_leader=True, total_forwarded=total_forwarded)
 
+    # ─── snapshot / restore ──────────────────────────────────────────────────
+
+    def snapshot(self) -> dict:
+        """Return a picklable copy of all mutable coordinator state.
+        Caller must hold the worker's main lock."""
+        return {
+            "pending_eof":         dict(self._pending_eof),
+            "seen_eof":            set(self._seen_eof),
+            "leader_expected":     dict(self._leader_expected),
+            "leader_processed":    dict(self._leader_processed),
+            "leader_responders":   {k: set(v) for k, v in self._leader_responders.items()},
+            "flush_acks":          {k: set(v) for k, v in self._flush_acks.items()},
+            "forwarded_from_acks": dict(self._forwarded_from_acks),
+        }
+
+    def restore(self, snap: dict) -> None:
+        """Restore coordinator state from a snapshot dict.
+        Caller must hold the worker's main lock."""
+        self._pending_eof          = snap["pending_eof"]
+        self._seen_eof             = snap["seen_eof"]
+        self._leader_expected      = snap["leader_expected"]
+        self._leader_processed     = snap["leader_processed"]
+        self._leader_responders    = snap["leader_responders"]
+        self._flush_acks           = snap["flush_acks"]
+        self._forwarded_from_acks  = snap["forwarded_from_acks"]
+
     # ─── construcción de paquetes ─────────────────────────────────────────────
 
     def _make_packet(

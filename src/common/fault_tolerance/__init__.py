@@ -8,7 +8,7 @@ from common.fault_tolerance.handler import (
     PersistentStateHandler,
     WorkerLoopInstruction,
 )
-from common.fault_tolerance.inbox import Inbox, InboxStatus, Watermark
+from common.fault_tolerance.inbox import Inbox, InboxStatus, DeduplicationTracker
 from common.fault_tolerance.outbox import Outbox, OutboxEntry
 from common.fault_tolerance.snapshot import LastState, Snapshot
 from common.fault_tolerance.wal import InputApplied, InputDone, RecordType, Wal, WalRecord
@@ -28,7 +28,7 @@ __all__ = [
     "RecordType",
     "Wal",
     "WalRecord",
-    "Watermark",
+    "DeduplicationTracker",
     "WorkerLoopInstruction",
     "WorkerState",
 ]

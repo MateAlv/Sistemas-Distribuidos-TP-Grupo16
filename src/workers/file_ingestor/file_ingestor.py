@@ -10,10 +10,10 @@ from common.message_protocol.internal import InternalProtocol, LineBatchSerializ
 from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
+from common.last_state import LastStateManager
 from common.middleware import LazyQueue, MessageMiddlewareQueueRabbitMQ
 from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
 from workers.file_ingestor.line_batch_parser import LineBatchParser
-
 
 @dataclass(frozen=True)
 class FileIngestorConfig:
@@ -25,6 +25,8 @@ class FileIngestorConfig:
     control_queue_prefix: str
     response_queue_prefix: str
     logging_level: str
+    state_dir: str = ""
+    snapshot_interval: int = 1000
 
 
 class FileIngestor:
@@ -64,6 +66,61 @@ class FileIngestor:
         self._lock = threading.Lock()
         self._processed_by_client: dict[int, int] = {}
         self._batches_consumed = 0
+
+        self._last_state = LastStateManager(config.state_dir) if config.state_dir else None
+        self._msg_count = 0
+        self._restore_snapshot()
+
+    # ---------- snapshot ----------
+
+    def _build_snapshot(self) -> dict:
+        """Capture all mutable worker state into a serializable dict.
+        Must be called under self._lock to get a consistent view of state
+        and coordinator together. This dict is what gets written to disk."""
+        return {
+            "wal_checkpoint_record": 0,
+            "processed_by_client": dict(self._processed_by_client),
+            "batches_consumed": self._batches_consumed,
+            "eof_coordinator": self._coordinator.snapshot(),
+        }
+
+    def _restore_snapshot(self) -> None:
+        """Load the latest snapshot from disk and apply it to worker state.
+        Called once at startup before consuming any messages. No-op if no
+        snapshot exists or STATE_DIR is not configured."""
+        if self._last_state is None:
+            return
+        snap = self._last_state.load()
+        if snap is None:
+            return
+        with self._lock:
+            self._processed_by_client = snap["processed_by_client"]
+            self._batches_consumed = snap["batches_consumed"]
+            self._coordinator.restore(snap["eof_coordinator"])
+        logging.info("file_ingestor_restored | id=%s", self._config.id)
+
+    def _snapshot(self) -> None:
+        """Unconditionally persist current state to disk and reset the message
+        counter. Called on upstream EOF (important state boundary) and by
+        _maybe_snapshot when the interval is reached."""
+        if self._last_state is None:
+            return
+        self._msg_count = 0
+        with self._lock:
+            snap = self._build_snapshot()
+        try:
+            self._last_state.save(snap)
+        except Exception:
+            logging.exception("file_ingestor_snapshot_error | id=%s", self._config.id)
+
+    def _maybe_snapshot(self) -> None:
+        """Increment the message counter and trigger a snapshot every
+        SNAPSHOT_INTERVAL DATA messages. No-op if STATE_DIR is not set."""
+        if self._last_state is None:
+            return
+        self._msg_count += 1
+        if self._msg_count >= self._config.snapshot_interval:
+            self._snapshot()
 
     # ---------- connection factories ----------
 
@@ -207,11 +264,14 @@ class FileIngestor:
             msg_type, client_id, payload = self._internal_protocol.unpack_packet(message)
             if msg_type == MessageType.DATA:
                 self._handle_line_batch(client_id, payload)
+                ack()
+                self._maybe_snapshot()
             elif msg_type == MessageType.EOF:
                 self._handle_upstream_eof(client_id, payload)
+                ack()
+                self._snapshot()
             else:
                 raise ValueError(f"unknown file ingestor message type: {msg_type}")
-            ack()
         except Exception as e:
             logging.error("file_ingestor_message_error | id=%s | error=%s", self._config.id, e)
             nack()

@@ -6,6 +6,7 @@ import time
 from common import middleware
 from common.constants import C_Q2, C_Q3, C_Q5
 from common.eof_coordinator import EofCoordinator, BroadcastAction, FlushAction, SendAnswerAction
+from common.last_state import LastStateManager
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal.common import MessageType
 from common.message_protocol.internal.common.control_message import ControlMessage
@@ -28,6 +29,8 @@ OUTPUT_QUEUE = os.environ["OUTPUT_QUEUE"]
 LEADER_ID = 0
 AGGREGATION_CONTROL_QUEUE_PREFIX = f"{AGGREGATION_PREFIX}_control"
 AGGREGATION_RESPONSE_QUEUE_PREFIX = f"{AGGREGATION_PREFIX}_response"
+STATE_DIR = os.environ.get("STATE_DIR", "")
+SNAPSHOT_INTERVAL = int(os.environ.get("SNAPSHOT_INTERVAL", "1000"))
 
 
 class AggregatorWorker:
@@ -59,6 +62,64 @@ class AggregatorWorker:
         self.response_thread = None
         self.closed = False
         self._stopped = False
+
+        self._last_state = LastStateManager(STATE_DIR) if STATE_DIR else None
+        self._msg_count = 0
+        self._restore_snapshot()
+
+    # ---------- snapshot ----------
+
+    def _build_snapshot(self) -> dict:
+        """Capture all mutable worker state into a serializable dict.
+        Must be called under self._lock."""
+        return {
+            "wal_checkpoint_record": 0,
+            "data_count_by_client": dict(self._data_count_by_client),
+            "processors_by_client": dict(self._processors_by_client),
+            "closed_by_client": set(self._closed_by_client),
+            "eof_coordinator": self._coordinator.snapshot(),
+        }
+
+    def _restore_snapshot(self) -> None:
+        """Load the latest snapshot from disk and apply it to worker state.
+        Called once at startup before consuming any messages. No-op if no
+        snapshot exists or STATE_DIR is not configured."""
+        if self._last_state is None:
+            return
+        snap = self._last_state.load()
+        if snap is None:
+            return
+        with self._lock:
+            self._data_count_by_client = snap["data_count_by_client"]
+            self._processors_by_client = snap["processors_by_client"]
+            self._closed_by_client = snap["closed_by_client"]
+            self._coordinator.restore(snap["eof_coordinator"])
+        logging.info("aggregation_restored | configuration=%s | id=%s", CONFIGURATION, ID)
+
+    def _snapshot(self) -> None:
+        """Unconditionally persist current state to disk and reset the message
+        counter. Called on upstream EOF (important state boundary) and by
+        _maybe_snapshot when the interval is reached."""
+        if self._last_state is None:
+            return
+        self._msg_count = 0
+        with self._lock:
+            snap = self._build_snapshot()
+        try:
+            self._last_state.save(snap)
+        except Exception:
+            logging.exception(
+                "aggregation_snapshot_error | configuration=%s | id=%s", CONFIGURATION, ID
+            )
+
+    def _maybe_snapshot(self) -> None:
+        """Increment the message counter and trigger a snapshot every
+        SNAPSHOT_INTERVAL DATA messages. No-op if STATE_DIR is not set."""
+        if self._last_state is None:
+            return
+        self._msg_count += 1
+        if self._msg_count >= SNAPSHOT_INTERVAL:
+            self._snapshot()
 
     # ---------- helpers ----------
 
@@ -155,11 +216,14 @@ class AggregatorWorker:
             msg_type, client_id, payload = self._internal_protocol.unpack_packet(message)
             if msg_type == MessageType.DATA:
                 self._handle_data(client_id, payload)
+                ack()
+                self._maybe_snapshot()
             elif msg_type == MessageType.EOF:
                 self._handle_upstream_eof(client_id, payload, response_queue, output_queue)
+                ack()
+                self._snapshot()
             else:
                 raise ValueError(f"unsupported aggregator message type: {msg_type}")
-            ack()
         except Exception:
             logging.exception(
                 "aggregation_data_error | configuration=%s | id=%s", CONFIGURATION, ID

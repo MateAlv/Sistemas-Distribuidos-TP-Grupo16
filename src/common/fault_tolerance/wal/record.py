@@ -25,6 +25,3 @@ __all__ = [
 class RecordType(IntEnum):
     INPUT_APPLIED = 0x01
     INPUT_DONE = 0x02
-    CLIENT_CLEANUP_STARTED = 0x03
-    EOF_SENT = 0x04
-    CHECKPOINT = 0x05

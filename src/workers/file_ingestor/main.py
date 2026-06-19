@@ -13,6 +13,8 @@ DEFAULT_TRANSACTION_OUTPUT_EXCHANGE = "transaction_fanout_exchange"
 DEFAULT_CONTROL_QUEUE_PREFIX = "file_ingestor_control"
 DEFAULT_RESPONSE_QUEUE_PREFIX = "file_ingestor_response"
 DEFAULT_LOGGING_LEVEL = "INFO"
+DEFAULT_STATE_DIR = ""
+DEFAULT_SNAPSHOT_INTERVAL = 1000
 
 
 def main() -> int:
@@ -60,6 +62,8 @@ def load_config() -> FileIngestorConfig:
             DEFAULT_RESPONSE_QUEUE_PREFIX,
         ),
         logging_level=os.getenv("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
+        state_dir=os.getenv("STATE_DIR", DEFAULT_STATE_DIR),
+        snapshot_interval=get_int("SNAPSHOT_INTERVAL", DEFAULT_SNAPSHOT_INTERVAL),
     )
 
 

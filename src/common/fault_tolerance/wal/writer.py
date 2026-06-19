@@ -31,8 +31,6 @@ FsyncFn = Callable[[int], None]
 _CLIENT_ID_FORMAT = ">I"
 _SENDER_ID_FORMAT = ">I"
 _SEQ_FORMAT = ">I"
-_NODE_ID_FORMAT = ">B"
-_SNAPSHOT_LSN_FORMAT = ">Q"
 _OUTBOX_COUNT_FORMAT = ">H"
 
 _MAX_OUTBOX_ENTRIES = MAX_UINT16
@@ -82,22 +80,6 @@ class WALWriter:
             + struct.pack(_SEQ_FORMAT, record.seq)
         )
         return self._write_record(RecordType.INPUT_DONE, payload)
-
-    def write_client_cleanup_started(self, client_id: int) -> int:
-        payload = struct.pack(_CLIENT_ID_FORMAT, client_id)
-        return self._write_record(RecordType.CLIENT_CLEANUP_STARTED, payload)
-
-    def write_eof_sent(self, client_id: int, fragment: int, node_id: int) -> int:
-        payload = (
-            struct.pack(_CLIENT_ID_FORMAT, client_id)
-            + struct.pack(UINT32_FORMAT, fragment)
-            + struct.pack(_NODE_ID_FORMAT, node_id)
-        )
-        return self._write_record(RecordType.EOF_SENT, payload)
-
-    def write_checkpoint(self, snapshot_lsn: int) -> int:
-        payload = struct.pack(_SNAPSHOT_LSN_FORMAT, snapshot_lsn)
-        return self._write_record(RecordType.CHECKPOINT, payload)
 
     def close(self) -> None:
         os.close(self._fd)

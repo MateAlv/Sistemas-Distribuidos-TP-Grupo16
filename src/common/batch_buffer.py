@@ -53,6 +53,20 @@ class BatchBuffer:
                 self._buffers.pop(key, None)
                 self._bytes_by_key.pop(key, None)
 
+    def snapshot(self) -> dict:
+        """Return a picklable copy of all buffered data."""
+        with self._lock:
+            return {
+                "buffers":      {k: list(v) for k, v in self._buffers.items()},
+                "bytes_by_key": dict(self._bytes_by_key),
+            }
+
+    def restore(self, snap: dict) -> None:
+        """Restore buffer state from a snapshot dict."""
+        with self._lock:
+            self._buffers      = {k: list(v) for k, v in snap["buffers"].items()}
+            self._bytes_by_key = dict(snap["bytes_by_key"])
+
     def _flush_key_locked(self, key: Hashable) -> bytes | None:
         """Remove one key's buffer and its byte counter, returning that key's
         payloads concatenated into a single batch (or None if it was empty).
