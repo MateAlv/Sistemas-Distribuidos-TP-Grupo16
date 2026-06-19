@@ -3,7 +3,6 @@ from common.fault_tolerance.handler.action import Action
 from common.fault_tolerance.handler.persistent_state_handler import (
     PersistentStateHandler,
 )
-from common.fault_tolerance.outbox import OutboxEntry
 from common.fault_tolerance.worker_state import WorkerState
 from workers.aggregator.aggregator_state import AggregatorState
 from workers.aggregator.processors import create_aggregator_processor
@@ -159,12 +158,13 @@ def _new_handler(tmp_path, state):
     )
 
 
+def _oid(seq: int, index: int) -> str:
+    return f"agg:{CLIENT}:{seq}#{index}"
+
+
 def _eof_business(state):
     def fn(_payload):
-        outputs = [
-            OutboxEntry(f"eof:{CLIENT}#{i}", "eof", "dest", body)
-            for i, body in enumerate(state.results_for(CLIENT) + [b"EOF"])
-        ]
+        outputs = [("dest", body) for body in state.results_for(CLIENT) + [b"EOF"]]
         return AggregatorState.close_change(CLIENT), outputs
 
     return fn
@@ -187,7 +187,7 @@ def test_eof_input_emits_results_and_dedups_redelivery(tmp_path):
 
     instr = handler.handle("eof", CLIENT, 1, 4, b"", _eof_business(state))
     assert instr.action is Action.PUBLISH_THEN_COMMIT
-    assert [e.output_id for e in instr.outputs] == [f"eof:{CLIENT}#0", f"eof:{CLIENT}#1"]
+    assert [e.output_id for e in instr.outputs] == [_oid(0, 0), _oid(1, 1)]
     handler.commit_done(*instr.ctx)
     assert CLIENT in state._closed_by_client
 
@@ -207,6 +207,6 @@ def test_eof_outputs_republished_after_crash_before_commit(tmp_path):
     recovered.recover()
     assert CLIENT in recovered_state._closed_by_client
     assert [e.output_id for e in recovered.outbox_to_republish()] == [
-        f"eof:{CLIENT}#0",
-        f"eof:{CLIENT}#1",
+        _oid(0, 0),
+        _oid(1, 1),
     ]
