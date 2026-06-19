@@ -26,3 +26,15 @@ class UpstreamEofCounter:
 
     def count(self, client_id: int) -> int:
         return len(self._eofs_by_client.get(client_id, ()))
+
+    def snapshot(self) -> dict:
+        """Return a picklable copy of counter state. Caller must hold the worker's lock."""
+        return {
+            "eofs_by_client": {k: set(v) for k, v in self._eofs_by_client.items()},
+            "closed":         set(self._closed),
+        }
+
+    def restore(self, snap: dict) -> None:
+        """Restore state from a snapshot dict. Caller must hold the worker's lock."""
+        self._eofs_by_client = snap["eofs_by_client"]
+        self._closed         = snap["closed"]
