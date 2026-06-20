@@ -84,6 +84,53 @@ def test_build_compose_omits_monitors_when_disabled() -> None:
     assert "MONITOR_HOSTS" not in _env(services["filter_usd_0"])
 
 
+def test_build_compose_adds_worker_state_volumes_and_durable_env() -> None:
+    compose = generate_compose.build_compose(
+        _config({"enabled": False}),
+        expose_ports=False,
+    )
+    services = compose["services"]
+    volumes = compose["volumes"]
+
+    worker_names = {
+        "file_splitter_0",
+        "file_ingestor_0",
+        "filter_usd_0",
+        "filter_q1_0",
+    }
+    for name in worker_names:
+        env = _env(services[name])
+        volume_name = f"{name}_state"
+        assert env["RABBITMQ_DURABLE"] == "true"
+        assert env["STATE_DIR"] == "/worker_state"
+        assert env["SNAPSHOT_INTERVAL"] == "1000"
+        assert services[name]["volumes"] == [f"{volume_name}:/worker_state"]
+        assert volume_name in volumes
+
+    gateway_env = _env(services["gateway"])
+    assert gateway_env["RABBITMQ_DURABLE"] == "true"
+    assert "STATE_DIR" not in gateway_env
+    assert "volumes" not in services["gateway"]
+
+    client_env = _env(services["client_0"])
+    assert "RABBITMQ_DURABLE" not in client_env
+    assert "STATE_DIR" not in client_env
+
+    assert "RABBITMQ_DURABLE" not in _env(services["rabbitmq"])
+
+
+def test_rates_service_is_durable_but_has_no_worker_state_volume() -> None:
+    config = _config({"enabled": False})
+    config["queries"] = ["q5"]
+
+    services = generate_compose.build_compose(config, expose_ports=False)["services"]
+
+    env = _env(services["rates_service"])
+    assert env["RABBITMQ_DURABLE"] == "true"
+    assert "STATE_DIR" not in env
+    assert services["rates_service"]["volumes"] == ["./data/rates:/data/rates:rw"]
+
+
 @pytest.mark.parametrize(
     ("monitor", "message"),
     [

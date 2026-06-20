@@ -69,6 +69,9 @@ Q3_AVERAGES_EXCHANGE = "q3_averages_exchange"
 Q3_CANDIDATES_EXCHANGE = "q3_candidates_exchange"
 Q3_AVERAGES_ROUTING_PREFIX = "q3_averages"
 Q3_CANDIDATES_ROUTING_PREFIX = "q3_candidates"
+WORKER_STATE_DIR = "/worker_state"
+DEFAULT_SNAPSHOT_INTERVAL = 1000
+RABBITMQ_DURABLE_ENV = "RABBITMQ_DURABLE=true"
 OBSERVABILITY_DEFAULTS = {
     "FLOW_LOG_ENABLED": "1",
     "FLOW_LOG_EVERY_MESSAGES": "100000",
@@ -732,10 +735,22 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 settings=settings,
             )
 
-    heartbeat_node_names = [
+    rabbitmq_service_names = [
+        name for name in services if name != "rabbitmq"
+    ]
+    for name in rabbitmq_service_names:
+        add_env_once(services[name], RABBITMQ_DURABLE_ENV)
+
+    worker_service_names = [
         name
         for name in services
         if name not in {"rabbitmq", "gateway", "rates_service"}
+    ]
+    for name in worker_service_names:
+        add_worker_state_volume(name, services[name], named_volumes)
+
+    heartbeat_node_names = [
+        *worker_service_names
     ]
     monitor_names = []
     if monitor_enabled:
@@ -1471,6 +1486,36 @@ def base_service(dockerfile: str, depends_on, environment: list[str], volumes: l
     if volumes:
         service["volumes"] = volumes
     return service
+
+
+def add_worker_state_volume(
+    service_name: str,
+    service: dict,
+    named_volumes: dict[str, None],
+) -> None:
+    volume_name = worker_state_volume_name(service_name)
+    named_volumes[volume_name] = None
+    add_env_once(service, f"STATE_DIR={WORKER_STATE_DIR}")
+    add_env_once(service, f"SNAPSHOT_INTERVAL={DEFAULT_SNAPSHOT_INTERVAL}")
+    add_volume_once(service, f"{volume_name}:{WORKER_STATE_DIR}")
+
+
+def worker_state_volume_name(service_name: str) -> str:
+    return f"{service_name}_state"
+
+
+def add_env_once(service: dict, item: str) -> None:
+    environment = service.setdefault("environment", [])
+    key = item.split("=", 1)[0]
+    if any(entry.split("=", 1)[0] == key for entry in environment):
+        return
+    environment.append(item)
+
+
+def add_volume_once(service: dict, item: str) -> None:
+    volumes = service.setdefault("volumes", [])
+    if item not in volumes:
+        volumes.append(item)
 
 
 def observability_env() -> list[str]:
