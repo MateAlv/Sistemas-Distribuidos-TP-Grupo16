@@ -65,6 +65,9 @@ Q3_CANDIDATES_ROUTING_PREFIX = os.getenv(
 Q3_BARRIER_AMOUNT = int(os.getenv("Q3_BARRIER_AMOUNT", "1"))
 SUM_PREFIX = os.environ["SUM_PREFIX"]
 SUM_Q3_QUEUE = os.getenv("SUM_Q3_QUEUE", SUM_PREFIX)
+SUM_Q3_EXCHANGE = os.getenv("SUM_Q3_EXCHANGE", "")
+SUM_Q3_ROUTING_PREFIX = os.getenv("SUM_Q3_ROUTING_PREFIX", SUM_PREFIX)
+SUM_Q3_AMOUNT = int(os.getenv("SUM_Q3_AMOUNT", "0"))
 
 FILTER_AMOUNT = int(os.environ["FILTER_AMOUNT"])
 FILTER_PREFIX = os.environ["FILTER_PREFIX"] + "_" + CONFIGURATION
@@ -213,8 +216,11 @@ class FilterWorker:
                         )
                     )
             if DATE_ENABLE_Q3:
-                output_queues[SUM_Q3_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                    MOM_HOST, SUM_Q3_QUEUE
+                output_queues[SUM_Q3_QUEUE] = middleware.ShardedByClientPublisher(
+                    MOM_HOST,
+                    SUM_Q3_EXCHANGE,
+                    SUM_Q3_ROUTING_PREFIX,
+                    SUM_Q3_AMOUNT,
                 )
                 if Q3_CANDIDATES_EXCHANGE and Q3_BARRIER_AMOUNT > 1:
                     output_queues[Q3_CANDIDATES_QUEUE] = (
