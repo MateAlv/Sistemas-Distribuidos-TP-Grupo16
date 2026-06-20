@@ -1,6 +1,11 @@
 """
 Publisher que rutea mensajes a N shards según el client_id extraído del header
 del InternalProtocol.
+
+Un exchange direct rutea por routing key, así que un solo publisher (una sola
+conexión AMQP) alcanza para llegar a cualquier shard: elegimos la routing key por
+mensaje. Antes abríamos una conexión por shard, lo que multiplicaba las conexiones
+a RabbitMQ por cada edge sharded.
 """
 from .middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
@@ -23,14 +28,12 @@ class ShardedByClientPublisher:
         if shard_count < 1:
             raise ValueError("shard_count must be >= 1")
         self._shard_count = shard_count
-        self._publishers = [
-            MessageMiddlewareExchangeRabbitMQ(
-                mom_host,
-                exchange_name,
-                [routing_key_for_shard(routing_key_prefix, i)],
-            )
-            for i in range(shard_count)
-        ]
+        self._routing_key_prefix = routing_key_prefix
+        self._publisher = MessageMiddlewareExchangeRabbitMQ(
+            mom_host,
+            exchange_name,
+            [],
+        )
 
     def send(self, message: bytes) -> None:
         client_id = int.from_bytes(
@@ -38,11 +41,11 @@ class ShardedByClientPublisher:
             "big",
         )
         shard = shard_for_client_id(client_id, self._shard_count)
-        self._publishers[shard].send(message)
+        routing_key = routing_key_for_shard(self._routing_key_prefix, shard)
+        self._publisher.send(message, routing_key=routing_key)
 
     def close(self) -> None:
-        for publisher in self._publishers:
-            try:
-                publisher.close()
-            except Exception:
-                pass
+        try:
+            self._publisher.close()
+        except Exception:
+            pass
