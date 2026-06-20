@@ -26,7 +26,7 @@ ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
 CONFIGURATION = os.getenv("CONFIGURATION", C_Q2)
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
-if CONFIGURATION == C_Q2:
+if CONFIGURATION in (C_Q2, C_Q3):
     INPUT_EXCHANGE = os.environ["INPUT_EXCHANGE"]
     INPUT_ROUTING_PREFIX = os.environ["INPUT_ROUTING_PREFIX"]
 else:
@@ -507,7 +507,7 @@ class SumWorker:
     # ---------- lifecycle ----------
 
     def start(self) -> None:
-        input_kind = "exchange" if CONFIGURATION == C_Q2 else "queue"
+        input_kind = "exchange" if CONFIGURATION in (C_Q2, C_Q3) else "queue"
         logging.info(
             "sum_start | configuration=%s | id=%s | mom_host=%s | input=%s | "
             "input_kind=%s | "
@@ -521,7 +521,7 @@ class SumWorker:
         self._control_thread.start()
         self._response_thread.start()
 
-        if CONFIGURATION == C_Q2:
+        if CONFIGURATION in (C_Q2, C_Q3):
             self._input_queue = middleware.MessageMiddlewareExchangeRabbitMQ(
                 MOM_HOST,
                 INPUT_EXCHANGE,

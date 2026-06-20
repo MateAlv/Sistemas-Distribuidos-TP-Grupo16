@@ -32,6 +32,7 @@ FILTER_Q5_USD_QUEUE = "filter_q5_usd_queue"
 SUM_Q2_QUEUE = "sum_q2_queue"
 SUM_Q3_QUEUE = "sum_q3_queue"
 SUM_Q2_EXCHANGE = "sum_q2_exchange"
+SUM_Q3_EXCHANGE = "sum_q3_exchange"
 GATEWAY_Q1_QUEUE = "gateway_results_queue"
 GATEWAY_Q2_QUEUE = "join_q2_results_queue"
 GATEWAY_Q3_QUEUE = "gateway_q3_results_queue"
@@ -556,6 +557,7 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 q3_barrier_amount=counts["q3_barrier"],
                 q4_filter_amount=counts["q4_filter"],
                 sum_q2_amount=counts["sum_q2"],
+                sum_q3_amount=counts["sum_q3"],
             )
 
     if q5_enabled:
@@ -606,9 +608,9 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 amount=counts["sum_q3"],
                 aggregation_amount=counts["aggregation_q3"],
                 aggregation_prefix=AGGREGATION_Q3_PREFIX,
-                input_queue=SUM_Q3_QUEUE,
-                input_exchange=None,
-                input_routing_prefix=None,
+                input_queue=worker_queue_name(SUM_Q3_PREFIX, index),
+                input_exchange=SUM_Q3_EXCHANGE,
+                input_routing_prefix=SUM_Q3_PREFIX,
                 settings=settings,
                 sum_prefix=SUM_Q3_PREFIX,
             )
@@ -943,6 +945,7 @@ def filter_service(
     q3_barrier_amount: int = 1,
     q4_filter_amount: int = 1,
     sum_q2_amount: int = 1,
+    sum_q3_amount: int = 1,
 ) -> dict:
     enabled_queries = enabled_queries or {"q1", "q2", "q3", "q4", "q5"}
     environment = [
@@ -981,6 +984,12 @@ def filter_service(
             f"SUM_Q2_AMOUNT={sum_q2_amount}",
             f"SUM_Q2_EXCHANGE={SUM_Q2_EXCHANGE}",
             f"SUM_Q2_ROUTING_PREFIX={SUM_Q2_PREFIX}",
+        ])
+    if "q3" in enabled_queries:
+        environment.extend([
+            f"SUM_Q3_AMOUNT={sum_q3_amount}",
+            f"SUM_Q3_EXCHANGE={SUM_Q3_EXCHANGE}",
+            f"SUM_Q3_ROUTING_PREFIX={SUM_Q3_PREFIX}",
         ])
     # Sharded mode: el filter_date publica candidates al exchange con routing
     # key por client_id en lugar de la queue compartida.
