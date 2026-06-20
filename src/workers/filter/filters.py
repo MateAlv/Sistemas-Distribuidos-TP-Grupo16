@@ -39,6 +39,11 @@ CONFIGURATION = os.environ["CONFIGURATION"]
 # Cola de Entrada
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
 TRANSACTION_EXCHANGE = os.getenv("TRANSACTION_EXCHANGE")
+# Personal-queue input: cuando está seteado, el filter consume su propia cola
+# (INPUT_QUEUE) ligada a un exchange direct por routing key. Reemplaza a la cola
+# compartida / fanout en las etapas convertidas a colas personales.
+INPUT_EXCHANGE = os.getenv("INPUT_EXCHANGE")
+INPUT_ROUTING_PREFIX = os.getenv("INPUT_ROUTING_PREFIX")
 # Colas de Salida Posibles
 GATEWAY_QUEUE = os.environ["GATEWAY_QUEUE"]
 FILTER_DATE_QUEUE = os.environ["FILTER_DATE_QUEUE"]
@@ -95,7 +100,13 @@ FILTER_OUTPUT_BATCH_MAX_TX = int(os.getenv("FILTER_OUTPUT_BATCH_MAX_TX", "5000")
 class FilterWorker:
     def __init__(self):
         # Iniciacion de la cola de entrada
-        if TRANSACTION_EXCHANGE:
+        if INPUT_EXCHANGE:
+            self.input_queue = middleware.MessageMiddlewareExchangeRabbitMQ(
+                MOM_HOST, INPUT_EXCHANGE,
+                routing_keys=[self._input_routing_key()],
+                queue_name=INPUT_QUEUE, exclusive=False,
+            )
+        elif TRANSACTION_EXCHANGE:
             self.input_queue = middleware.MessageMiddlewareExchangeRabbitMQ(
                 MOM_HOST, TRANSACTION_EXCHANGE, routing_keys=[],
                 exchange_type="fanout", queue_name=INPUT_QUEUE, exclusive=False,
@@ -242,6 +253,10 @@ class FilterWorker:
         return output_queues
 
     # ─── helpers ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _input_routing_key() -> str:
+        return queue_name_for_worker(INPUT_ROUTING_PREFIX, ID)
 
     def _cleanup_client(self, client_id):
         if self._batcher is not None:
