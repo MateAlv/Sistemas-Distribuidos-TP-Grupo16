@@ -63,6 +63,12 @@ def _import_filter_module(
     monkeypatch.setenv("GATEWAY_QUEUE", "gateway_results_queue")
     monkeypatch.setenv("FILTER_DATE_QUEUE", "filter_date_queue")
     monkeypatch.setenv("FILTER_Q1_QUEUE", "filter_q1_queue")
+    monkeypatch.setenv("FILTER_DATE_EXCHANGE", "filter_date_exchange")
+    monkeypatch.setenv("FILTER_DATE_ROUTING_PREFIX", "filter_date")
+    monkeypatch.setenv("FILTER_DATE_AMOUNT", "4")
+    monkeypatch.setenv("FILTER_Q1_EXCHANGE", "filter_q1_exchange")
+    monkeypatch.setenv("FILTER_Q1_ROUTING_PREFIX", "filter_q1")
+    monkeypatch.setenv("FILTER_Q1_AMOUNT", "3")
     monkeypatch.setenv("SUM_Q2_EXCHANGE", "sum_q2_exchange")
     monkeypatch.setenv("SUM_Q2_ROUTING_PREFIX", "sum_q2")
     monkeypatch.setenv("SUM_Q2_AMOUNT", "1")
@@ -164,6 +170,78 @@ def test_usd_filter_processes_batched_payload(monkeypatch):
     batch_txs = TransactionSerializer.deserialize_batch(payload)
     assert len(batch_txs) == 2
     assert all(tx.currency == "US Dollar" for tx in batch_txs)
+
+
+def test_usd_filter_q1_and_date_outputs_are_sharded(monkeypatch):
+    monkeypatch.setenv("FILTER_OUTPUT_BATCH_MAX_TX", "1")
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="USD",
+        usd_enable_q1="1",
+        usd_enable_q2="0",
+        usd_enable_date="1",
+    )
+    worker = module.FilterWorker()
+
+    q1_output = worker.output_queues["filter_q1_queue"]
+    assert q1_output.exchange_name == "filter_q1_exchange"
+    assert q1_output.routing_key_prefix == "filter_q1"
+    assert q1_output.shard_count == 3
+    assert q1_output.key_fn is module.middleware.body_digest_key
+
+    date_output = worker.output_queues["filter_date_queue"]
+    assert date_output.exchange_name == "filter_date_exchange"
+    assert date_output.routing_key_prefix == "filter_date"
+    assert date_output.shard_count == 4
+    assert date_output.key_fn is module.middleware.body_digest_key
+
+    worker._process_data_message(
+        _data_packet(7, [_tx(15.0, "US Dollar"), _tx(20.0, "Euro")])
+    )
+
+    assert len(q1_output.sent) == 1
+    assert len(date_output.sent) == 1
+    assert q1_output.sent[0] == date_output.sent[0]
+
+
+def test_usd_filter_predeclares_q1_and_date_bindings(monkeypatch):
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="USD",
+        usd_enable_q1="1",
+        usd_enable_q2="0",
+        usd_enable_date="1",
+    )
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.FilterWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "rabbitmq",
+            "filter_q1_exchange",
+            {
+                "filter_q1_0": "filter_q1_0",
+                "filter_q1_1": "filter_q1_1",
+                "filter_q1_2": "filter_q1_2",
+            },
+        ),
+        (
+            "rabbitmq",
+            "filter_date_exchange",
+            {
+                "filter_date_0": "filter_date_0",
+                "filter_date_1": "filter_date_1",
+                "filter_date_2": "filter_date_2",
+                "filter_date_3": "filter_date_3",
+            },
+        ),
+    ]
 
 
 def test_usd_filter_buffers_until_flush(monkeypatch):

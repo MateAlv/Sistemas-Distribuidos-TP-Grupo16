@@ -26,6 +26,10 @@ FILTER_USD_EXCHANGE = "filter_usd_exchange"
 FILTER_USD_ROUTING_PREFIX = "filter_usd"
 FILTER_Q5_FORMAT_EXCHANGE = "filter_q5_format_exchange"
 FILTER_Q5_FORMAT_ROUTING_PREFIX = "filter_q5_format"
+FILTER_Q1_EXCHANGE = "filter_q1_exchange"
+FILTER_Q1_ROUTING_PREFIX = "filter_q1"
+FILTER_DATE_EXCHANGE = "filter_date_exchange"
+FILTER_DATE_ROUTING_PREFIX = "filter_date"
 FILTER_USD_QUEUE = "filter_usd_queue"
 FILTER_Q1_QUEUE = "filter_q1_queue"
 FILTER_DATE_QUEUE = "filter_date_queue"
@@ -560,9 +564,21 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
             FILTER_USD_ROUTING_PREFIX,
         ))
     if q1_enabled:
-        filter_specs.append(("Q1", counts["filter_q1"], FILTER_Q1_QUEUE, None, None))
+        filter_specs.append((
+            "Q1",
+            counts["filter_q1"],
+            FILTER_Q1_ROUTING_PREFIX,
+            FILTER_Q1_EXCHANGE,
+            FILTER_Q1_ROUTING_PREFIX,
+        ))
     if q3_enabled or q4_enabled:
-        filter_specs.append(("DATE", counts["filter_date"], FILTER_DATE_QUEUE, None, None))
+        filter_specs.append((
+            "DATE",
+            counts["filter_date"],
+            FILTER_DATE_ROUTING_PREFIX,
+            FILTER_DATE_EXCHANGE,
+            FILTER_DATE_ROUTING_PREFIX,
+        ))
 
     for configuration, count, input_queue_prefix, input_exchange, input_routing_prefix in filter_specs:
         for index in range(count):
@@ -581,6 +597,8 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 enabled_queries=enabled_queries,
                 q3_barrier_amount=counts["q3_barrier"],
                 q4_filter_amount=counts["q4_filter"],
+                filter_q1_amount=counts["filter_q1"],
+                filter_date_amount=counts["filter_date"],
                 sum_q2_amount=counts["sum_q2"],
                 sum_q3_amount=counts["sum_q3"],
             )
@@ -598,6 +616,8 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 enabled_queries=enabled_queries,
                 q3_barrier_amount=counts["q3_barrier"],
                 q4_filter_amount=counts["q4_filter"],
+                filter_q1_amount=counts["filter_q1"],
+                filter_date_amount=counts["filter_date"],
                 sum_q2_amount=counts["sum_q2"],
             )
 
@@ -999,6 +1019,8 @@ def filter_service(
     enabled_queries: set[str] | None = None,
     q3_barrier_amount: int = 1,
     q4_filter_amount: int = 1,
+    filter_q1_amount: int = 1,
+    filter_date_amount: int = 1,
     sum_q2_amount: int = 1,
     sum_q3_amount: int = 1,
 ) -> dict:
@@ -1039,6 +1061,18 @@ def filter_service(
             f"SUM_Q2_AMOUNT={sum_q2_amount}",
             f"SUM_Q2_EXCHANGE={SUM_Q2_EXCHANGE}",
             f"SUM_Q2_ROUTING_PREFIX={SUM_Q2_PREFIX}",
+        ])
+    if configuration == "USD" and "q1" in enabled_queries:
+        environment.extend([
+            f"FILTER_Q1_AMOUNT={filter_q1_amount}",
+            f"FILTER_Q1_EXCHANGE={FILTER_Q1_EXCHANGE}",
+            f"FILTER_Q1_ROUTING_PREFIX={FILTER_Q1_ROUTING_PREFIX}",
+        ])
+    if configuration == "USD" and (("q3" in enabled_queries) or ("q4" in enabled_queries)):
+        environment.extend([
+            f"FILTER_DATE_AMOUNT={filter_date_amount}",
+            f"FILTER_DATE_EXCHANGE={FILTER_DATE_EXCHANGE}",
+            f"FILTER_DATE_ROUTING_PREFIX={FILTER_DATE_ROUTING_PREFIX}",
         ])
     if "q3" in enabled_queries:
         environment.extend([

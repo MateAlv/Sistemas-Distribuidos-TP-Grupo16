@@ -18,6 +18,7 @@ from common.eof_coordinator import (
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal import partition_for_parts
 from common.message_protocol.internal.common import MessageType
+from common.middleware.middleware_rabbitmq import ensure_exchange_queue_bindings
 from common.routing import queue_name_for_worker
 
 try:
@@ -83,6 +84,15 @@ USD_ENABLE_DATE = os.getenv("USD_ENABLE_DATE", "1") != "0"
 DATE_ENABLE_Q3 = os.getenv("DATE_ENABLE_Q3", "1") != "0"
 DATE_ENABLE_Q4 = os.getenv("DATE_ENABLE_Q4", "1") != "0"
 SUM_Q2_OUTPUT = "sum_q2"
+if CONFIGURATION == C_USD and USD_ENABLE_Q1:
+    FILTER_Q1_EXCHANGE = os.environ["FILTER_Q1_EXCHANGE"]
+    FILTER_Q1_ROUTING_PREFIX = os.environ["FILTER_Q1_ROUTING_PREFIX"]
+    FILTER_Q1_AMOUNT = int(os.environ["FILTER_Q1_AMOUNT"])
+else:
+    FILTER_Q1_EXCHANGE = ""
+    FILTER_Q1_ROUTING_PREFIX = ""
+    FILTER_Q1_AMOUNT = 0
+
 if CONFIGURATION == C_USD and USD_ENABLE_Q2:
     SUM_Q2_EXCHANGE = os.environ["SUM_Q2_EXCHANGE"]
     SUM_Q2_ROUTING_PREFIX = os.environ["SUM_Q2_ROUTING_PREFIX"]
@@ -91,6 +101,15 @@ else:
     SUM_Q2_EXCHANGE = ""
     SUM_Q2_ROUTING_PREFIX = ""
     SUM_Q2_AMOUNT = 0
+
+if CONFIGURATION == C_USD and USD_ENABLE_DATE:
+    FILTER_DATE_EXCHANGE = os.environ["FILTER_DATE_EXCHANGE"]
+    FILTER_DATE_ROUTING_PREFIX = os.environ["FILTER_DATE_ROUTING_PREFIX"]
+    FILTER_DATE_AMOUNT = int(os.environ["FILTER_DATE_AMOUNT"])
+else:
+    FILTER_DATE_EXCHANGE = ""
+    FILTER_DATE_ROUTING_PREFIX = ""
+    FILTER_DATE_AMOUNT = 0
 
 FILTER_OUTPUT_BATCH_BYTES = int(os.getenv("FILTER_OUTPUT_BATCH_BYTES", str(1024 * 1024)))
 FILTER_OUTPUT_BATCH_MAX_TX = int(os.getenv("FILTER_OUTPUT_BATCH_MAX_TX", "5000"))
@@ -190,8 +209,12 @@ class FilterWorker:
             )
         if CONFIGURATION == C_USD:
             if USD_ENABLE_Q1:
-                output_queues[FILTER_Q1_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                    MOM_HOST, FILTER_Q1_QUEUE
+                output_queues[FILTER_Q1_QUEUE] = middleware.ShardedPublisher(
+                    MOM_HOST,
+                    FILTER_Q1_EXCHANGE,
+                    FILTER_Q1_ROUTING_PREFIX,
+                    FILTER_Q1_AMOUNT,
+                    key_fn=middleware.body_digest_key,
                 )
             if USD_ENABLE_Q2:
                 output_queues[SUM_Q2_OUTPUT] = middleware.ShardedPublisher(
@@ -202,8 +225,12 @@ class FilterWorker:
                     key_fn=middleware.body_digest_key,
                 )
             if USD_ENABLE_DATE:
-                output_queues[FILTER_DATE_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                    MOM_HOST, FILTER_DATE_QUEUE
+                output_queues[FILTER_DATE_QUEUE] = middleware.ShardedPublisher(
+                    MOM_HOST,
+                    FILTER_DATE_EXCHANGE,
+                    FILTER_DATE_ROUTING_PREFIX,
+                    FILTER_DATE_AMOUNT,
+                    key_fn=middleware.body_digest_key,
                 )
         if CONFIGURATION == C_DATE:
             if DATE_ENABLE_Q4:
@@ -253,6 +280,35 @@ class FilterWorker:
     @staticmethod
     def _input_routing_key() -> str:
         return queue_name_for_worker(INPUT_ROUTING_PREFIX, ID)
+
+    @staticmethod
+    def _ensure_sharded_output_bindings(
+        exchange: str, routing_prefix: str, shard_count: int
+    ) -> None:
+        ensure_exchange_queue_bindings(
+            MOM_HOST,
+            exchange,
+            {
+                queue_name_for_worker(routing_prefix, index): queue_name_for_worker(
+                    routing_prefix, index
+                )
+                for index in range(shard_count)
+            },
+        )
+
+    def _ensure_output_bindings(self) -> None:
+        if CONFIGURATION != C_USD:
+            return
+        if USD_ENABLE_Q1:
+            self._ensure_sharded_output_bindings(
+                FILTER_Q1_EXCHANGE, FILTER_Q1_ROUTING_PREFIX, FILTER_Q1_AMOUNT
+            )
+        if USD_ENABLE_DATE:
+            self._ensure_sharded_output_bindings(
+                FILTER_DATE_EXCHANGE,
+                FILTER_DATE_ROUTING_PREFIX,
+                FILTER_DATE_AMOUNT,
+            )
 
     def _cleanup_client(self, client_id):
         if self._batcher is not None:
@@ -926,6 +982,7 @@ class FilterWorker:
     # ─── lifecycle ────────────────────────────────────────────────────────────
 
     def start(self):
+        self._ensure_output_bindings()
         self.control_thread = threading.Thread(target=self._run_control_consumer)
         self.response_thread = threading.Thread(target=self._run_response_consumer)
         self.control_thread.start()
