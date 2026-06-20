@@ -23,6 +23,7 @@ from .middleware import (
 _DURABLE = os.environ.get("RABBITMQ_DURABLE", "false").lower() == "true"
 _DELIVERY_MODE = 2 if _DURABLE else 1
 _PUBLISHER_CONFIRMS = os.environ.get("RABBITMQ_PUBLISHER_CONFIRMS", "false").lower() == "true"
+_MANDATORY_PUBLISH = _PUBLISHER_CONFIRMS
 _PREFETCH_COUNT = int(os.environ.get("PREFETCH_COUNT", "1"))
 _CONNECT_RETRIES = int(os.environ.get("RABBITMQ_CONNECT_RETRIES", "10"))
 _CONNECT_RETRY_DELAY = float(os.environ.get("RABBITMQ_CONNECT_RETRY_DELAY", "3.0"))
@@ -185,7 +186,7 @@ class MessageMiddlewareQueueRabbitMQ(_RabbitMQBase, MessageMiddlewareQueue):
                 routing_key=self._queue_name,
                 body=message,
                 properties=pika.BasicProperties(delivery_mode=_DELIVERY_MODE),
-                mandatory=True,
+                mandatory=_MANDATORY_PUBLISH,
             )
             self._record_flow("publish", message, self._queue_name)
         except pika.exceptions.NackError as e:
@@ -238,7 +239,7 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
                     routing_key='',
                     body=message,
                     properties=pika.BasicProperties(delivery_mode=_DELIVERY_MODE),
-                    mandatory=True,
+                    mandatory=_MANDATORY_PUBLISH,
                 )
                 self._record_flow("publish", message, "")
             else:
@@ -252,7 +253,7 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
                         routing_key=key,
                         body=message,
                         properties=pika.BasicProperties(delivery_mode=_DELIVERY_MODE),
-                        mandatory=True,
+                        mandatory=_MANDATORY_PUBLISH,
                     )
                     self._record_flow("publish", message, key)
         except pika.exceptions.NackError as e:
