@@ -35,6 +35,12 @@ def make_fake_pika(blocking_connection=None):
     class StreamLostError(Exception):
         pass
 
+    class NackError(Exception):
+        pass
+
+    class UnroutableError(Exception):
+        pass
+
     def _blocking_connection(*_args, **_kwargs):
         return blocking_connection if blocking_connection is not None else FakeConnection()
 
@@ -43,6 +49,8 @@ def make_fake_pika(blocking_connection=None):
             AMQPConnectionError=AMQPConnectionError,
             AMQPChannelError=AMQPChannelError,
             StreamLostError=StreamLostError,
+            NackError=NackError,
+            UnroutableError=UnroutableError,
         ),
         BasicProperties=lambda *args, **kwargs: types.SimpleNamespace(**kwargs),
         BlockingConnection=_blocking_connection,
@@ -55,9 +63,18 @@ class FakeChannel:
         self.is_open = True
         self.start_consuming_calls = 0
         self.stop_consuming_calls = 0
+        self.confirm_delivery_calls = 0
+        self.basic_publish_calls = []
+        self.basic_publish_error = None
 
     def queue_declare(self, *args, **kwargs):
         return types.SimpleNamespace(method=types.SimpleNamespace(queue="fake"))
+
+    def exchange_declare(self, *args, **kwargs):
+        pass
+
+    def confirm_delivery(self):
+        self.confirm_delivery_calls += 1
 
     def basic_qos(self, *args, **kwargs):
         pass
@@ -66,6 +83,9 @@ class FakeChannel:
         pass
 
     def basic_publish(self, *args, **kwargs):
+        self.basic_publish_calls.append((args, kwargs))
+        if self.basic_publish_error is not None:
+            raise self.basic_publish_error
         pass
 
     def basic_ack(self, *args, **kwargs):
