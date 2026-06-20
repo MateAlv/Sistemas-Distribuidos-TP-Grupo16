@@ -5,6 +5,7 @@ del InternalProtocol.
 from .middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
 )
+from common.routing import routing_key_for_shard, shard_for_client_id
 
 
 _CLIENT_ID_OFFSET = 1   # 1 byte de msg_type antes del client_id
@@ -26,7 +27,7 @@ class ShardedByClientPublisher:
             MessageMiddlewareExchangeRabbitMQ(
                 mom_host,
                 exchange_name,
-                [f"{routing_key_prefix}_{i}"],
+                [routing_key_for_shard(routing_key_prefix, i)],
             )
             for i in range(shard_count)
         ]
@@ -36,7 +37,7 @@ class ShardedByClientPublisher:
             message[_CLIENT_ID_OFFSET:_CLIENT_ID_OFFSET + _CLIENT_ID_SIZE],
             "big",
         )
-        shard = client_id % self._shard_count
+        shard = shard_for_client_id(client_id, self._shard_count)
         self._publishers[shard].send(message)
 
     def close(self) -> None:

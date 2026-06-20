@@ -1,15 +1,13 @@
-import hashlib
 import struct
 
 from common.message_protocol.internal.common.message_type import MessageType
+from common.routing import shard_for_key_parts, stable_digest_shard
 
 
 def partition_for_key(key: str, partitions: int) -> int:
     if partitions <= 0:
         raise ValueError("partitions must be greater than 0")
-
-    digest = hashlib.sha256(str(key).encode("utf-8")).digest()
-    return int.from_bytes(digest, "big") % partitions
+    return stable_digest_shard(str(key), partitions)
 
 
 def partition_for_pair(left: str, right: str, partitions: int) -> int:
@@ -19,8 +17,9 @@ def partition_for_pair(left: str, right: str, partitions: int) -> int:
 
 
 def partition_for_parts(parts, partitions: int) -> int:
-    key = "".join(f"{len(str(part))}:{part}" for part in parts)
-    return partition_for_key(key, partitions)
+    if partitions <= 0:
+        raise ValueError("partitions must be greater than 0")
+    return shard_for_key_parts(parts, partitions)
 
 
 class InternalProtocol:
