@@ -32,12 +32,16 @@ class FakeExchange(FakeQueue):
 
 
 class FakeShardedPublisher(FakeQueue):
-    def __init__(self, host, exchange_name, routing_key_prefix, shard_count):
+    def __init__(self, host, exchange_name, routing_key_prefix, shard_count, key_fn=None):
         super().__init__()
         self.host = host
         self.exchange_name = exchange_name
         self.routing_key_prefix = routing_key_prefix
         self.shard_count = shard_count
+        self.key_fn = key_fn
+
+    def send_to_all(self, message):
+        self.sent.append(message)
 
 
 def _import_filter_module(
@@ -96,6 +100,8 @@ def _import_filter_module(
     )
     monkeypatch.setattr(module.middleware, "LazyQueue", FakeQueue)
     monkeypatch.setattr(module.middleware, "ShardedByClientPublisher", FakeShardedPublisher)
+    monkeypatch.setattr(module.middleware, "ShardedPublisher", FakeShardedPublisher)
+    monkeypatch.setattr(module.middleware, "body_digest_key", lambda message: message)
     return module
 
 
