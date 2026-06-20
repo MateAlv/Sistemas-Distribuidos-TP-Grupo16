@@ -13,6 +13,7 @@ from common.message_protocol.internal.transaction_serializer import TransactionS
 from common.last_state import LastStateManager
 from common.middleware import LazyQueue, MessageMiddlewareQueueRabbitMQ
 from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
+from common.routing import queue_name_for_worker
 from workers.file_ingestor.line_batch_parser import LineBatchParser
 
 @dataclass(frozen=True)
@@ -21,6 +22,8 @@ class FileIngestorConfig:
     total_instances: int
     mom_host: str
     queue_name: str
+    input_exchange: str
+    input_routing_prefix: str
     transaction_output_exchange: str
     control_queue_prefix: str
     response_queue_prefix: str
@@ -46,7 +49,7 @@ class FileIngestor:
         self._line_batch_serializer = LineBatchSerializer()
         self._control_serializer = ControlMessageSerializer()
 
-        self._input_queue: MessageMiddlewareQueueRabbitMQ | None = None
+        self._input_queue: MessageMiddlewareQueueRabbitMQ | MessageMiddlewareExchangeRabbitMQ | None = None
         self._transaction_output: MessageMiddlewareExchangeRabbitMQ | None = None
         # Named control queue senders for the main thread (EOF_RECEIVED broadcast).
         # Pika connections are not thread-safe; each thread creates its own senders.
@@ -152,6 +155,9 @@ class FileIngestor:
         if self._transaction_output is None:
             self._transaction_output = self._new_transaction_sender()
         return self._transaction_output
+
+    def _input_routing_key(self) -> str:
+        return queue_name_for_worker(self._config.input_routing_prefix, self._config.id)
 
     # ---------- helpers ----------
 
@@ -492,11 +498,13 @@ class FileIngestor:
 
     def start(self) -> None:
         logging.info(
-            "file_ingestor_start | id=%s | mom_host=%s | queue=%s | "
-            "control_prefix=%s | response_prefix=%s | total_instances=%s",
+            "file_ingestor_start | id=%s | mom_host=%s | exchange=%s | queue=%s | "
+            "routing_key=%s | control_prefix=%s | response_prefix=%s | total_instances=%s",
             self._config.id,
             self._config.mom_host,
+            self._config.input_exchange,
             self._config.queue_name,
+            self._input_routing_key(),
             self._config.control_queue_prefix,
             self._config.response_queue_prefix,
             self._config.total_instances,
@@ -507,8 +515,12 @@ class FileIngestor:
         self._control_thread.start()
         self._response_thread.start()
 
-        self._input_queue = MessageMiddlewareQueueRabbitMQ(
-            self._config.mom_host, self._config.queue_name
+        self._input_queue = MessageMiddlewareExchangeRabbitMQ(
+            self._config.mom_host,
+            self._config.input_exchange,
+            [self._input_routing_key()],
+            queue_name=self._config.queue_name,
+            exclusive=False,
         )
         try:
             if not self._stopped:
