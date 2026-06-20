@@ -1,21 +1,16 @@
-"""WorkerState adapter for the aggregator.
+"""WorkerState adapter for the sum worker.
 
-Wraps the aggregator's mutable state -- per-client reduction processors, the
-per-client data counters, the closed-client set and the EOF coordinator --
-behind the snapshot/restore/apply_change contract the durable-state engine
-expects.
+Wraps the sum worker's mutable per-client state behind the snapshot/restore/
+apply_change contract the durable-state engine expects.
 
-apply_change is the single mutation path: it runs live when a message is
-processed and again, verbatim, when the WAL is replayed on recovery. There are
-five kinds of change:
-
-  - "data": a DATA message. The raw payload travels inside the change
-    (base64-encoded, since the WAL frames state changes as JSON) so that parsing
-    and accumulation stay on this one path and reproduce identically on replay.
-  - "close": an EOF flush. The client's aggregated results are emitted as outbox
-    outputs (computed live, before the change is applied) and the client is then
-    closed and dropped. Replay only re-applies the close; the results are not
-    recomputed, they are republished from the durable outbox.
+Five kinds of change:
+  - "data": a DATA batch was processed. The change carries the raw batch payload
+    (base64) so apply_change can replay deserialization + processor.process() and
+    keep the accumulated partial results consistent with what the live worker
+    produced. The actual partials forwarded to aggregators live in the durable
+    outbox.
+  - "close": the client was flushed and cleaned up. apply_change drops the
+    processor and counter; subsequent DATA messages for that client are ignored.
 
   The following three changes keep the EofCoordinator's internal state in the WAL
   so that crash recovery does not rely solely on the last snapshot:
@@ -26,8 +21,11 @@ five kinds of change:
     state-mutating type (EOF_RECEIVED, PROCESSED_ANSWER, or FLUSH_ACK). apply_change
     replays the call (action discarded). FLUSH_ACK uses the standard path — the
     coordinator's _on_flush_ack handles leader-state cleanup internally.
-  - "coordinator_cleanup": coordinator.cleanup_client was called (non-leader, after
-    FlushAction(is_leader=False)). apply_change replays it.
+  - "coordinator_cleanup": coordinator.cleanup_client was called (non-leader path).
+    apply_change replays it.
+
+Note: _partials_forwarded is a global logging counter that is not per-client and
+does not affect business-logic outputs — intentionally omitted from state.
 """
 
 from __future__ import annotations
@@ -37,40 +35,39 @@ from collections.abc import Callable
 
 from common.eof_coordinator import EofCoordinator
 from common.message_protocol.internal.common import ControlMessage, MessageType
+from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 
-ProcessorFactory = Callable[[str], object]
+ProcessorFactory = Callable[[], object]
+
+_tx_ser = TransactionSerializer()
 
 
-class AggregatorState:
+class SumState:
     def __init__(
         self,
-        configuration: str,
         coordinator: EofCoordinator,
         processor_factory: ProcessorFactory,
     ) -> None:
-        # configuration picks the processor kind; coordinator is shared with the
-        # worker and snapshotted alongside the per-client maps below.
-        self._configuration = configuration
+        # coordinator is shared with the worker and snapshotted alongside the
+        # per-client maps so that EOF progress survives a crash.
         self._coordinator = coordinator
+        # Factory is called once per client on first DATA message; it must return
+        # the right processor type for this sum worker's CONFIGURATION.
         self._processor_factory = processor_factory
-        self._data_count_by_client: dict[int, int] = {}
+        self._processed_by_client: dict[int, int] = {}
         self._processors_by_client: dict = {}
-        self._closed_by_client: set[int] = set()
 
     @staticmethod
     def data_change(client_id: int, payload: bytes) -> dict:
-        # WAL-serializable description of a DATA message; payload is base64 so it
-        # survives the JSON framing and can be re-accepted verbatim on replay.
+        # payload is base64 because the WAL frames state_change dicts as JSON.
         return {
             "type": "data",
             "client_id": client_id,
-            "payload": base64.b64encode(payload).decode("ascii"),
+            "payload_b64": base64.b64encode(payload).decode("ascii"),
         }
 
     @staticmethod
     def close_change(client_id: int) -> dict:
-        # An EOF flush carries no payload: the results live in the outbox, this
-        # only records that the client must be closed and dropped.
         return {"type": "close", "client_id": client_id}
 
     @staticmethod
@@ -111,36 +108,35 @@ class AggregatorState:
         # Non-leader cleanup after FlushAction(is_leader=False).
         return {"type": "coordinator_cleanup", "client_id": client_id}
 
-    def results_for(self, client_id: int) -> list[bytes]:
-        # Aggregated outputs to emit at EOF; read live, before the close drops
-        # the processor.
+    def partials_for(self, client_id: int) -> list[tuple[str, bytes]]:
+        """Accumulated partials to forward at flush time; read before close_change."""
         processor = self._processors_by_client.get(client_id)
-        return processor.results() if processor is not None else []
+        return processor.partials() if processor is not None else []
+
+    def processed_count(self, client_id: int) -> int:
+        return self._processed_by_client.get(client_id, 0)
+
+    # ---------- WorkerState protocol ----------
 
     def snapshot(self) -> dict:
-        # Full picklable state for the LastState snapshot (processors included).
+        # SumProcessor subclasses hold only dicts and primitives — picklable.
         return {
-            "data_count_by_client": dict(self._data_count_by_client),
+            "processed_by_client": dict(self._processed_by_client),
             "processors_by_client": dict(self._processors_by_client),
-            "closed_by_client": set(self._closed_by_client),
             "eof_coordinator": self._coordinator.snapshot(),
         }
 
     def restore(self, data: dict) -> None:
-        # Reload from a snapshot; an empty dict means a fresh, never-snapshotted
-        # worker.
         if not data:
-            self._data_count_by_client = {}
+            self._processed_by_client = {}
             self._processors_by_client = {}
-            self._closed_by_client = set()
             return
-        self._data_count_by_client = dict(data["data_count_by_client"])
+        self._processed_by_client = dict(data["processed_by_client"])
         self._processors_by_client = dict(data["processors_by_client"])
-        self._closed_by_client = set(data["closed_by_client"])
         self._coordinator.restore(data["eof_coordinator"])
 
     def apply_change(self, change: dict) -> None:
-        # Single mutation path, run live and on replay; dispatch by change kind.
+        # Single mutation path — runs both live and during WAL replay.
         kind = change["type"]
         client_id = change["client_id"]
         if kind == "data":
@@ -167,27 +163,24 @@ class AggregatorState:
             raise ValueError(f"unknown change type: {kind}")
 
     def _apply_data(self, client_id: int, change: dict) -> None:
-        # Accumulate one DATA message; a closed client ignores late stragglers.
-        if client_id in self._closed_by_client:
-            return
-        payload = base64.b64decode(change["payload"])
-        self._processor_for_client(client_id).accept(payload)
-        self._data_count_by_client[client_id] = (
-            self._data_count_by_client.get(client_id, 0) + 1
+        # Unlike AggregatorState (whose processor.accept() takes raw bytes),
+        # SumProcessor.process() takes Transaction objects — deserialization
+        # must happen here before passing to the processor.
+        payload = base64.b64decode(change["payload_b64"])
+        transactions = _tx_ser.deserialize_batch(payload)
+        processor = self._processor_for(client_id)
+        for transaction in transactions:
+            processor.process(transaction)
+        self._processed_by_client[client_id] = (
+            self._processed_by_client.get(client_id, 0) + len(transactions)
         )
 
     def _apply_close(self, client_id: int) -> None:
-        # Close the client and free its processor/counter; idempotent on replay.
-        self._closed_by_client.add(client_id)
+        # Idempotent: re-closing an already-closed client is a no-op.
         self._processors_by_client.pop(client_id, None)
-        self._data_count_by_client.pop(client_id, None)
+        self._processed_by_client.pop(client_id, None)
 
-    def data_count(self, client_id: int) -> int:
-        # Messages accumulated for a client so far (0 once closed).
-        return self._data_count_by_client.get(client_id, 0)
-
-    def _processor_for_client(self, client_id: int):
-        # Lazily create the per-client reduction processor on first DATA.
+    def _processor_for(self, client_id: int):
         return self._processors_by_client.setdefault(
-            client_id, self._processor_factory(self._configuration)
+            client_id, self._processor_factory()
         )
