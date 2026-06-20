@@ -3,12 +3,11 @@ import os
 import signal
 
 from common.heartbeat import HeartbeatSender
-from file_ingestor import FileIngestor, FileIngestorConfig
+from file_ingestor import FileIngestor, FileIngestorConfig, FileIngestorOutputConfig
 
 
 DEFAULT_ID = 0
 DEFAULT_MOM_HOST = "rabbitmq"
-DEFAULT_TRANSACTION_OUTPUT_EXCHANGE = "transaction_fanout_exchange"
 DEFAULT_CONTROL_QUEUE_PREFIX = "file_ingestor_control"
 DEFAULT_RESPONSE_QUEUE_PREFIX = "file_ingestor_response"
 DEFAULT_LOGGING_LEVEL = "INFO"
@@ -54,10 +53,7 @@ def load_config() -> FileIngestorConfig:
         queue_name=require_env("LINE_BATCH_INPUT_QUEUE"),
         input_exchange=require_env("LINE_BATCH_INPUT_EXCHANGE"),
         input_routing_prefix=require_env("LINE_BATCH_INPUT_ROUTING_PREFIX"),
-        transaction_output_exchange=os.getenv(
-            "TRANSACTION_OUTPUT_EXCHANGE",
-            DEFAULT_TRANSACTION_OUTPUT_EXCHANGE,
-        ),
+        outputs=load_outputs(),
         control_queue_prefix=os.getenv(
             "FILE_INGESTOR_CONTROL_QUEUE_PREFIX",
             DEFAULT_CONTROL_QUEUE_PREFIX,
@@ -91,6 +87,42 @@ def get_int(name: str, default: int | None) -> int:
         return int(value)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer") from exc
+
+
+def load_outputs() -> tuple[FileIngestorOutputConfig, ...]:
+    outputs = []
+    for name, env_prefix in (
+        ("filter_usd", "FILTER_USD"),
+        ("filter_q5_format", "FILTER_Q5_FORMAT"),
+    ):
+        exchange = os.getenv(f"{env_prefix}_EXCHANGE")
+        routing_prefix = os.getenv(f"{env_prefix}_ROUTING_PREFIX")
+        amount = os.getenv(f"{env_prefix}_AMOUNT")
+        values = (exchange, routing_prefix, amount)
+        if not any(values):
+            continue
+        if not all(values):
+            raise ValueError(
+                f"{env_prefix}_EXCHANGE, {env_prefix}_ROUTING_PREFIX and "
+                f"{env_prefix}_AMOUNT must be set together"
+            )
+        try:
+            shard_count = int(amount)
+        except ValueError as exc:
+            raise ValueError(f"{env_prefix}_AMOUNT must be an integer") from exc
+        if shard_count <= 0:
+            raise ValueError(f"{env_prefix}_AMOUNT must be greater than 0")
+        outputs.append(
+            FileIngestorOutputConfig(
+                name=name,
+                exchange=exchange,
+                routing_prefix=routing_prefix,
+                shard_count=shard_count,
+            )
+        )
+    if not outputs:
+        raise ValueError("at least one downstream filter output is required")
+    return tuple(outputs)
 
 
 def require_env(name: str) -> str:
