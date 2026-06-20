@@ -185,6 +185,7 @@ class MessageMiddlewareQueueRabbitMQ(_RabbitMQBase, MessageMiddlewareQueue):
                 routing_key=self._queue_name,
                 body=message,
                 properties=pika.BasicProperties(delivery_mode=_DELIVERY_MODE),
+                mandatory=True,
             )
             self._record_flow("publish", message, self._queue_name)
         except pika.exceptions.NackError as e:
@@ -237,6 +238,7 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
                     routing_key='',
                     body=message,
                     properties=pika.BasicProperties(delivery_mode=_DELIVERY_MODE),
+                    mandatory=True,
                 )
                 self._record_flow("publish", message, "")
             else:
@@ -250,6 +252,7 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
                         routing_key=key,
                         body=message,
                         properties=pika.BasicProperties(delivery_mode=_DELIVERY_MODE),
+                        mandatory=True,
                     )
                     self._record_flow("publish", message, key)
         except pika.exceptions.NackError as e:

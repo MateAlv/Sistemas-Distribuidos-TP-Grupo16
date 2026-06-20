@@ -64,6 +64,7 @@ class FakeChannel:
         self.start_consuming_calls = 0
         self.stop_consuming_calls = 0
         self.confirm_delivery_calls = 0
+        self.basic_publish_calls = []
         self.basic_publish_error = None
 
     def queue_declare(self, *args, **kwargs):
@@ -82,6 +83,7 @@ class FakeChannel:
         pass
 
     def basic_publish(self, *args, **kwargs):
+        self.basic_publish_calls.append((args, kwargs))
         if self.basic_publish_error is not None:
             raise self.basic_publish_error
         pass
