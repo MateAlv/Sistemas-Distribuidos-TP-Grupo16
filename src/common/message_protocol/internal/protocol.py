@@ -26,10 +26,30 @@ def partition_for_parts(parts, partitions: int) -> int:
 class InternalProtocol:
     HEADER_FORMAT = "!B 16s"
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+    ADDRESSED_HEADER_FORMAT = "!B 16s I I"
+    ADDRESSED_HEADER_SIZE = struct.calcsize(ADDRESSED_HEADER_FORMAT)
 
     @classmethod
     def create_packet(cls, msg_type: MessageType, client_id_bytes: bytes, payload: bytes) -> bytes:
         header = struct.pack(cls.HEADER_FORMAT, msg_type, client_id_bytes)
+        return header + payload
+
+    @classmethod
+    def create_addressed_packet(
+        cls,
+        msg_type: MessageType,
+        client_id_bytes: bytes,
+        sender_id: int,
+        seq: int,
+        payload: bytes,
+    ) -> bytes:
+        header = struct.pack(
+            cls.ADDRESSED_HEADER_FORMAT,
+            msg_type,
+            client_id_bytes,
+            sender_id,
+            seq,
+        )
         return header + payload
 
     @classmethod
