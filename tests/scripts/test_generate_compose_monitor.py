@@ -131,6 +131,32 @@ def test_rates_service_is_durable_but_has_no_worker_state_volume() -> None:
     assert services["rates_service"]["volumes"] == ["./data/rates:/data/rates:rw"]
 
 
+def test_q2_sum_uses_sharded_exchange_and_personal_queue() -> None:
+    config = _config({"enabled": False})
+    config["queries"] = ["q2"]
+    config["workers"]["sums"] = {"q2": 2}
+    config["workers"]["aggregators"] = {"q2": 1}
+    config["workers"]["joiners"] = {"q2": 1}
+
+    services = generate_compose.build_compose(config, expose_ports=False)["services"]
+
+    filter_env = _env(services["filter_usd_0"])
+    assert filter_env["SUM_Q2_EXCHANGE"] == "sum_q2_exchange"
+    assert filter_env["SUM_Q2_ROUTING_PREFIX"] == "sum_q2"
+    assert filter_env["SUM_Q2_AMOUNT"] == "2"
+    assert "SUM_Q2_QUEUE" not in filter_env
+
+    sum_0_env = _env(services["sum_q2_0"])
+    assert sum_0_env["INPUT_EXCHANGE"] == "sum_q2_exchange"
+    assert sum_0_env["INPUT_ROUTING_PREFIX"] == "sum_q2"
+    assert sum_0_env["INPUT_QUEUE"] == "sum_q2_0"
+
+    sum_1_env = _env(services["sum_q2_1"])
+    assert sum_1_env["INPUT_EXCHANGE"] == "sum_q2_exchange"
+    assert sum_1_env["INPUT_ROUTING_PREFIX"] == "sum_q2"
+    assert sum_1_env["INPUT_QUEUE"] == "sum_q2_1"
+
+
 @pytest.mark.parametrize(
     ("monitor", "message"),
     [

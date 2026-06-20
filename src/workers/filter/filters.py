@@ -18,6 +18,7 @@ from common.eof_coordinator import (
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal import partition_for_parts
 from common.message_protocol.internal.common import MessageType
+from common.routing import queue_name_for_worker
 
 try:
     from output_batcher import OutputBatcher
@@ -42,7 +43,6 @@ TRANSACTION_EXCHANGE = os.getenv("TRANSACTION_EXCHANGE")
 GATEWAY_QUEUE = os.environ["GATEWAY_QUEUE"]
 FILTER_DATE_QUEUE = os.environ["FILTER_DATE_QUEUE"]
 FILTER_Q1_QUEUE = os.environ["FILTER_Q1_QUEUE"]
-SUM_Q2_QUEUE = os.environ["SUM_Q2_QUEUE"]
 FILTER_Q3_QUEUE = os.environ["FILTER_Q3_QUEUE"]
 SCATTER_GATHER_MAPPER_QUEUE = os.environ["SCATTER_GATHER_MAPPER_QUEUE"]
 FILTER_Q5_USD_QUEUE = os.environ["FILTER_Q5_USD_QUEUE"]
@@ -75,6 +75,15 @@ USD_ENABLE_Q2 = os.getenv("USD_ENABLE_Q2", "1") != "0"
 USD_ENABLE_DATE = os.getenv("USD_ENABLE_DATE", "1") != "0"
 DATE_ENABLE_Q3 = os.getenv("DATE_ENABLE_Q3", "1") != "0"
 DATE_ENABLE_Q4 = os.getenv("DATE_ENABLE_Q4", "1") != "0"
+SUM_Q2_OUTPUT = "sum_q2"
+if CONFIGURATION == C_USD and USD_ENABLE_Q2:
+    SUM_Q2_EXCHANGE = os.environ["SUM_Q2_EXCHANGE"]
+    SUM_Q2_ROUTING_PREFIX = os.environ["SUM_Q2_ROUTING_PREFIX"]
+    SUM_Q2_AMOUNT = int(os.environ["SUM_Q2_AMOUNT"])
+else:
+    SUM_Q2_EXCHANGE = ""
+    SUM_Q2_ROUTING_PREFIX = ""
+    SUM_Q2_AMOUNT = 0
 
 FILTER_OUTPUT_BATCH_BYTES = int(os.getenv("FILTER_OUTPUT_BATCH_BYTES", str(1024 * 1024)))
 FILTER_OUTPUT_BATCH_MAX_TX = int(os.getenv("FILTER_OUTPUT_BATCH_MAX_TX", "5000"))
@@ -175,8 +184,11 @@ class FilterWorker:
                     MOM_HOST, FILTER_Q1_QUEUE
                 )
             if USD_ENABLE_Q2:
-                output_queues[SUM_Q2_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                    MOM_HOST, SUM_Q2_QUEUE
+                output_queues[SUM_Q2_OUTPUT] = middleware.ShardedByClientPublisher(
+                    MOM_HOST,
+                    SUM_Q2_EXCHANGE,
+                    SUM_Q2_ROUTING_PREFIX,
+                    SUM_Q2_AMOUNT,
                 )
             if USD_ENABLE_DATE:
                 output_queues[FILTER_DATE_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
@@ -246,7 +258,7 @@ class FilterWorker:
         self.forwarded_by_output_by_client[client_id][output_name] += 1
 
     def _q4_filter_routing_key(self, partition: int) -> str:
-        return f"{Q4_FILTER_INPUT_ROUTING_PREFIX}_{partition}"
+        return queue_name_for_worker(Q4_FILTER_INPUT_ROUTING_PREFIX, partition)
 
     def _q4_filter_output_names(self) -> list[str]:
         if not Q4_FILTER_INPUT_EXCHANGE:
@@ -327,9 +339,9 @@ class FilterWorker:
                     self._record_forwarded_output(client_id, FILTER_Q1_QUEUE)
                 sent = True
             if USD_ENABLE_Q2:
-                self._publish_to_queue(SUM_Q2_QUEUE, client_id, transaction, output_queues)
+                self._publish_to_queue(SUM_Q2_OUTPUT, client_id, transaction, output_queues)
                 with self.lock:
-                    self._record_forwarded_output(client_id, SUM_Q2_QUEUE)
+                    self._record_forwarded_output(client_id, SUM_Q2_OUTPUT)
                 sent = True
             if USD_ENABLE_DATE:
                 self._publish_to_queue(FILTER_DATE_QUEUE, client_id, transaction, output_queues)
@@ -407,9 +419,9 @@ class FilterWorker:
                 output_queues[FILTER_Q1_QUEUE].send(eof_packet(expected_total))
                 self._log_forwarded_eof(client_id, FILTER_Q1_QUEUE, expected_total)
             if USD_ENABLE_Q2:
-                expected_total = count(SUM_Q2_QUEUE)
-                output_queues[SUM_Q2_QUEUE].send(eof_packet(expected_total))
-                self._log_forwarded_eof(client_id, SUM_Q2_QUEUE, expected_total)
+                expected_total = count(SUM_Q2_OUTPUT)
+                output_queues[SUM_Q2_OUTPUT].send(eof_packet(expected_total))
+                self._log_forwarded_eof(client_id, SUM_Q2_OUTPUT, expected_total)
             if USD_ENABLE_DATE:
                 expected_total = count(FILTER_DATE_QUEUE)
                 output_queues[FILTER_DATE_QUEUE].send(eof_packet(expected_total))

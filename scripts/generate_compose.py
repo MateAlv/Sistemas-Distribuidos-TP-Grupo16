@@ -31,6 +31,7 @@ FILTER_Q5_FORMAT_QUEUE = "filter_q5_format_queue"
 FILTER_Q5_USD_QUEUE = "filter_q5_usd_queue"
 SUM_Q2_QUEUE = "sum_q2_queue"
 SUM_Q3_QUEUE = "sum_q3_queue"
+SUM_Q2_EXCHANGE = "sum_q2_exchange"
 GATEWAY_Q1_QUEUE = "gateway_results_queue"
 GATEWAY_Q2_QUEUE = "join_q2_results_queue"
 GATEWAY_Q3_QUEUE = "gateway_q3_results_queue"
@@ -554,6 +555,7 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 enabled_queries=enabled_queries,
                 q3_barrier_amount=counts["q3_barrier"],
                 q4_filter_amount=counts["q4_filter"],
+                sum_q2_amount=counts["sum_q2"],
             )
 
     if q5_enabled:
@@ -568,6 +570,7 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 enabled_queries=enabled_queries,
                 q3_barrier_amount=counts["q3_barrier"],
                 q4_filter_amount=counts["q4_filter"],
+                sum_q2_amount=counts["sum_q2"],
             )
 
         services["rates_service"] = rates_service()
@@ -588,7 +591,9 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 amount=counts["sum_q2"],
                 aggregation_amount=counts["aggregation_q2"],
                 aggregation_prefix=AGGREGATION_Q2_PREFIX,
-                input_queue=SUM_Q2_QUEUE,
+                input_queue=worker_queue_name(SUM_Q2_PREFIX, index),
+                input_exchange=SUM_Q2_EXCHANGE,
+                input_routing_prefix=SUM_Q2_PREFIX,
                 settings=settings,
                 sum_prefix=SUM_Q2_PREFIX,
             )
@@ -602,6 +607,8 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 aggregation_amount=counts["aggregation_q3"],
                 aggregation_prefix=AGGREGATION_Q3_PREFIX,
                 input_queue=SUM_Q3_QUEUE,
+                input_exchange=None,
+                input_routing_prefix=None,
                 settings=settings,
                 sum_prefix=SUM_Q3_PREFIX,
             )
@@ -935,6 +942,7 @@ def filter_service(
     enabled_queries: set[str] | None = None,
     q3_barrier_amount: int = 1,
     q4_filter_amount: int = 1,
+    sum_q2_amount: int = 1,
 ) -> dict:
     enabled_queries = enabled_queries or {"q1", "q2", "q3", "q4", "q5"}
     environment = [
@@ -955,7 +963,6 @@ def filter_service(
         f"Q3_CANDIDATES_QUEUE={Q3_CANDIDATES_QUEUE}",
         f"SCATTER_GATHER_MAPPER_QUEUE={SG_MAPPER_QUEUE}",
         f"SUM_PREFIX={SUM_Q3_PREFIX}",
-        f"SUM_Q2_QUEUE={SUM_Q2_QUEUE}",
         f"SUM_Q3_QUEUE={SUM_Q3_QUEUE}",
         f"USD_ENABLE_Q1={int('q1' in enabled_queries)}",
         f"USD_ENABLE_Q2={int('q2' in enabled_queries)}",
@@ -968,6 +975,12 @@ def filter_service(
             f"Q4_FILTER_AMOUNT={q4_filter_amount}",
             f"Q4_FILTER_INPUT_EXCHANGE={Q4_FILTER_INPUT_EXCHANGE}",
             f"Q4_FILTER_INPUT_ROUTING_PREFIX={Q4_FILTER_ROUTING_PREFIX}",
+        ])
+    if "q2" in enabled_queries:
+        environment.extend([
+            f"SUM_Q2_AMOUNT={sum_q2_amount}",
+            f"SUM_Q2_EXCHANGE={SUM_Q2_EXCHANGE}",
+            f"SUM_Q2_ROUTING_PREFIX={SUM_Q2_PREFIX}",
         ])
     # Sharded mode: el filter_date publica candidates al exchange con routing
     # key por client_id en lugar de la queue compartida.
@@ -1031,6 +1044,8 @@ def sum_service(
     aggregation_amount: int,
     aggregation_prefix: str,
     input_queue: str,
+    input_exchange: str | None,
+    input_routing_prefix: str | None,
     settings: dict,
     sum_prefix: str,
 ) -> dict:
@@ -1045,6 +1060,10 @@ def sum_service(
         f"SUM_AMOUNT={amount}",
         f"SUM_PREFIX={sum_prefix}",
     ]
+    if input_exchange is not None:
+        environment.append(f"INPUT_EXCHANGE={input_exchange}")
+    if input_routing_prefix is not None:
+        environment.append(f"INPUT_ROUTING_PREFIX={input_routing_prefix}")
     prefetch = settings.get("filter_prefetch_count")
     if prefetch is not None:
         environment.append(f"PREFETCH_COUNT={prefetch}")
@@ -1502,6 +1521,10 @@ def add_worker_state_volume(
 
 def worker_state_volume_name(service_name: str) -> str:
     return f"{service_name}_state"
+
+
+def worker_queue_name(prefix: str, index: int) -> str:
+    return f"{prefix}_{int(index)}"
 
 
 def add_env_once(service: dict, item: str) -> None:
