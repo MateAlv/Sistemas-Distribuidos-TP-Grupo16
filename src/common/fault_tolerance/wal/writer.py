@@ -30,6 +30,7 @@ FsyncFn = Callable[[int], None]
 
 _CLIENT_ID_FORMAT = ">I"
 _SENDER_ID_FORMAT = ">I"
+_KIND_FORMAT = ">B"
 _SEQ_FORMAT = ">I"
 _OUTBOX_COUNT_FORMAT = ">H"
 
@@ -64,6 +65,7 @@ class WALWriter:
             struct.pack(UINT16_FORMAT, len(msg_id_bytes)) + msg_id_bytes
             + struct.pack(_CLIENT_ID_FORMAT, record.client_id)
             + struct.pack(_SENDER_ID_FORMAT, record.sender_id)
+            + struct.pack(_KIND_FORMAT, int(record.kind))
             + struct.pack(_SEQ_FORMAT, record.seq)
             + struct.pack(UINT32_FORMAT, len(state_change_bytes)) + state_change_bytes
             + struct.pack(_OUTBOX_COUNT_FORMAT, len(record.outputs)) + outbox_blob
@@ -77,6 +79,7 @@ class WALWriter:
             struct.pack(UINT16_FORMAT, len(msg_id_bytes)) + msg_id_bytes
             + struct.pack(_CLIENT_ID_FORMAT, record.client_id)
             + struct.pack(_SENDER_ID_FORMAT, record.sender_id)
+            + struct.pack(_KIND_FORMAT, int(record.kind))
             + struct.pack(_SEQ_FORMAT, record.seq)
         )
         return self._write_record(RecordType.INPUT_DONE, payload)
