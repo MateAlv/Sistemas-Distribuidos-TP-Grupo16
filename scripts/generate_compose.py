@@ -789,6 +789,16 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 ]
             )
 
+    rabbitmq_env_vars = []
+    if bool_value(config, "rabbitmq_durable", False):
+        rabbitmq_env_vars.append("RABBITMQ_DURABLE=true")
+    if bool_value(config, "rabbitmq_publisher_confirms", False):
+        rabbitmq_env_vars.append("RABBITMQ_PUBLISHER_CONFIRMS=true")
+    if rabbitmq_env_vars:
+        for name, service in services.items():
+            if name != "rabbitmq":
+                service.setdefault("environment", []).extend(rabbitmq_env_vars)
+
     if settings.get("chaos", {}).get("enabled", False):
         services["chaos_monkey"] = chaos_monkey_service(settings, client_names)
 
