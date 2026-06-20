@@ -3,34 +3,69 @@
 Wraps the barrier's per-client state behind the snapshot/restore/apply_change
 contract the durable-state engine expects.
 
-STATE LIMITATION — disk log:
-  Candidate batches are stored in a _DiskLog backed by tempfile.TemporaryFile().
-  TemporaryFile is anonymous (no filesystem path on Linux after creation) so its
-  content cannot be persisted to the snapshot. Only the "light" state is included
-  in snapshot(): averages, EOF flags and expected_total.
+This worker receives data from two independent streams (averages + candidates)
+and emits filtered candidates once both streams have fully arrived. No
+EofCoordinator is used.
 
-  On crash recovery the disk log is rebuilt entirely from WAL replay: every
-  "candidate_data" change that arrived after the last snapshot checkpoint is
-  re-applied by apply_change, which re-appends the raw batch to a fresh disk log.
-  Batches that arrived BEFORE the last snapshot checkpoint are lost from the disk
-  log and cannot be recovered without replacing TemporaryFile with a named file
-  under STATE_DIR.
+STATE LIMITATION — disk log
+-----------------------------
+Candidate batches are stored in a _DiskLog backed by tempfile.TemporaryFile().
+TemporaryFile is anonymous (no filesystem path on Linux after creation) so its
+content cannot be included in snapshot(). Only the "light" state is snapshotted:
+averages, EOF flags, and expected_total counters.
 
-  Mitigation options (not implemented here):
-    - Never snapshot this worker (snapshot_interval = ∞): the WAL accumulates all
-      messages and a full replay always rebuilds the disk log completely.
-    - Replace _DiskLog with a named file in STATE_DIR and include its path in the
-      snapshot so restore() can re-open it.
+On crash recovery the disk log is rebuilt entirely from WAL replay: every
+"candidate_data" change that arrived AFTER the last snapshot checkpoint is
+re-applied by apply_change, which re-appends the raw batch to a fresh disk log.
+Batches that arrived BEFORE the last snapshot checkpoint are lost and cannot be
+recovered without replacing TemporaryFile with a named file under STATE_DIR.
 
-Five kinds of change cover both input streams:
-  - "avg_data": one average DATA arrived. Carries payment_format + average value
-    directly (no base64 needed — both are JSON-safe primitives).
-  - "avg_eof": averages stream EOF arrived.
-  - "candidate_data": one candidate batch arrived. Carries the raw batch payload
-    (base64) so apply_change can re-append it to the disk log on WAL replay.
-  - "candidate_eof": candidates stream EOF arrived, setting candidates_expected_total.
-  - "close": client was fully emitted and cleaned up. apply_change closes the disk
-    log (freeing the temp file fd) and marks the client as closed.
+Mitigation options (not implemented):
+  - Set snapshot_interval = ∞ so the WAL accumulates all messages; a full
+    replay always rebuilds the disk log completely.
+  - Replace _DiskLog with a named file in STATE_DIR and include its path in
+    snapshot() so restore() can re-open it.
+
+Change types
+------------
+  "avg_data"
+      One average DATA arrived. Carries payment_format + average value as JSON-
+      safe primitives (no base64 needed).
+  "avg_eof"
+      Averages stream EOF arrived. Sets avg_expected_total.
+  "candidate_data"
+      One candidate batch arrived. Carries the raw payload (base64) so
+      apply_change can re-append it to the disk log on WAL replay.
+  "candidate_eof"
+      Candidates stream EOF arrived. Sets candidates_expected_total.
+  "close"
+      Client was fully emitted and cleaned up. Closes the disk log fd and
+      marks the client closed.
+
+Caller protocol (one change dict per handle() call to PersistentStateHandler)
+------------------------------------------------------------------------------
+  Averages DATA message
+    → avg_data_change(client_id, payment_format, avg_value)
+
+  Averages EOF message
+    → avg_eof_change(client_id, expected_total)
+    If both streams complete after applying: emit + → close_change(client_id)
+
+  Candidates DATA message
+    → candidate_data_change(client_id, payload)
+    (Batches are buffered in the disk log; no emit until both streams done.)
+
+  Candidates EOF message
+    → candidate_eof_change(client_id, expected_total)
+    If both streams complete after applying:
+      Stream disk log → filter by average → emit to outbox.
+      → close_change(client_id)
+
+State accessors (read before close_change)
+------------------------------------------
+  averages_for(client_id)   → dict[str, float]  payment_format → average
+  disk_log_for(client_id)   → _DiskLog          iterate batches from disk
+  is_ready(client_id)       → bool  True when both stream EOFs received + counts match
 """
 
 from __future__ import annotations

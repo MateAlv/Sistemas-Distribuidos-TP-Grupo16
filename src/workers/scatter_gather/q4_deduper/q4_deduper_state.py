@@ -3,29 +3,60 @@
 Wraps the deduper's per-client state behind the snapshot/restore/apply_change
 contract the durable-state engine expects.
 
-Four kinds of change cover the data path:
-  - "data": a Q4AccountId batch arrived. The change carries the raw payload
-    (base64); apply_change deserializes the batch and adds each account key
-    to the per-client set. The set itself deduplicates — repeated keys are
-    silently absorbed, making this idempotent on WAL replay.
-  - "eof": one upstream aggregator sent its EOF. The change carries sender_id;
-    apply_change advances the UpstreamEofCounter.
-  - "close": the client was locally emitted and cleaned up (shard's own
-    dedup set + EOF counter are dropped; account keys are consumed). On WAL
-    replay after a snapshot, close marks the client so late-arriving data
-    changes are ignored.
-
-Two additional changes handle the multi-shard leader protocol (shard 0 only
-when deduper_amount > 1):
-  - "leader_report": one shard's emitted-account tally arrived. apply_change
-    records the sender and accumulates the total; when all shards have
-    reported, the leader state is cleaned up (the live worker's
-    _send_gateway_eof output lives in the durable outbox).
-  - "leader_close": all shards have reported; leader drops its accumulator for
-    the client. Emitted as a companion to the last "leader_report" once the
-    threshold is reached.
+Change types
+------------
+  "data"
+      A Q4AccountId batch arrived. Carries the raw payload (base64);
+      apply_change deserializes and adds each (bank_id, account) tuple to the
+      per-client set. The set deduplicates — repeated keys are absorbed,
+      making replay idempotent.
+  "eof"
+      One upstream Q4Aggregator shard sent its EOF. Carries sender_id;
+      apply_change advances the UpstreamEofCounter. Idempotent: duplicates
+      are ignored.
+  "close"
+      The shard's dedup set + EOF counter are dropped and the client is marked
+      closed. Late DATA messages for that client are ignored on WAL replay.
+  "leader_report"  (shard 0 only, when deduper_amount > 1)
+      One deduper shard's emitted-account count arrived. Records sender_id and
+      accumulates the total. Idempotent: duplicate sender_ids are ignored by
+      set membership. When all deduper_amount shards have reported, the live
+      worker sends the gateway EOF (output lives in the durable outbox).
+  "leader_close"   (shard 0 only, when deduper_amount > 1)
+      All shards have reported; leader drops its accumulator for the client.
+      Emitted immediately after the last "leader_report" in the same message.
 
 When deduper_amount == 1 there are no leader_report / leader_close changes.
+
+Caller protocol (one change dict per handle() call to PersistentStateHandler)
+------------------------------------------------------------------------------
+  DATA message
+    → data_change(client_id, payload)
+
+  EOF from one upstream Q4Aggregator shard:
+    → eof_change(client_id, sender_id)
+    If eof_count(client_id) == aggregator_amount after applying:
+      Read accounts_for(client_id) → emit deduplicated account batch to outbox.
+      → close_change(client_id)
+      If deduper_amount > 1 (not shard 0): send shard-report to shard 0.
+
+  Shard report received (shard 0 only, deduper_amount > 1):
+    shard_report = (sender_id, emitted_count) from a non-zero deduper shard.
+    → leader_report_change(client_id, sender_id, emitted_accounts)
+    If all deduper_amount shards have now reported:
+      emit gateway EOF with leader_total(client_id).
+      → leader_close_change(client_id)
+      Bundle leader_report_change + leader_close_change for the last shard into
+      a single compound change (one change per message).
+
+State accessors (read before close_change / leader_close_change)
+----------------------------------------------------------------
+  accounts_for(client_id)    → set[tuple[str,str]]  deduplicated (bank_id, account) keys
+  processed_count(client_id) → int
+  eof_count(client_id)       → int  how many Q4Aggregator shards have sent EOF
+  leader_total(client_id)    → int  accumulated emitted_accounts from all shards
+  is_closed(client_id)       → bool
+  is_leader_closed(client_id)→ bool
 """
 
 from __future__ import annotations

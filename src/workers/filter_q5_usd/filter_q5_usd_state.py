@@ -1,31 +1,68 @@
 """WorkerState adapter for the filter_q5_usd worker.
 
-Wraps the worker's per-client processed/forwarded counters and EOF coordinator
+Wraps the worker's per-client processed/forwarded counters and the EofCoordinator
 behind the snapshot/restore/apply_change contract the durable-state engine expects.
 
-Five kinds of change:
-  - "data": a DATA batch was processed. The change carries only the resulting
-    counts (processed and forwarded), NOT the raw payload or the USD conversion
-    results. apply_change updates the accumulators without re-running the filter;
-    the actual transaction outputs live in the durable outbox.
-  - "close": the client was fully flushed and cleaned up. apply_change pops both
-    per-client counters (mirroring the pop in _handle_upstream_eof / _handle_control
-    after the FlushAction).
+Change types
+------------
+  "data"
+      A DATA batch was processed. Carries only the resulting counts (processed
+      and forwarded), NOT the raw payload or USD conversion results. apply_change
+      updates the accumulators without re-running the filter — outputs live in
+      the durable outbox.
+  "close"
+      The client was fully flushed and cleaned up. Both per-client counters are
+      dropped; late DATA messages are ignored.
+  "coordinator_upstream_eof"
+      coordinator.on_upstream_eof was called. action discarded on replay.
+  "coordinator_msg"
+      coordinator.process_control_message was called with a state-mutating type:
+      EOF_RECEIVED, PROCESSED_ANSWER, or FLUSH_ACK. FLUSH_ACK uses the standard
+      path — _on_flush_ack handles leader-state cleanup internally.
+  "coordinator_cleanup"
+      coordinator.cleanup_client was called (non-leader, after FLUSH_ORDER).
 
-  The following three changes keep the EofCoordinator's internal state in the WAL
-  so that crash recovery does not rely solely on the last snapshot:
+Caller protocol (one change dict per handle() call to PersistentStateHandler)
+------------------------------------------------------------------------------
+  DATA message
+    processed_n, forwarded_n = filter_batch(payload)
+    → data_change(client_id, processed_n, forwarded_n)
 
-  - "coordinator_upstream_eof": coordinator.on_upstream_eof was called. apply_change
-    replays the call (action discarded — no I/O on replay).
-  - "coordinator_msg": coordinator.process_control_message was called with a
-    state-mutating type (EOF_RECEIVED, PROCESSED_ANSWER, or FLUSH_ACK). apply_change
-    replays the call (action discarded). FLUSH_ACK is the standard path here — the
-    coordinator's _on_flush_ack cleans up leader state internally when all acks arrive.
-  - "coordinator_cleanup": coordinator.cleanup_client was called (non-leader, after
-    FlushAction(is_leader=False)). apply_change replays it.
+  Upstream EOF (data thread):
+    action = coordinator.on_upstream_eof(client_id, expected_total, count, fwd)
+    → coordinator_upstream_eof_change(client_id, expected_total, count, fwd)
+    Execute action outside the lock.
 
-Note: rates_loaded is intentionally excluded from state — the rates manager is
-re-initialised from the RPC service on every worker startup.
+  Control EOF_RECEIVED (broadcast, control thread):
+    action = coordinator.process_control_message(EOF_RECEIVED, client_id, ctrl, count, fwd)
+    → coordinator_msg_change(EOF_RECEIVED, client_id, ctrl.sender_id,
+                              ctrl.expected_total, ctrl.processed_count, count, fwd)
+    Execute action outside the lock.
+
+  Response PROCESSED_ANSWER (leader):
+    action = coordinator.process_control_message(PROCESSED_ANSWER, client_id, ctrl)
+    → coordinator_msg_change(PROCESSED_ANSWER, client_id, ctrl.sender_id,
+                              ctrl.expected_total, ctrl.processed_count)
+    Execute action outside the lock.
+
+  Non-leader close (FLUSH_ORDER → FlushAction(is_leader=False)):
+    Bundle coordinator_cleanup_change + close_change into a single compound
+    change dict (handle() supports one change per message). Call order in
+    apply_change: coordinator.cleanup_client → _apply_close.
+
+  Leader close (final FLUSH_ACK → FlushAction(is_leader=True), or N=1):
+    action = coordinator.process_control_message(FLUSH_ACK, client_id, ctrl)
+    → coordinator_msg_change(FLUSH_ACK, client_id, ...)
+    Emit downstream EOF (total processed_count + forwarded_count to outbox).
+    → close_change(client_id)
+
+  N=1 shortcut:
+    → coordinator_upstream_eof_change(...)
+    Emit downstream EOF.
+    → close_change(client_id)
+
+Note: rates_loaded is excluded from state — the rates manager is re-initialised
+from the RPC service on every worker startup.
 """
 
 from __future__ import annotations

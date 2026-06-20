@@ -1,16 +1,45 @@
 """WorkerState adapter for the file ingestor.
 
 Wraps the ingestor's mutable business state — per-client transaction counters,
-the total-batches-consumed counter and the EOF coordinator — behind the
+the total-batches-consumed counter and the EofCoordinator — behind the
 snapshot/restore/apply_change contract the durable-state engine expects.
 
-Two kinds of change:
-  - "data": a DATA batch was processed. The change carries the count of
-    transactions forwarded (not the raw payload), so replay updates the counter
-    deterministically without re-parsing. The actual transaction outputs live in
-    the durable outbox and are re-published from there on recovery.
-  - "close": the client was flushed downstream. Pops the per-client counter so
-    any late-arriving messages for that client are treated as no-ops.
+Change types
+------------
+  "data"
+      A DATA batch was processed. Carries transactions_forwarded (not the raw
+      payload) so replay updates the counter deterministically without re-parsing.
+      Outputs live in the durable outbox and are re-published from there on
+      recovery.
+  "close"
+      The client was flushed downstream. Pops the per-client counter; late DATA
+      messages for that client are treated as no-ops.
+
+Known gap — EofCoordinator WAL tracking
+-----------------------------------------
+This adapter stores the coordinator in snapshot() but does NOT emit coordinator
+change types (coordinator_upstream_eof / coordinator_msg / coordinator_cleanup).
+The coordinator state is therefore only recovered from the last snapshot, not from
+WAL replay. Crashes between snapshots may lose coordinator progress and cause
+incorrect EOF sequencing on recovery.
+
+Fix: add the same three coordinator change types used by AggregatorState.
+See aggregator_state.py for the pattern.
+
+Caller protocol (one change dict per handle() call to PersistentStateHandler)
+------------------------------------------------------------------------------
+  DATA message
+    transactions_n = process_batch(payload)
+    → data_change(client_id, transactions_n)
+
+  EOF / client flush:
+    (coordinator interaction not yet WAL-tracked — see gap above)
+    → close_change(client_id)
+
+State accessors (read before close_change)
+------------------------------------------
+  processed_count(client_id) → int  transactions forwarded so far
+  batches_consumed()         → int  global batch counter (all clients)
 """
 
 from __future__ import annotations

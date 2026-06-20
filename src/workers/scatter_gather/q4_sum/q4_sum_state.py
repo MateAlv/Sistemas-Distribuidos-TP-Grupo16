@@ -3,21 +3,42 @@
 Wraps the sum worker's per-client state behind the snapshot/restore/apply_change
 contract the durable-state engine expects.
 
-Three kinds of change:
-  - "data": a Q4CountedEdge batch arrived. The change carries the raw payload
-    (base64); apply_change deserializes the batch and accumulates each edge's
-    count into _incoming_by_client or _outgoing_by_client, keyed by the
-    intermediate Q4AccountId. This mirrors the live worker's
-    _accept_counted_edges without any I/O.
-  - "eof": one upstream filter worker sent its EOF. The change carries
-    sender_id; apply_change advances the UpstreamEofCounter.
-  - "close": the client was fully emitted and cleaned up. apply_change drops
-    all per-client maps, closes the EOF counter entry, and marks the client
-    closed so late-arriving messages are ignored on WAL replay.
+Change types
+------------
+  "data"
+      A Q4CountedEdge batch arrived. Carries the raw payload (base64);
+      apply_change deserializes and accumulates each edge's count into
+      _incoming_by_client or _outgoing_by_client, keyed by the intermediate
+      Q4AccountId. Mirrors the live worker's _accept_counted_edges without I/O.
+  "eof"
+      One upstream Q4Filter shard sent its EOF. Carries sender_id; apply_change
+      advances the UpstreamEofCounter. Idempotent: duplicates are ignored.
+  "close"
+      The client was fully emitted and cleaned up. Drops all per-client maps,
+      closes the EOF counter entry, and marks closed so late messages are
+      ignored on WAL replay.
 
-_forwarded_by_partition_by_client is intentionally omitted: those counts are
-computed fresh during the emit phase (_emit_client_blocks) at close time and
-are not needed for any decision between message arrivals.
+Caller protocol (one change dict per handle() call to PersistentStateHandler)
+------------------------------------------------------------------------------
+  DATA message
+    → data_change(client_id, payload)
+
+  EOF from one upstream Q4Filter shard:
+    → eof_change(client_id, sender_id)
+    If eof_count(client_id) == filter_amount after applying:
+      Read incoming_for(client_id) + outgoing_for(client_id).
+      Emit block-join edge batches to outbox (per partition to Q4Joiner).
+      → close_change(client_id)
+
+State accessors (read before close_change)
+------------------------------------------
+  incoming_for(client_id) → dict  intermediate → {endpoint: count} (INCOMING)
+  outgoing_for(client_id) → dict  intermediate → {endpoint: count} (OUTGOING)
+  processed_count(client_id) → int
+  eof_count(client_id)        → int  how many Q4Filter shards have sent EOF so far
+
+Note: _forwarded_by_partition_by_client is intentionally omitted — computed fresh
+at emit time (_emit_client_blocks) and not needed between arrivals.
 """
 
 from __future__ import annotations

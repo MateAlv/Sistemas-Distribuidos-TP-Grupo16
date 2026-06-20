@@ -3,19 +3,39 @@
 Wraps the joiner's mutable per-client state behind the snapshot/restore/apply_change
 contract the durable-state engine expects.
 
-Three kinds of change:
-  - "data": a DATA message was accepted. The change carries the raw payload
-    (base64) so apply_change can replay it through the processor and keep the
-    accumulated reduction state consistent with what the live worker produced.
-  - "eof": one upstream EOF was received. apply_change increments the per-client
-    EOF counter. The decision to emit (when count == AGGREGATION_AMOUNT) belongs
-    to the live worker; apply_change only tracks the count.
-  - "close": the client was flushed and cleaned up (after all AGGREGATION_AMOUNT
-    EOFs arrived). apply_change drops the processor and counters and marks the
-    client as closed so late-arriving messages are ignored on replay.
+Change types
+------------
+  "data"
+      A DATA message arrived. Carries the raw payload (base64) so apply_change
+      can replay it through the processor and keep the accumulated reduction
+      state identical to what the live worker produced.
+  "eof"
+      One upstream EOF was received. apply_change increments the per-client EOF
+      counter. The emit decision (when count == AGGREGATION_AMOUNT) belongs to
+      the live worker; apply_change only tracks the counter.
+  "close"
+      The client was flushed and cleaned up after all AGGREGATION_AMOUNT EOFs
+      arrived. Drops the processor and counters and marks the client closed so
+      late-arriving messages are ignored on replay.
 
-No EofCoordinator: this worker uses a simple EOF counter instead of the broadcast
-/ flush-order protocol.
+No EofCoordinator: this worker uses a simple per-client EOF counter.
+
+Caller protocol (one change dict per handle() call to PersistentStateHandler)
+------------------------------------------------------------------------------
+  DATA message
+    → data_change(client_id, payload)
+
+  Upstream EOF received (one of AGGREGATION_AMOUNT sources):
+    → eof_change(client_id)
+    If _eof_count_by_client[client_id] == AGGREGATION_AMOUNT after applying:
+      Read processor results via processor interface.
+      Emit aggregated results to outbox (to downstream aggregator).
+      → close_change(client_id)
+
+State accessors (read before close_change)
+------------------------------------------
+  data_count(client_id) → int  DATA messages accumulated so far
+  eof_count_by_client   → dict[int, int]  (internal; check directly for emit decision)
 """
 
 from __future__ import annotations
