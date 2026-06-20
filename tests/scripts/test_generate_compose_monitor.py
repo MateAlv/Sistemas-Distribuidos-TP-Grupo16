@@ -174,11 +174,53 @@ def test_file_ingestors_use_sharded_exchange_and_personal_queue() -> None:
     assert ingestor_0_env["LINE_BATCH_INPUT_EXCHANGE"] == "line_batch_exchange"
     assert ingestor_0_env["LINE_BATCH_INPUT_ROUTING_PREFIX"] == "file_ingestor"
     assert ingestor_0_env["LINE_BATCH_INPUT_QUEUE"] == "file_ingestor_0"
+    assert ingestor_0_env["FILTER_USD_EXCHANGE"] == "filter_usd_exchange"
+    assert ingestor_0_env["FILTER_USD_ROUTING_PREFIX"] == "filter_usd"
+    assert ingestor_0_env["FILTER_USD_AMOUNT"] == "1"
+    assert "FILTER_Q5_FORMAT_EXCHANGE" not in ingestor_0_env
+    assert "TRANSACTION_OUTPUT_EXCHANGE" not in ingestor_0_env
 
     ingestor_1_env = _env(services["file_ingestor_1"])
     assert ingestor_1_env["LINE_BATCH_INPUT_EXCHANGE"] == "line_batch_exchange"
     assert ingestor_1_env["LINE_BATCH_INPUT_ROUTING_PREFIX"] == "file_ingestor"
     assert ingestor_1_env["LINE_BATCH_INPUT_QUEUE"] == "file_ingestor_1"
+
+
+def test_file_ingestor_dual_outputs_and_filter_personal_inputs() -> None:
+    config = _config({"enabled": False})
+    config["queries"] = ["q1", "q5"]
+    config["workers"]["file_ingestors"] = 1
+    config["workers"]["filters"] = {
+        "usd": 2,
+        "q1": 1,
+        "q5_format": 3,
+        "q5_usd": 1,
+    }
+    config["workers"]["aggregators"] = {"q5": 1}
+    config["workers"]["joiners"] = {"q5": 1}
+
+    services = generate_compose.build_compose(config, expose_ports=False)["services"]
+
+    ingestor_env = _env(services["file_ingestor_0"])
+    assert ingestor_env["FILTER_USD_EXCHANGE"] == "filter_usd_exchange"
+    assert ingestor_env["FILTER_USD_ROUTING_PREFIX"] == "filter_usd"
+    assert ingestor_env["FILTER_USD_AMOUNT"] == "2"
+    assert ingestor_env["FILTER_Q5_FORMAT_EXCHANGE"] == "filter_q5_format_exchange"
+    assert ingestor_env["FILTER_Q5_FORMAT_ROUTING_PREFIX"] == "filter_q5_format"
+    assert ingestor_env["FILTER_Q5_FORMAT_AMOUNT"] == "3"
+    assert "TRANSACTION_OUTPUT_EXCHANGE" not in ingestor_env
+
+    filter_usd_1_env = _env(services["filter_usd_1"])
+    assert filter_usd_1_env["INPUT_QUEUE"] == "filter_usd_1"
+    assert filter_usd_1_env["INPUT_EXCHANGE"] == "filter_usd_exchange"
+    assert filter_usd_1_env["INPUT_ROUTING_PREFIX"] == "filter_usd"
+    assert "TRANSACTION_EXCHANGE" not in filter_usd_1_env
+
+    filter_q5_format_2_env = _env(services["filter_q5_format_2"])
+    assert filter_q5_format_2_env["INPUT_QUEUE"] == "filter_q5_format_2"
+    assert filter_q5_format_2_env["INPUT_EXCHANGE"] == "filter_q5_format_exchange"
+    assert filter_q5_format_2_env["INPUT_ROUTING_PREFIX"] == "filter_q5_format"
+    assert "TRANSACTION_EXCHANGE" not in filter_q5_format_2_env
 
 
 @pytest.mark.parametrize(

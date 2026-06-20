@@ -16,13 +16,16 @@ SERVER_HOST = "gateway"
 SERVER_PORT = 5678
 FILE_INGESTOR_EXCHANGE = "file_ingestor_exchange"
 FILE_SPLITTER_QUEUE_PREFIX = "file_splitter"
-TRANSACTION_EXCHANGE = "transaction_fanout_exchange"
 FILE_INGESTOR_CONTROL_EXCHANGE = "file_ingestor_control"
 FILE_INGESTOR_RESPONSE_QUEUE_PREFIX = "file_ingestor_response"
 FILTER_PREFIX = "filter"
 
 LINE_BATCH_EXCHANGE = "line_batch_exchange"
 FILE_INGESTOR_ROUTING_PREFIX = "file_ingestor"
+FILTER_USD_EXCHANGE = "filter_usd_exchange"
+FILTER_USD_ROUTING_PREFIX = "filter_usd"
+FILTER_Q5_FORMAT_EXCHANGE = "filter_q5_format_exchange"
+FILTER_Q5_FORMAT_ROUTING_PREFIX = "filter_q5_format"
 FILTER_USD_QUEUE = "filter_usd_queue"
 FILTER_Q1_QUEUE = "filter_q1_queue"
 FILTER_DATE_QUEUE = "filter_date_queue"
@@ -538,25 +541,43 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
     for index in range(file_ingestor_count):
         vol_name = f"file_ingestor_{index}_state"
         named_volumes[vol_name] = None
-        services[f"file_ingestor_{index}"] = file_ingestor_service(index, file_ingestor_count, settings, vol_name)
+        services[f"file_ingestor_{index}"] = file_ingestor_service(
+            index=index,
+            total=file_ingestor_count,
+            settings=settings,
+            state_volume=vol_name,
+            filter_usd_amount=counts["filter_usd"] if usd_enabled else 0,
+            filter_q5_format_amount=counts["filter_q5_format"] if q5_enabled else 0,
+        )
 
     filter_specs = []
     if usd_enabled:
-        filter_specs.append(("USD", counts["filter_usd"], FILTER_USD_QUEUE))
+        filter_specs.append((
+            "USD",
+            counts["filter_usd"],
+            FILTER_USD_ROUTING_PREFIX,
+            FILTER_USD_EXCHANGE,
+            FILTER_USD_ROUTING_PREFIX,
+        ))
     if q1_enabled:
-        filter_specs.append(("Q1", counts["filter_q1"], FILTER_Q1_QUEUE))
+        filter_specs.append(("Q1", counts["filter_q1"], FILTER_Q1_QUEUE, None, None))
     if q3_enabled or q4_enabled:
-        filter_specs.append(("DATE", counts["filter_date"], FILTER_DATE_QUEUE))
+        filter_specs.append(("DATE", counts["filter_date"], FILTER_DATE_QUEUE, None, None))
 
-    for configuration, count, input_queue in filter_specs:
+    for configuration, count, input_queue_prefix, input_exchange, input_routing_prefix in filter_specs:
         for index in range(count):
             services[f"filter_{configuration.lower()}_{index}"] = filter_service(
                 configuration=configuration,
                 index=index,
                 amount=count,
-                input_queue=input_queue,
+                input_queue=(
+                    worker_queue_name(input_queue_prefix, index)
+                    if input_exchange
+                    else input_queue_prefix
+                ),
                 settings=settings,
-                transaction_exchange=TRANSACTION_EXCHANGE if configuration == "USD" else None,
+                input_exchange=input_exchange,
+                input_routing_prefix=input_routing_prefix,
                 enabled_queries=enabled_queries,
                 q3_barrier_amount=counts["q3_barrier"],
                 q4_filter_amount=counts["q4_filter"],
@@ -570,9 +591,10 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 configuration="Q5",
                 index=index,
                 amount=counts["filter_q5_format"],
-                input_queue=FILTER_Q5_FORMAT_QUEUE,
+                input_queue=worker_queue_name(FILTER_Q5_FORMAT_ROUTING_PREFIX, index),
                 settings=settings,
-                transaction_exchange=TRANSACTION_EXCHANGE,
+                input_exchange=FILTER_Q5_FORMAT_EXCHANGE,
+                input_routing_prefix=FILTER_Q5_FORMAT_ROUTING_PREFIX,
                 enabled_queries=enabled_queries,
                 q3_barrier_amount=counts["q3_barrier"],
                 q4_filter_amount=counts["q4_filter"],
@@ -872,25 +894,44 @@ def gateway_service(file_ingestor_count: int, settings: dict, enabled_queries: s
     )
 
 
-def file_ingestor_service(index: int, total: int, settings: dict, state_volume: str) -> dict:
+def file_ingestor_service(
+    index: int,
+    total: int,
+    settings: dict,
+    state_volume: str,
+    filter_usd_amount: int,
+    filter_q5_format_amount: int,
+) -> dict:
+    environment = [
+        f"ID={index}",
+        f"FILE_INGESTOR_AMOUNT={total}",
+        f"FILE_INGESTOR_CONTROL_QUEUE_PREFIX=file_ingestor_control",
+        f"FILE_INGESTOR_RESPONSE_QUEUE_PREFIX={FILE_INGESTOR_RESPONSE_QUEUE_PREFIX}",
+        f"LINE_BATCH_INPUT_QUEUE={worker_queue_name(FILE_INGESTOR_ROUTING_PREFIX, index)}",
+        f"LINE_BATCH_INPUT_EXCHANGE={LINE_BATCH_EXCHANGE}",
+        f"LINE_BATCH_INPUT_ROUTING_PREFIX={FILE_INGESTOR_ROUTING_PREFIX}",
+        f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
+        f"MOM_HOST={MOM_HOST}",
+        "PYTHONUNBUFFERED=1",
+        "STATE_DIR=/worker_state",
+        "SNAPSHOT_INTERVAL=1000",
+    ]
+    if filter_usd_amount > 0:
+        environment.extend([
+            f"FILTER_USD_AMOUNT={filter_usd_amount}",
+            f"FILTER_USD_EXCHANGE={FILTER_USD_EXCHANGE}",
+            f"FILTER_USD_ROUTING_PREFIX={FILTER_USD_ROUTING_PREFIX}",
+        ])
+    if filter_q5_format_amount > 0:
+        environment.extend([
+            f"FILTER_Q5_FORMAT_AMOUNT={filter_q5_format_amount}",
+            f"FILTER_Q5_FORMAT_EXCHANGE={FILTER_Q5_FORMAT_EXCHANGE}",
+            f"FILTER_Q5_FORMAT_ROUTING_PREFIX={FILTER_Q5_FORMAT_ROUTING_PREFIX}",
+        ])
     return base_service(
         "workers/file_ingestor/Dockerfile",
         depends_on=depends_on_rabbitmq(),
-        environment=[
-            f"ID={index}",
-            f"FILE_INGESTOR_AMOUNT={total}",
-            f"FILE_INGESTOR_CONTROL_QUEUE_PREFIX=file_ingestor_control",
-            f"FILE_INGESTOR_RESPONSE_QUEUE_PREFIX={FILE_INGESTOR_RESPONSE_QUEUE_PREFIX}",
-            f"LINE_BATCH_INPUT_QUEUE={worker_queue_name(FILE_INGESTOR_ROUTING_PREFIX, index)}",
-            f"LINE_BATCH_INPUT_EXCHANGE={LINE_BATCH_EXCHANGE}",
-            f"LINE_BATCH_INPUT_ROUTING_PREFIX={FILE_INGESTOR_ROUTING_PREFIX}",
-            f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
-            f"MOM_HOST={MOM_HOST}",
-            "PYTHONUNBUFFERED=1",
-            f"TRANSACTION_OUTPUT_EXCHANGE={TRANSACTION_EXCHANGE}",
-            "STATE_DIR=/worker_state",
-            "SNAPSHOT_INTERVAL=1000",
-        ],
+        environment=environment,
         volumes=[f"{state_volume}:/worker_state"],
     )
 
@@ -953,7 +994,8 @@ def filter_service(
     amount: int,
     input_queue: str,
     settings: dict,
-    transaction_exchange: str | None = None,
+    input_exchange: str | None = None,
+    input_routing_prefix: str | None = None,
     enabled_queries: set[str] | None = None,
     q3_barrier_amount: int = 1,
     q4_filter_amount: int = 1,
@@ -1011,8 +1053,11 @@ def filter_service(
             f"Q3_CANDIDATES_EXCHANGE={Q3_CANDIDATES_EXCHANGE}",
             f"Q3_CANDIDATES_ROUTING_PREFIX={Q3_CANDIDATES_ROUTING_PREFIX}",
         ])
-    if transaction_exchange:
-        environment.append(f"TRANSACTION_EXCHANGE={transaction_exchange}")
+    if input_exchange:
+        environment.extend([
+            f"INPUT_EXCHANGE={input_exchange}",
+            f"INPUT_ROUTING_PREFIX={input_routing_prefix}",
+        ])
     prefetch = settings.get("filter_prefetch_count")
     if prefetch is not None:
         environment.append(f"PREFETCH_COUNT={prefetch}")

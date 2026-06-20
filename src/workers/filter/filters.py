@@ -38,7 +38,6 @@ MOM_HOST = os.environ["MOM_HOST"]
 CONFIGURATION = os.environ["CONFIGURATION"]
 # Cola de Entrada
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
-TRANSACTION_EXCHANGE = os.getenv("TRANSACTION_EXCHANGE")
 # Personal-queue input: cuando está seteado, el filter consume su propia cola
 # (INPUT_QUEUE) ligada a un exchange direct por routing key. Reemplaza a la cola
 # compartida / fanout en las etapas convertidas a colas personales.
@@ -102,14 +101,11 @@ class FilterWorker:
         # Iniciacion de la cola de entrada
         if INPUT_EXCHANGE:
             self.input_queue = middleware.MessageMiddlewareExchangeRabbitMQ(
-                MOM_HOST, INPUT_EXCHANGE,
+                MOM_HOST,
+                INPUT_EXCHANGE,
                 routing_keys=[self._input_routing_key()],
-                queue_name=INPUT_QUEUE, exclusive=False,
-            )
-        elif TRANSACTION_EXCHANGE:
-            self.input_queue = middleware.MessageMiddlewareExchangeRabbitMQ(
-                MOM_HOST, TRANSACTION_EXCHANGE, routing_keys=[],
-                exchange_type="fanout", queue_name=INPUT_QUEUE, exclusive=False,
+                queue_name=INPUT_QUEUE,
+                exclusive=False,
             )
         else:
             self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
