@@ -22,6 +22,7 @@ from .middleware import (
 
 _DURABLE = os.environ.get("RABBITMQ_DURABLE", "false").lower() == "true"
 _DELIVERY_MODE = 2 if _DURABLE else 1
+_PUBLISHER_CONFIRMS = os.environ.get("RABBITMQ_PUBLISHER_CONFIRMS", "false").lower() == "true"
 _PREFETCH_COUNT = int(os.environ.get("PREFETCH_COUNT", "1"))
 _CONNECT_RETRIES = int(os.environ.get("RABBITMQ_CONNECT_RETRIES", "10"))
 _CONNECT_RETRY_DELAY = float(os.environ.get("RABBITMQ_CONNECT_RETRY_DELAY", "3.0"))
@@ -50,6 +51,8 @@ class _RabbitMQBase:
                     )
                 )
                 self._channel = self._connection.channel()
+                if _PUBLISHER_CONFIRMS:
+                    self._channel.confirm_delivery()
                 return
             except Exception as e:
                 last_exc = e
@@ -184,6 +187,10 @@ class MessageMiddlewareQueueRabbitMQ(_RabbitMQBase, MessageMiddlewareQueue):
                 properties=pika.BasicProperties(delivery_mode=_DELIVERY_MODE),
             )
             self._record_flow("publish", message, self._queue_name)
+        except pika.exceptions.NackError as e:
+            raise MessageMiddlewareMessageError(f"broker nacked the publish: {e}")
+        except pika.exceptions.UnroutableError as e:
+            raise MessageMiddlewareMessageError(f"message unroutable: {e}")
         except _CONNECTION_ERRORS as e:
             raise MessageMiddlewareDisconnectedError(e)
         except MessageMiddlewareMessageError:
@@ -245,6 +252,10 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
                         properties=pika.BasicProperties(delivery_mode=_DELIVERY_MODE),
                     )
                     self._record_flow("publish", message, key)
+        except pika.exceptions.NackError as e:
+            raise MessageMiddlewareMessageError(f"broker nacked the publish: {e}")
+        except pika.exceptions.UnroutableError as e:
+            raise MessageMiddlewareMessageError(f"message unroutable: {e}")
         except _CONNECTION_ERRORS as e:
             raise MessageMiddlewareDisconnectedError(e)
         except MessageMiddlewareMessageError:
