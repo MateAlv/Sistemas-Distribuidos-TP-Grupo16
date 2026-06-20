@@ -8,7 +8,6 @@ from file_ingestor import FileIngestor, FileIngestorConfig
 
 DEFAULT_ID = 0
 DEFAULT_MOM_HOST = "rabbitmq"
-DEFAULT_LINE_BATCH_INPUT_QUEUE = "line_batch_queue"
 DEFAULT_TRANSACTION_OUTPUT_EXCHANGE = "transaction_fanout_exchange"
 DEFAULT_CONTROL_QUEUE_PREFIX = "file_ingestor_control"
 DEFAULT_RESPONSE_QUEUE_PREFIX = "file_ingestor_response"
@@ -44,11 +43,17 @@ def load_config() -> FileIngestorConfig:
     if ingestor_id < 0:
         raise ValueError("ID must be greater than or equal to 0")
 
+    total_instances = get_int("FILE_INGESTOR_AMOUNT", None)
+    if total_instances <= 0:
+        raise ValueError("FILE_INGESTOR_AMOUNT must be greater than 0")
+
     return FileIngestorConfig(
         id=ingestor_id,
-        total_instances=get_int("FILE_INGESTOR_AMOUNT", 1),
+        total_instances=total_instances,
         mom_host=os.getenv("MOM_HOST", DEFAULT_MOM_HOST),
-        queue_name=os.getenv("LINE_BATCH_INPUT_QUEUE", DEFAULT_LINE_BATCH_INPUT_QUEUE),
+        queue_name=require_env("LINE_BATCH_INPUT_QUEUE"),
+        input_exchange=require_env("LINE_BATCH_INPUT_EXCHANGE"),
+        input_routing_prefix=require_env("LINE_BATCH_INPUT_ROUTING_PREFIX"),
         transaction_output_exchange=os.getenv(
             "TRANSACTION_OUTPUT_EXCHANGE",
             DEFAULT_TRANSACTION_OUTPUT_EXCHANGE,
@@ -76,14 +81,23 @@ def initialize_log(level_name: str) -> None:
     )
 
 
-def get_int(name: str, default: int) -> int:
+def get_int(name: str, default: int | None) -> int:
     value = os.getenv(name)
     if value is None:
+        if default is None:
+            raise ValueError(f"{name} is required")
         return default
     try:
         return int(value)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer") from exc
+
+
+def require_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"{name} is required")
+    return value
 
 
 if __name__ == "__main__":

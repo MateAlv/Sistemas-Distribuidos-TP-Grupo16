@@ -157,6 +157,30 @@ def test_q2_sum_uses_sharded_exchange_and_personal_queue() -> None:
     assert sum_1_env["INPUT_QUEUE"] == "sum_q2_1"
 
 
+def test_file_ingestors_use_sharded_exchange_and_personal_queue() -> None:
+    config = _config({"enabled": False})
+    config["workers"]["file_splitters"] = 1
+    config["workers"]["file_ingestors"] = 2
+
+    services = generate_compose.build_compose(config, expose_ports=False)["services"]
+
+    splitter_env = _env(services["file_splitter_0"])
+    assert splitter_env["LINE_BATCH_OUTPUT_EXCHANGE"] == "line_batch_exchange"
+    assert splitter_env["LINE_BATCH_OUTPUT_ROUTING_PREFIX"] == "file_ingestor"
+    assert splitter_env["FILE_INGESTOR_AMOUNT"] == "2"
+    assert "LINE_BATCH_OUTPUT_QUEUE" not in splitter_env
+
+    ingestor_0_env = _env(services["file_ingestor_0"])
+    assert ingestor_0_env["LINE_BATCH_INPUT_EXCHANGE"] == "line_batch_exchange"
+    assert ingestor_0_env["LINE_BATCH_INPUT_ROUTING_PREFIX"] == "file_ingestor"
+    assert ingestor_0_env["LINE_BATCH_INPUT_QUEUE"] == "file_ingestor_0"
+
+    ingestor_1_env = _env(services["file_ingestor_1"])
+    assert ingestor_1_env["LINE_BATCH_INPUT_EXCHANGE"] == "line_batch_exchange"
+    assert ingestor_1_env["LINE_BATCH_INPUT_ROUTING_PREFIX"] == "file_ingestor"
+    assert ingestor_1_env["LINE_BATCH_INPUT_QUEUE"] == "file_ingestor_1"
+
+
 @pytest.mark.parametrize(
     ("monitor", "message"),
     [

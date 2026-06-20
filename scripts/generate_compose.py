@@ -21,7 +21,8 @@ FILE_INGESTOR_CONTROL_EXCHANGE = "file_ingestor_control"
 FILE_INGESTOR_RESPONSE_QUEUE_PREFIX = "file_ingestor_response"
 FILTER_PREFIX = "filter"
 
-LINE_BATCH_QUEUE = "line_batch_queue"
+LINE_BATCH_EXCHANGE = "line_batch_exchange"
+FILE_INGESTOR_ROUTING_PREFIX = "file_ingestor"
 FILTER_USD_QUEUE = "filter_usd_queue"
 FILTER_Q1_QUEUE = "filter_q1_queue"
 FILTER_DATE_QUEUE = "filter_date_queue"
@@ -524,12 +525,15 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
         enabled_queries,
     )
 
+    file_ingestor_count = counts["file_ingestors"]
     for index in range(counts["file_splitters"]):
         services[f"file_splitter_{index}"] = file_splitter_service(
-            index, settings, q2_enabled=q2_enabled
+            index,
+            settings,
+            q2_enabled=q2_enabled,
+            file_ingestor_count=file_ingestor_count,
         )
 
-    file_ingestor_count = counts["file_ingestors"]
     named_volumes: dict[str, None] = {}
     for index in range(file_ingestor_count):
         vol_name = f"file_ingestor_{index}_state"
@@ -877,7 +881,9 @@ def file_ingestor_service(index: int, total: int, settings: dict, state_volume: 
             f"FILE_INGESTOR_AMOUNT={total}",
             f"FILE_INGESTOR_CONTROL_QUEUE_PREFIX=file_ingestor_control",
             f"FILE_INGESTOR_RESPONSE_QUEUE_PREFIX={FILE_INGESTOR_RESPONSE_QUEUE_PREFIX}",
-            f"LINE_BATCH_INPUT_QUEUE={LINE_BATCH_QUEUE}",
+            f"LINE_BATCH_INPUT_QUEUE={worker_queue_name(FILE_INGESTOR_ROUTING_PREFIX, index)}",
+            f"LINE_BATCH_INPUT_EXCHANGE={LINE_BATCH_EXCHANGE}",
+            f"LINE_BATCH_INPUT_ROUTING_PREFIX={FILE_INGESTOR_ROUTING_PREFIX}",
             f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
             f"MOM_HOST={MOM_HOST}",
             "PYTHONUNBUFFERED=1",
@@ -889,12 +895,19 @@ def file_ingestor_service(index: int, total: int, settings: dict, state_volume: 
     )
 
 
-def file_splitter_service(index: int, settings: dict, q2_enabled: bool) -> dict:
+def file_splitter_service(
+    index: int,
+    settings: dict,
+    q2_enabled: bool,
+    file_ingestor_count: int,
+) -> dict:
     environment = [
         f"FILE_SPLITTER_INPUT_EXCHANGE={FILE_INGESTOR_EXCHANGE}",
         f"FILE_SPLITTER_QUEUE_PREFIX={FILE_SPLITTER_QUEUE_PREFIX}",
+        f"FILE_INGESTOR_AMOUNT={file_ingestor_count}",
         f"ID={index}",
-        f"LINE_BATCH_OUTPUT_QUEUE={LINE_BATCH_QUEUE}",
+        f"LINE_BATCH_OUTPUT_EXCHANGE={LINE_BATCH_EXCHANGE}",
+        f"LINE_BATCH_OUTPUT_ROUTING_PREFIX={FILE_INGESTOR_ROUTING_PREFIX}",
         f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
         f"MAX_BATCH_BYTES={settings.get('chunk_max_bytes', 65536)}",
         f"MAX_LINE_BYTES={settings.get('max_line_bytes', 16777216)}",
