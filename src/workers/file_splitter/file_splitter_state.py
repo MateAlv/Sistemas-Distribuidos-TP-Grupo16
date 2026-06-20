@@ -3,20 +3,46 @@
 Wraps the splitter's mutable business state behind the snapshot/restore/apply_change
 contract the durable-state engine expects.
 
-Three kinds of change, all JSON-safe:
-  - "chunk": carries the raw chunk payload (base64) so apply_change can replay the
-    exact same parsing, header detection and batch-accumulation logic without
-    re-sending any output.
-  - "file_eof": drains the LineSplitter's pending bytes, flushes the last partial
-    batch state, and removes the file from the tracked set.
-  - "client_eof": iterates over all remaining files for the client and applies the
-    same finish logic as "file_eof".
+Change types (all JSON-safe)
+-----------------------------
+  "chunk"
+      A file chunk arrived. Carries the raw chunk payload (base64) so
+      apply_change can replay the exact parsing, header detection and
+      batch-accumulation logic without re-sending any output.
 
-Why the chunk payload travels in the change dict (instead of the resulting state):
-the batch-accumulation logic is tightly coupled to LineSplitter's internal cursor
-(expected_offset, pending buffer). Storing the raw payload and re-running the
-pipeline on replay is the only way to keep batch_id, data_lines_emitted and
-batches_emitted perfectly in sync with what the live worker produced.
+      The chunk payload travels in the change dict rather than the resulting
+      state because the batch-accumulation logic is tightly coupled to
+      LineSplitter's internal cursor (expected_offset, pending buffer). Storing
+      the raw payload and re-running the pipeline on replay is the only way to
+      keep batch_id, data_lines_emitted and batches_emitted in sync with what
+      the live worker produced.
+
+  "file_eof"
+      A file's last chunk was processed. Drains LineSplitter's pending bytes,
+      flushes the last partial batch, and removes the file from the tracked set.
+
+  "client_eof"
+      All files for the client have been received. Iterates over remaining open
+      files and applies the same finish logic as "file_eof" for each.
+
+Caller protocol (one change dict per handle() call to PersistentStateHandler)
+------------------------------------------------------------------------------
+  CHUNK message (a piece of a file):
+    → chunk_change(client_id, file_key, chunk_payload)
+    Batches accumulate in the LineSplitter; actual line-batch outputs go to
+    the outbox as part of the same handle() call.
+
+  FILE_EOF message (end of one file):
+    → file_eof_change(client_id, file_key)
+    Drains the remaining partial batch from LineSplitter to the outbox.
+
+  CLIENT_EOF message (end of all files for a client):
+    → client_eof_change(client_id)
+    Drains all remaining open files' partial batches and removes the client.
+
+Note: this adapter has no EofCoordinator and no per-client EOF counter.
+The splitter operates as a pure chunked-stream parser; downstream workers
+handle the multi-sender EOF coordination.
 """
 
 from __future__ import annotations

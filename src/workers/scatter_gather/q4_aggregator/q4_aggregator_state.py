@@ -3,22 +3,43 @@
 Wraps the aggregator's per-client state behind the snapshot/restore/apply_change
 contract the durable-state engine expects.
 
-Three kinds of change:
-  - "data": a Q4PairPaths batch arrived. The change carries the raw payload
-    (base64) so apply_change can replay the pair counting + qualification logic
-    and keep _pair_counts_by_client / _qualified_pairs_by_client consistent.
-    When a pair's running total reaches Q4_QUALIFY_THRESHOLD, it moves from
-    counts to qualified; the actual account-candidate emissions go to the durable
-    outbox.
-  - "eof": one upstream joiner sent its EOF. The change carries sender_id;
-    apply_change advances the UpstreamEofCounter (idempotent: duplicate
-    sender_ids are silently ignored).
-  - "close": the client was fully emitted and cleaned up. apply_change pops all
-    per-client maps, closes the EOF counter entry, and marks the client closed.
+Change types
+------------
+  "data"
+      A Q4PairPaths batch arrived. Carries the raw payload (base64) so
+      apply_change can replay the pair counting + qualification logic.
+      When a pair's running total reaches Q4_QUALIFY_THRESHOLD it moves from
+      _pair_counts_by_client to _qualified_pairs_by_client; the actual
+      account-candidate emissions go to the durable outbox.
+  "eof"
+      One upstream joiner sent its EOF. Carries sender_id; apply_change
+      advances the UpstreamEofCounter. Idempotent: duplicate sender_ids are
+      silently ignored (set membership).
+  "close"
+      The client was fully emitted and cleaned up. Pops all per-client maps,
+      closes the EOF counter entry, and marks the client closed.
 
-_forwarded_by_partition_by_client is intentionally omitted: those counts are
-computed fresh during the emit phase at close time and are not needed for any
-decision between message arrivals.
+Caller protocol (one change dict per handle() call to PersistentStateHandler)
+------------------------------------------------------------------------------
+  DATA message
+    → data_change(client_id, payload)
+
+  EOF from one upstream Q4Joiner shard:
+    → eof_change(client_id, sender_id)
+    If eof_count(client_id) == joiner_amount after applying:
+      Read qualified_pairs_for(client_id) + pair_counts_for(client_id).
+      Emit account-candidate batches to outbox.
+      → close_change(client_id)
+
+State accessors (read before close_change)
+------------------------------------------
+  qualified_pairs_for(client_id) → set[tuple]  4-tuples (src_bank, src_acc, tgt_bank, tgt_acc)
+  pair_counts_for(client_id)     → dict[tuple, int]  not-yet-qualified pairs and their counts
+  processed_count(client_id)     → int
+  eof_count(client_id)           → int  how many joiner shards have sent EOF so far
+
+Note: _forwarded_by_partition_by_client is intentionally omitted — those counts
+are computed fresh during the emit phase and are not needed between arrivals.
 """
 
 from __future__ import annotations

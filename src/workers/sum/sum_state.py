@@ -3,29 +3,65 @@
 Wraps the sum worker's mutable per-client state behind the snapshot/restore/
 apply_change contract the durable-state engine expects.
 
-Five kinds of change:
-  - "data": a DATA batch was processed. The change carries the raw batch payload
-    (base64) so apply_change can replay deserialization + processor.process() and
-    keep the accumulated partial results consistent with what the live worker
-    produced. The actual partials forwarded to aggregators live in the durable
-    outbox.
-  - "close": the client was flushed and cleaned up. apply_change drops the
-    processor and counter; subsequent DATA messages for that client are ignored.
+Change types
+------------
+  "data"
+      A DATA batch arrived. The raw payload is base64-encoded so apply_change
+      can replay deserialization + processor.process() identically. The actual
+      partials forwarded to aggregators live in the durable outbox.
+  "close"
+      The client was flushed and cleaned up. Processor and counter are dropped;
+      late DATA messages for that client are ignored on replay.
+  "coordinator_upstream_eof"
+      coordinator.on_upstream_eof was called. action discarded on replay.
+  "coordinator_msg"
+      coordinator.process_control_message was called with a state-mutating type:
+      EOF_RECEIVED, PROCESSED_ANSWER, or FLUSH_ACK. FLUSH_ACK uses the standard
+      path — _on_flush_ack handles coordinator leader-state cleanup internally.
+  "coordinator_cleanup"
+      coordinator.cleanup_client was called (non-leader, after FLUSH_ORDER).
 
-  The following three changes keep the EofCoordinator's internal state in the WAL
-  so that crash recovery does not rely solely on the last snapshot:
+Caller protocol (one change dict per handle() call to PersistentStateHandler)
+------------------------------------------------------------------------------
+  DATA message
+    → data_change(client_id, payload)
 
-  - "coordinator_upstream_eof": coordinator.on_upstream_eof was called. apply_change
-    replays the call (action discarded — no I/O on replay).
-  - "coordinator_msg": coordinator.process_control_message was called with a
-    state-mutating type (EOF_RECEIVED, PROCESSED_ANSWER, or FLUSH_ACK). apply_change
-    replays the call (action discarded). FLUSH_ACK uses the standard path — the
-    coordinator's _on_flush_ack handles leader-state cleanup internally.
-  - "coordinator_cleanup": coordinator.cleanup_client was called (non-leader path).
-    apply_change replays it.
+  Upstream EOF (data thread):
+    action = coordinator.on_upstream_eof(client_id, expected_total, count, fwd)
+    → coordinator_upstream_eof_change(client_id, expected_total, count, fwd)
+    Execute action outside the lock.
 
-Note: _partials_forwarded is a global logging counter that is not per-client and
-does not affect business-logic outputs — intentionally omitted from state.
+  Control EOF_RECEIVED (broadcast, control thread):
+    action = coordinator.process_control_message(EOF_RECEIVED, client_id, ctrl, count, fwd)
+    → coordinator_msg_change(EOF_RECEIVED, client_id, ctrl.sender_id,
+                              ctrl.expected_total, ctrl.processed_count, count, fwd)
+    Execute action outside the lock.
+
+  Response PROCESSED_ANSWER (leader):
+    action = coordinator.process_control_message(PROCESSED_ANSWER, client_id, ctrl)
+    → coordinator_msg_change(PROCESSED_ANSWER, client_id, ctrl.sender_id,
+                              ctrl.expected_total, ctrl.processed_count)
+    Execute action outside the lock.
+
+  Non-leader close (FLUSH_ORDER → FlushAction(is_leader=False)):
+    Bundle coordinator_cleanup_change + close_change into a single compound
+    change dict, because handle() supports one change per message. Call order
+    in apply_change: coordinator.cleanup_client → _apply_close.
+    Read partials_for(client_id) → emit to outbox before closing.
+
+  Leader close (final FLUSH_ACK → FlushAction(is_leader=True), or N=1):
+    action = coordinator.process_control_message(FLUSH_ACK, client_id, ctrl)
+    → coordinator_msg_change(FLUSH_ACK, client_id, ...)
+    Read partials_for(client_id) → emit to outbox.
+    → close_change(client_id)
+
+  N=1 shortcut:
+    → coordinator_upstream_eof_change(...)
+    Read partials_for(client_id) → emit.
+    → close_change(client_id)
+
+Note: _partials_forwarded is a global logging counter with no per-client
+semantics — intentionally omitted from state.
 """
 
 from __future__ import annotations

@@ -3,41 +3,86 @@
 Wraps the filter's per-client state behind the snapshot/restore/apply_change
 contract the durable-state engine expects.
 
-Five kinds of change:
-  - "data": a transaction batch arrived. The change carries the raw payload
-    (base64) so apply_change can replay the source-gate logic and keep
-    _states_by_client and _forwarded_by_partition_by_client consistent with
-    what the live worker produced.
+Change types
+------------
+  "data"
+      A transaction batch arrived. Carries the raw payload (base64) so
+      apply_change can replay the source-gate logic identically.
 
-    Source-gate recap: for each source account, the filter accumulates edges
-    until it has seen edges to ≥ 6 distinct targets (the "notebook bank"
-    qualification rule). Once a source qualifies, all pending edges are emitted
-    (two Q4CountedEdge records per edge, routed by intermediate Q4AccountId
-    to a Q4Sum partition). Future edges from the same source are emitted
-    immediately. The partition counts are tracked so the EOF can tell each
-    Q4Sum shard how many records it will receive.
+      Source-gate: for each source account, edges accumulate until ≥ 6 distinct
+      targets are seen (notebook-bank qualification rule). Once a source qualifies,
+      pending edges are emitted as two Q4CountedEdge records each (INCOMING with
+      intermediate=target, OUTGOING with intermediate=source), routed to a Q4Sum
+      partition by partition_for_parts. Counts per partition are tracked in
+      _forwarded_by_partition_by_client so the EOF can tell each Q4Sum shard how
+      many records it will receive.
 
-    apply_change replays this logic entirely in memory — no I/O — updating
-    _states_by_client and _forwarded_by_partition_by_client identically to
-    the live path.
+      apply_change replays this entirely in memory (no I/O): updates
+      _states_by_client and _forwarded_by_partition_by_client identically to
+      the live path, without touching the outbox.
 
-  - "close": the client was flushed and cleaned up. apply_change drops all
-    per-client maps and marks the client closed.
+  "close"
+      The client was flushed and cleaned up. Drops all per-client maps.
+  "coordinator_upstream_eof"
+      coordinator.on_upstream_eof was called. action discarded on replay.
+      Flush_order mode: updates _seen_eof and, on the leader, _leader_expected.
+  "coordinator_msg"
+      coordinator.process_control_message was called with a state-mutating type:
+      PROCESSED_ANSWER or FLUSH_ACK only. Flush_order mode has no EOF_RECEIVED
+      broadcast — each shard's EOF goes directly to the fixed leader via
+      on_upstream_eof → SendAnswerAction.
+  "coordinator_cleanup"
+      coordinator.cleanup_client was called (non-leader, after FLUSH_ORDER).
 
-  The following three changes keep the EofCoordinator's internal state in the WAL
-  so that crash recovery does not rely solely on the last snapshot. This worker
-  uses "flush_order" mode — there is no EOF_RECEIVED broadcast step; each shard
-  reports directly to the fixed leader.
+Coordinator mode: flush_order
+------------------------------
+Unlike broadcast mode, the flush_order protocol has no EOF_RECEIVED step.
+When a shard receives its upstream EOF, it calls on_upstream_eof which on the
+non-leader returns SendAnswerAction (send a PROCESSED_ANSWER to the leader
+directly). The leader accumulates PROCESSED_ANSWERs until all shards have
+reported, then broadcasts FLUSH_ORDER.
 
-  - "coordinator_upstream_eof": coordinator.on_upstream_eof was called. apply_change
-    replays the call (action discarded — no I/O on replay). In flush_order mode this
-    updates _seen_eof and, on the leader, _leader_expected.
-  - "coordinator_msg": coordinator.process_control_message was called with a
-    state-mutating type (PROCESSED_ANSWER or FLUSH_ACK). apply_change replays the
-    call (action discarded). FLUSH_ACK uses the standard path — the coordinator's
-    _on_flush_ack handles leader-state cleanup internally.
-  - "coordinator_cleanup": coordinator.cleanup_client was called (non-leader, after
-    FlushAction(is_leader=False)). apply_change replays it.
+Caller protocol (one change dict per handle() call to PersistentStateHandler)
+------------------------------------------------------------------------------
+  DATA message
+    → data_change(client_id, payload)
+
+  Upstream EOF (data thread):
+    action = coordinator.on_upstream_eof(client_id, expected_total, count, fwd)
+    → coordinator_upstream_eof_change(client_id, expected_total, count, fwd)
+    Execute action outside the lock (SendAnswerAction on non-leader, or
+    FlushOrderAction on leader if N=1).
+
+  Response PROCESSED_ANSWER (leader, from a non-leader shard):
+    action = coordinator.process_control_message(PROCESSED_ANSWER, client_id, ctrl)
+    → coordinator_msg_change(PROCESSED_ANSWER, client_id, ctrl.sender_id,
+                              ctrl.expected_total, ctrl.processed_count)
+    Execute action outside the lock (FlushOrderAction when last answer arrives).
+
+  Non-leader close (FLUSH_ORDER received → FlushAction(is_leader=False)):
+    Read forwarded_by_partition(client_id) → build per-partition EOF batch.
+    coordinator.cleanup_client(client_id)
+    → coordinator_cleanup_change(client_id) + close_change(client_id)
+      Bundle into a single compound change (one change per message).
+
+  Leader close (all FLUSH_ACKs → FlushAction(is_leader=True)):
+    action = coordinator.process_control_message(FLUSH_ACK, client_id, ctrl)
+    → coordinator_msg_change(FLUSH_ACK, client_id, ...)
+    When FlushAction(is_leader=True): emit downstream gateway EOF.
+    → close_change(client_id)
+    (_on_flush_ack already cleaned coordinator state; no coordinator_cleanup needed.)
+
+  N=1 shortcut (on_upstream_eof returns FlushAction directly):
+    → coordinator_upstream_eof_change(...)
+    Emit per-partition EOF using forwarded_by_partition(client_id).
+    → close_change(client_id)
+
+State accessors (read before close_change)
+------------------------------------------
+  forwarded_by_partition(client_id) → dict[int, int]  per-partition send counts
+  source_states_for(client_id)      → dict  per-source qualification state
+  processed_count(client_id)        → int
+  forwarded_total(client_id)        → int  sum of all partition counts
 """
 
 from __future__ import annotations

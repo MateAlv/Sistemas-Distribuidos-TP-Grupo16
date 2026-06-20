@@ -3,20 +3,42 @@
 Wraps the joiner's per-client state behind the snapshot/restore/apply_change
 contract the durable-state engine expects.
 
-Three kinds of change:
-  - "data": a Q4BlockJoinEdge batch arrived. The change carries the raw payload
-    (base64); apply_change deserializes the batch and files each half-edge into
-    _incoming_by_client or _outgoing_by_client by (intermediate, a_bucket,
-    b_bucket) block key, accumulating endpoint→count sums. This mirrors the live
-    worker's _accept_block_edges without any I/O.
-  - "eof": one upstream sum worker sent its EOF. The change carries sender_id;
-    apply_change advances the UpstreamEofCounter.
-  - "close": the client was fully emitted and cleaned up. apply_change drops all
-    per-client maps, closes the EOF counter entry, and marks the client closed.
+Change types
+------------
+  "data"
+      A Q4BlockJoinEdge batch arrived. Carries the raw payload (base64);
+      apply_change deserializes and files each half-edge into
+      _incoming_by_client or _outgoing_by_client keyed by
+      (intermediate, a_bucket, b_bucket) block, accumulating endpoint→count
+      sums. Mirrors the live worker's _accept_block_edges without any I/O.
+  "eof"
+      One upstream Q4Sum shard sent its EOF. Carries sender_id; apply_change
+      advances the UpstreamEofCounter. Idempotent: duplicates are ignored.
+  "close"
+      The client was fully emitted and cleaned up. Drops all per-client maps,
+      closes the EOF counter entry, and marks the client closed.
 
-_forwarded_by_partition_by_client is intentionally omitted: those counts are
-computed fresh during the emit phase (_emit_client_pairs) at close time and
-are not needed for any decision between message arrivals.
+Caller protocol (one change dict per handle() call to PersistentStateHandler)
+------------------------------------------------------------------------------
+  DATA message
+    → data_change(client_id, payload)
+
+  EOF from one upstream Q4Sum shard:
+    → eof_change(client_id, sender_id)
+    If eof_count(client_id) == sum_amount after applying:
+      Read incoming_for(client_id) + outgoing_for(client_id).
+      Emit block-join pair paths to outbox (per partition to Q4Aggregator).
+      → close_change(client_id)
+
+State accessors (read before close_change)
+------------------------------------------
+  incoming_for(client_id) → dict[tuple, dict]  block_key → endpoint → count (INCOMING)
+  outgoing_for(client_id) → dict[tuple, dict]  block_key → endpoint → count (OUTGOING)
+  processed_count(client_id) → int
+  eof_count(client_id)        → int  how many Q4Sum shards have sent EOF so far
+
+Note: _forwarded_by_partition_by_client is intentionally omitted — computed fresh
+at emit time and not needed between arrivals.
 """
 
 from __future__ import annotations

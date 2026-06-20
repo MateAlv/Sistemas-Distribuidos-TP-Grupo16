@@ -3,22 +3,55 @@
 Wraps the joiner's per-client state behind the snapshot/restore/apply_change
 contract the durable-state engine expects.
 
-This worker receives data from two independent streams and emits when both
-have fully arrived (state.ready()). Five kinds of change cover both streams:
+This worker receives data from two independent streams and emits once both
+are fully received (ClientState.ready()). No EofCoordinator is used.
 
-  - "q2_data": one Q2 partial result arrived. The change carries the raw payload
-    (base64) so apply_change can replay the exact same deserialization and
-    notebook_bank_id normalisation that the live worker applies.
-  - "q2_eof": the Q2 stream EOF arrived, setting q2_expected_total.
-  - "accounts_data": one accounts batch arrived. The change carries the already-
-    parsed (bank_id, bank_name) mappings rather than the raw LineBatch payload,
-    so the adapter does not need to depend on LineBatchSerializer or parse_csv_line.
-  - "accounts_eof": the accounts stream EOF arrived, setting accounts_expected_total.
-  - "close": the client was fully emitted and cleaned up. apply_change drops the
-    ClientState and marks the client closed.
+Change types
+------------
+  "q2_data"
+      One Q2 partial result arrived. Carries the raw payload (base64) so
+      apply_change can replay the exact deserialization and notebook_bank_id
+      normalisation that the live worker applies.
+  "q2_eof"
+      The Q2 stream EOF arrived. Sets q2_expected_total in ClientState so
+      ready() can detect completion.
+  "accounts_data"
+      One accounts batch arrived. Carries the already-parsed (bank_id, bank_name)
+      mappings rather than the raw LineBatch payload — the adapter does not need
+      to depend on LineBatchSerializer or parse_csv_line.
+  "accounts_eof"
+      The accounts stream EOF arrived. Sets accounts_expected_total.
+  "close"
+      The client was fully emitted and cleaned up. Drops ClientState and marks
+      the client closed.
 
-No EofCoordinator: readiness is determined by ClientState.ready() checking all
-four accumulated counters against their expected totals.
+Caller protocol (one change dict per handle() call to PersistentStateHandler)
+------------------------------------------------------------------------------
+  Q2 DATA message
+    → q2_data_change(client_id, payload)
+
+  Q2 EOF message
+    → q2_eof_change(client_id, expected_total)
+    If state_for(client_id).ready() after applying:
+      Emit joined results to outbox.
+      → close_change(client_id)
+
+  Accounts DATA message
+    mappings = parse_accounts_batch(payload)   # list[(bank_id, bank_name)]
+    → accounts_data_change(client_id, mappings)
+    If state_for(client_id).ready() after applying:
+      Emit joined results to outbox.
+      → close_change(client_id)
+
+  Accounts EOF message
+    → accounts_eof_change(client_id, expected_total)
+    If state_for(client_id).ready() after applying:
+      Emit joined results to outbox.
+      → close_change(client_id)
+
+State accessors (read before close_change)
+------------------------------------------
+  state_for(client_id) → ClientState  full join state (q2_results, bank_names, counters)
 """
 
 from __future__ import annotations

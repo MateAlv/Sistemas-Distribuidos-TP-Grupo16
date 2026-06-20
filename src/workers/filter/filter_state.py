@@ -1,30 +1,76 @@
 """WorkerState adapter for the filter worker.
 
-Wraps the filter's mutable per-client counters and EOF coordination state behind
+Wraps the filter's mutable per-client counters and EofCoordinator state behind
 the snapshot/restore/apply_change contract the durable-state engine expects.
 
-Five kinds of change:
-  - "data": a DATA batch was processed. The change carries only the resulting
-    counts (processed and forwarded per output), NOT the raw payload. apply_change
-    updates the accumulators without re-running the filter predicate — the actual
-    transaction outputs live in the durable outbox.
-  - "flush_ack": a FLUSH_ACK was received from a non-leader peer (N>1 case). The
-    change records the sender and its per-output forwarded counts so the leader can
-    aggregate them and detect completion when all FILTER_AMOUNT-1 peers have acked.
-  - "close": the client has been fully flushed and cleaned up. apply_change pops
-    all per-client state and marks the client as closed.
+Change types
+------------
+  "data"
+      A DATA batch was processed. Carries only the resulting counts (processed
+      and forwarded per output), NOT the raw payload. apply_change updates
+      accumulators without re-running the filter — outputs live in the outbox.
+  "flush_ack"
+      A FLUSH_ACK arrived from a non-leader peer (N>1). Records sender_id and
+      its per-output forwarded counts so the leader can detect when all
+      FILTER_AMOUNT-1 peers have acked. Idempotent: duplicate sender_ids are
+      absorbed by set membership.
+  "close"
+      The client was fully flushed and cleaned up. Pops all per-client state
+      and marks closed. Idempotent on replay.
+  "coordinator_upstream_eof"
+      coordinator.on_upstream_eof was called. action discarded on replay.
+  "coordinator_msg"
+      coordinator.process_control_message was called with a state-mutating type:
+      EOF_RECEIVED or PROCESSED_ANSWER only. FLUSH_ACK is NOT routed here —
+      this worker receives FLUSH_ACK with a custom payload (forwarded_by_output
+      dict) and calls coordinator.cleanup_leader_state instead of the standard
+      FLUSH_ACK path.
+  "coordinator_cleanup"
+      coordinator.cleanup_client (is_leader=False, non-leader path) or
+      coordinator.cleanup_leader_state (is_leader=True, leader path) was called.
+      Discriminated by the "is_leader" bool in the change dict.
 
-  The following three changes keep the EofCoordinator's internal state in the WAL
-  so that crash recovery does not rely solely on the last snapshot:
+Caller protocol (one change dict per handle() call to PersistentStateHandler)
+------------------------------------------------------------------------------
+  DATA message
+    processed_n, fwd_by_output = filter_batch(payload)
+    → data_change(client_id, processed_n, fwd_by_output)
 
-  - "coordinator_upstream_eof": the upstream EOF arrived and coordinator.on_upstream_eof
-    was called. apply_change replays the call (action discarded — no I/O on replay).
-  - "coordinator_msg": coordinator.process_control_message was called with a
-    state-mutating message type (EOF_RECEIVED or PROCESSED_ANSWER; NOT FLUSH_ACK
-    which this worker handles via a custom payload and cleanup_leader_state).
-    apply_change replays the call (action discarded).
-  - "coordinator_cleanup": coordinator.cleanup_client (non-leader) or
-    coordinator.cleanup_leader_state (leader) was called. apply_change replays it.
+  Upstream EOF (data thread):
+    action = coordinator.on_upstream_eof(client_id, expected_total, count, fwd)
+    → coordinator_upstream_eof_change(client_id, expected_total, count, fwd)
+    Execute action outside the lock.
+
+  Control EOF_RECEIVED (broadcast, control thread):
+    action = coordinator.process_control_message(EOF_RECEIVED, client_id, ctrl, count, fwd)
+    → coordinator_msg_change(EOF_RECEIVED, client_id, ctrl.sender_id,
+                              ctrl.expected_total, ctrl.processed_count, count, fwd)
+    Execute action outside the lock.
+
+  Response PROCESSED_ANSWER (leader):
+    action = coordinator.process_control_message(PROCESSED_ANSWER, client_id, ctrl)
+    → coordinator_msg_change(PROCESSED_ANSWER, client_id, ctrl.sender_id,
+                              ctrl.expected_total, ctrl.processed_count)
+    Execute action outside the lock.
+
+  Custom FLUSH_ACK received (leader, from a non-leader peer):
+    → flush_ack_change(client_id, sender_id, forwarded_by_output)
+    If flushed_ack_count(client_id) == FILTER_AMOUNT - 1 (last ack):
+      emit downstream EOF using all_forwarded_by_output(client_id).
+      coordinator.cleanup_leader_state(client_id)
+      → coordinator_cleanup_change(client_id, is_leader=True) + close_change(client_id)
+        Bundle these two into a single compound change (one change per message).
+
+  Non-leader close (leader broadcasts FLUSH_ORDER → worker flushes → sends FLUSH_ACK):
+    Read forwarded_by_output(client_id) → build FLUSH_ACK payload.
+    coordinator.cleanup_client(client_id)
+    → coordinator_cleanup_change(client_id, is_leader=False) + close_change(client_id)
+      Bundle these two into a single compound change (one change per message).
+
+  N=1 shortcut (no FLUSH_ACK protocol):
+    → coordinator_upstream_eof_change(...)
+    Emit downstream EOF.
+    → close_change(client_id)
 
 Fields omitted from state (logging-only, non-deterministic):
   first_data_logged_by_client, deserialized_by_client.
