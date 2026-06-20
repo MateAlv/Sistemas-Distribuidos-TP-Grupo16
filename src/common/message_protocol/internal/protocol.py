@@ -59,3 +59,14 @@ class InternalProtocol:
         msg_type, client_id_bytes = struct.unpack(cls.HEADER_FORMAT, header_data)
         client_id = int.from_bytes(client_id_bytes, byteorder="big")
         return msg_type, client_id, payload
+
+    @classmethod
+    def unpack_addressed_packet(cls, packet: bytes):
+        header_data = packet[:cls.ADDRESSED_HEADER_SIZE]
+        payload = packet[cls.ADDRESSED_HEADER_SIZE:]
+        msg_type, client_id_bytes, sender_id, seq = struct.unpack(
+            cls.ADDRESSED_HEADER_FORMAT,
+            header_data,
+        )
+        client_id = int.from_bytes(client_id_bytes, byteorder="big")
+        return msg_type, client_id, sender_id, seq, payload
