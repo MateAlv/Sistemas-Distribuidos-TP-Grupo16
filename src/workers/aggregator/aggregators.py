@@ -6,7 +6,7 @@ import time
 from common import middleware
 from common.constants import C_Q2, C_Q3, C_Q5
 from common.eof_coordinator import EofCoordinator, BroadcastAction, FlushAction, SendAnswerAction
-from common.last_state import LastStateManager
+from common.fault_tolerance.handler.persistent_state_handler import PersistentStateHandler
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal.common import MessageType
 from common.message_protocol.internal.common.control_message import ControlMessage
@@ -15,8 +15,10 @@ from common.message_protocol.internal import InternalProtocol
 from common.middleware import LazyQueue, MessageMiddlewareQueueRabbitMQ
 
 try:
+    from aggregator_state import AggregatorState
     from processors import create_aggregator_processor
 except ImportError:
+    from workers.aggregator.aggregator_state import AggregatorState
     from workers.aggregator.processors import create_aggregator_processor
 
 
@@ -29,7 +31,7 @@ OUTPUT_QUEUE = os.environ["OUTPUT_QUEUE"]
 LEADER_ID = 0
 AGGREGATION_CONTROL_QUEUE_PREFIX = f"{AGGREGATION_PREFIX}_control"
 AGGREGATION_RESPONSE_QUEUE_PREFIX = f"{AGGREGATION_PREFIX}_response"
-STATE_DIR = os.environ.get("STATE_DIR", "")
+STATE_DIR = os.environ.get("STATE_DIR", "/tmp/aggregator_state")
 SNAPSHOT_INTERVAL = int(os.environ.get("SNAPSHOT_INTERVAL", "1000"))
 
 
@@ -47,13 +49,26 @@ class AggregatorWorker:
             leader_id=LEADER_ID,
         )
 
+        self._state = AggregatorState(
+            configuration=CONFIGURATION,
+            coordinator=self._coordinator,
+            processor_factory=create_aggregator_processor,
+        )
+
+        self._handler = PersistentStateHandler(
+            state_dir=STATE_DIR,
+            node_id=f"agg_{ID}",
+            worker_state=self._state,
+            snapshot_every=SNAPSHOT_INTERVAL,
+        )
+
         self._internal_protocol = InternalProtocol()
         self._control_serializer = ControlMessageSerializer()
-
         self._lock = threading.Lock()
-        self._data_count_by_client: dict[int, int] = {}
-        self._processors_by_client: dict = {}
-        self._closed_by_client: set[int] = set()
+
+        # Thread-local storage for per-thread lazy queue connections.
+        # Pika connections are not thread-safe; each thread keeps its own.
+        self._tls = threading.local()
 
         self._input_exchange = None
         self.control_consumer = None
@@ -63,65 +78,31 @@ class AggregatorWorker:
         self.closed = False
         self._stopped = False
 
-        self._last_state = LastStateManager(STATE_DIR) if STATE_DIR else None
-        self._msg_count = 0
-        self._restore_snapshot()
+        self._handler.recover()
+        self._republish_pending()
 
-    # ---------- snapshot ----------
+    # ---------- connection helpers ----------
 
-    def _build_snapshot(self) -> dict:
-        """Capture all mutable worker state into a serializable dict.
-        Must be called under self._lock."""
-        return {
-            "wal_checkpoint_record": 0,
-            "data_count_by_client": dict(self._data_count_by_client),
-            "processors_by_client": dict(self._processors_by_client),
-            "closed_by_client": set(self._closed_by_client),
-            "eof_coordinator": self._coordinator.snapshot(),
-        }
+    def _tl_sender(self, destination: str) -> LazyQueue:
+        """Return the thread-local lazy queue for the given destination."""
+        if not hasattr(self._tls, "senders"):
+            self._tls.senders = {}
+        if destination not in self._tls.senders:
+            self._tls.senders[destination] = LazyQueue(MOM_HOST, destination)
+        return self._tls.senders[destination]
 
-    def _restore_snapshot(self) -> None:
-        """Load the latest snapshot from disk and apply it to worker state.
-        Called once at startup before consuming any messages. No-op if no
-        snapshot exists or STATE_DIR is not configured."""
-        if self._last_state is None:
-            return
-        snap = self._last_state.load()
-        if snap is None:
-            return
-        with self._lock:
-            self._data_count_by_client = snap["data_count_by_client"]
-            self._processors_by_client = snap["processors_by_client"]
-            self._closed_by_client = snap["closed_by_client"]
-            self._coordinator.restore(snap["eof_coordinator"])
-        logging.info("aggregation_restored | configuration=%s | id=%s", CONFIGURATION, ID)
+    def _republish_pending(self) -> None:
+        """Re-publish outputs that were stamped but not committed before the last crash."""
+        for entry in self._handler.outbox_to_republish():
+            try:
+                self._tl_sender(entry.destination).send(entry.body)
+            except Exception:
+                logging.exception(
+                    "aggregation_republish_error | id=%s | destination=%s",
+                    ID, entry.destination,
+                )
 
-    def _snapshot(self) -> None:
-        """Unconditionally persist current state to disk and reset the message
-        counter. Called on upstream EOF (important state boundary) and by
-        _maybe_snapshot when the interval is reached."""
-        if self._last_state is None:
-            return
-        self._msg_count = 0
-        with self._lock:
-            snap = self._build_snapshot()
-        try:
-            self._last_state.save(snap)
-        except Exception:
-            logging.exception(
-                "aggregation_snapshot_error | configuration=%s | id=%s", CONFIGURATION, ID
-            )
-
-    def _maybe_snapshot(self) -> None:
-        """Increment the message counter and trigger a snapshot every
-        SNAPSHOT_INTERVAL DATA messages. No-op if STATE_DIR is not set."""
-        if self._last_state is None:
-            return
-        self._msg_count += 1
-        if self._msg_count >= SNAPSHOT_INTERVAL:
-            self._snapshot()
-
-    # ---------- helpers ----------
+    # ---------- packet helpers ----------
 
     def _packet(self, msg_type, client_id, payload):
         return self._internal_protocol.create_packet(
@@ -135,95 +116,103 @@ class AggregatorWorker:
             ControlMessage(sender_id=ID, expected_total=expected_total, processed_count=0)
         )
 
-    def _do_broadcast(self, action, control_senders):
-        if action.sleep_before > 0:
-            time.sleep(action.sleep_before)
-        for qname in action.queue_names:
-            control_senders[qname].send(action.message)
-
-    def _processor_for_client(self, client_id):
-        return self._processors_by_client.setdefault(
-            client_id, create_aggregator_processor(CONFIGURATION)
-        )
-
-    def _new_control_senders(self):
-        return {
-            self._coordinator.control_queue_for(i): LazyQueue(
-                MOM_HOST, self._coordinator.control_queue_for(i)
-            )
-            for i in range(AGGREGATION_AMOUNT)
-        }
-
-    def _emit_results(self, client_id, processor, data_count, output_queue):
-        payloads = processor.results() if processor is not None else []
-        for payload in payloads:
-            output_queue.send(self._packet(MessageType.DATA, client_id, payload))
-        output_queue.send(
-            self._packet(MessageType.EOF, client_id, self._eof_payload(len(payloads)))
-        )
+    def _build_result_outputs(self, client_id: int, results: list, data_count: int) -> list:
+        """Build [(destination, bytes)] for emitting aggregated results downstream."""
+        outputs = [
+            (OUTPUT_QUEUE, self._packet(MessageType.DATA, client_id, p))
+            for p in results
+        ]
+        outputs.append((OUTPUT_QUEUE, self._packet(
+            MessageType.EOF, client_id, self._eof_payload(len(results))
+        )))
         logging.info(
             "aggregation_emit | configuration=%s | id=%s | client_id=%s | "
             "input_data=%s | results=%s",
-            CONFIGURATION, ID, client_id, data_count, len(payloads),
+            CONFIGURATION, ID, client_id, data_count, len(results),
         )
+        return outputs
 
     # ---------- data path ----------
 
-    def _handle_data(self, client_id, payload):
-        with self._lock:
-            if client_id in self._closed_by_client:
-                return
-            self._processor_for_client(client_id).accept(payload)
-            self._data_count_by_client[client_id] = (
-                self._data_count_by_client.get(client_id, 0) + 1
-            )
-            data_count = self._data_count_by_client[client_id]
-        if should_log_progress(data_count):
-            logging.info(
-                "aggregation_data | configuration=%s | id=%s | client_id=%s | "
-                "data_count=%s | payload_bytes=%s",
-                CONFIGURATION, ID, client_id, data_count, len(payload),
-            )
-
-    def _handle_upstream_eof(self, client_id, payload, response_queue, output_queue):
-        ctrl = self._control_serializer.deserialize(payload)
-        with self._lock:
-            if client_id in self._closed_by_client:
-                return
-            count = self._data_count_by_client.get(client_id, 0)
-            action = self._coordinator.on_upstream_eof(
-                client_id, ctrl.expected_total, count, 0
-            )
-        if action is None:
-            return
-        logging.info(
-            "aggregation_upstream_eof | configuration=%s | id=%s | client_id=%s | "
-            "data_count=%s | expected_total=%s",
-            CONFIGURATION, ID, client_id, count, ctrl.expected_total,
-        )
-        if isinstance(action, SendAnswerAction):
-            response_queue.send(action.message)
-        elif isinstance(action, FlushAction):
-            # N==1 shortcut: flush directly from data thread
-            with self._lock:
-                processor = self._processors_by_client.pop(client_id, None)
-                data_count = self._data_count_by_client.pop(client_id, 0)
-                self._closed_by_client.add(client_id)
-            self._emit_results(client_id, processor, data_count, output_queue)
-
-    def _process_data_message(self, message, ack, nack, response_queue, output_queue):
+    def _process_data_message(self, message, ack, nack):
         try:
-            msg_type, client_id, payload = self._internal_protocol.unpack_packet(message)
+            msg_type, client_id, sender_id, seq, payload = (
+                self._internal_protocol.unpack_addressed_packet(message)
+            )
+            msg_id = f"d:{sender_id}:{client_id}:{seq}"
+
             if msg_type == MessageType.DATA:
-                self._handle_data(client_id, payload)
+                def bfn(_pl):
+                    return AggregatorState.data_change(client_id, _pl), []
+
+                with self._lock:
+                    instruction = self._handler.handle(
+                        msg_id, client_id, sender_id, seq, payload, bfn
+                    )
+                # DATA has no outputs; commit immediately.
+                with self._lock:
+                    self._handler.commit_done(msg_id, client_id, sender_id, seq)
                 ack()
-                self._maybe_snapshot()
+
+                count = self._state.data_count(client_id)
+                if should_log_progress(count):
+                    logging.info(
+                        "aggregation_data | configuration=%s | id=%s | "
+                        "client_id=%s | data_count=%s",
+                        CONFIGURATION, ID, client_id, count,
+                    )
+
             elif msg_type == MessageType.EOF:
-                self._handle_upstream_eof(client_id, payload, response_queue, output_queue)
+                ctrl = self._control_serializer.deserialize(payload)
+
+                with self._lock:
+                    if self._state.is_closed(client_id):
+                        ack()
+                        return
+                    count = self._state.data_count(client_id)
+
+                    def bfn(_pl):
+                        # on_upstream_eof is idempotent for flush_order mode: the second call
+                        # (from apply_change on WAL replay) returns None because client_id is
+                        # already in _seen_eof, leaving coordinator state unchanged.
+                        action = self._coordinator.on_upstream_eof(
+                            client_id, ctrl.expected_total, count, 0
+                        )
+                        eof_change = AggregatorState.coordinator_upstream_eof_change(
+                            client_id, ctrl.expected_total, count, 0
+                        )
+                        if isinstance(action, SendAnswerAction):
+                            # N>1: report to leader; leader accumulates and broadcasts FLUSH_ORDER.
+                            return eof_change, [(action.queue_name, action.message)]
+                        if isinstance(action, FlushAction):
+                            # N=1 shortcut: no coordination needed, flush directly.
+                            results = self._state.results_for(client_id)
+                            outputs = self._build_result_outputs(client_id, results, count)
+                            compound = AggregatorState.compound_change(
+                                eof_change, AggregatorState.close_change(client_id)
+                            )
+                            return compound, outputs
+                        # None: duplicate (already in _seen_eof after apply_change replay).
+                        return eof_change, []
+
+                    instruction = self._handler.handle(
+                        msg_id, client_id, sender_id, seq, payload, bfn
+                    )
+
+                for entry in instruction.outputs:
+                    self._tl_sender(entry.destination).send(entry.body)
+                with self._lock:
+                    self._handler.commit_done(msg_id, client_id, sender_id, seq)
                 ack()
-                self._snapshot()
+                logging.info(
+                    "aggregation_upstream_eof | configuration=%s | id=%s | "
+                    "client_id=%s | data_count=%s | expected_total=%s",
+                    CONFIGURATION, ID, client_id, count, ctrl.expected_total,
+                )
+
             else:
                 raise ValueError(f"unsupported aggregator message type: {msg_type}")
+
         except Exception:
             logging.exception(
                 "aggregation_data_error | configuration=%s | id=%s", CONFIGURATION, ID
@@ -232,7 +221,7 @@ class AggregatorWorker:
 
     # ---------- control path ----------
 
-    def _handle_control(self, message, ack, nack, response_sender, output_queue):
+    def _handle_control(self, message, ack, nack):
         try:
             msg_type, client_id, ctrl = self._coordinator.parse_message(message)
         except Exception:
@@ -243,62 +232,81 @@ class AggregatorWorker:
             nack()
             return
 
-        processor = data_count = None
-        with self._lock:
-            count = self._data_count_by_client.get(client_id, 0)
-            action = self._coordinator.process_control_message(
-                msg_type, client_id, ctrl, count, 0
+        if msg_type != MessageType.FLUSH_ORDER:
+            logging.warning(
+                "aggregation_unexpected_control_type | id=%s | msg_type=%s | client_id=%s",
+                ID, msg_type, client_id,
             )
-            if isinstance(action, FlushAction):
-                if client_id in self._closed_by_client:
-                    ack()
-                    return
-                processor = self._processors_by_client.pop(client_id, None)
-                data_count = self._data_count_by_client.pop(client_id, 0)
-                self._closed_by_client.add(client_id)
-                self._coordinator.cleanup_client(client_id)
-
-        if action is None:
             ack()
             return
-        if isinstance(action, SendAnswerAction):
-            response_sender.send(action.message)
-            ack()
-        elif isinstance(action, FlushAction):
-            self._emit_results(client_id, processor, data_count, output_queue)
-            response_sender.send(self._coordinator.build_flush_ack(client_id, 0))
-            ack()
-        else:
-            logging.warning(
-                "aggregation_unexpected_control_action | id=%s | action=%s", ID, action
+
+        # In flush_order mode the leader is fixed (LEADER_ID=0) and ignores FLUSH_ORDER.
+        if ID == LEADER_ID:
+            logging.info(
+                "aggregation_flush_order_ignored_by_leader | id=%s | client_id=%s",
+                ID, client_id,
             )
             ack()
+            return
+
+        # Non-leader: flush results and send FLUSH_ACK to the leader.
+        # seq=client_id is unique: at most one FLUSH_ORDER per (client, leader) pair.
+        sender_id = ctrl.sender_id
+        seq = client_id
+        msg_id = f"fo:{client_id}:{sender_id}"
+
+        try:
+            with self._lock:
+                if self._state.is_closed(client_id):
+                    ack()
+                    return
+
+                def bfn(_pl):
+                    # _on_flush_order is pure read (no coordinator state mutation).
+                    results = self._state.results_for(client_id)
+                    data_count = self._state.data_count(client_id)
+                    outputs = self._build_result_outputs(client_id, results, data_count)
+                    flush_ack_msg = self._coordinator.build_flush_ack(client_id, 0)
+                    flush_ack_dest = self._coordinator.response_queue_for(LEADER_ID)
+                    compound = AggregatorState.compound_change(
+                        AggregatorState.coordinator_cleanup_change(client_id),
+                        AggregatorState.close_change(client_id),
+                    )
+                    return compound, outputs + [(flush_ack_dest, flush_ack_msg)]
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, sender_id, seq, message, bfn
+                )
+
+            for entry in instruction.outputs:
+                self._tl_sender(entry.destination).send(entry.body)
+            with self._lock:
+                self._handler.commit_done(msg_id, client_id, sender_id, seq)
+            ack()
+
+        except Exception:
+            logging.exception(
+                "aggregation_control_error | configuration=%s | id=%s | client_id=%s",
+                CONFIGURATION, ID, client_id,
+            )
+            nack()
 
     def _start_control_consumer(self):
-        # Assign before the _stopped check so handle_sigterm can always reach this consumer.
         control_consumer = MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, self._coordinator.my_control_queue()
         )
         self.control_consumer = control_consumer
-        response_sender = MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST, self._coordinator.response_queue_for(LEADER_ID)
-        )
-        output_queue = MessageMiddlewareQueueRabbitMQ(MOM_HOST, OUTPUT_QUEUE)
         try:
             if not self._stopped:
                 control_consumer.start_consuming(
-                    lambda msg, ack, nack: self._handle_control(
-                        msg, ack, nack, response_sender, output_queue
-                    )
+                    lambda msg, ack, nack: self._handle_control(msg, ack, nack)
                 )
         finally:
-            response_sender.close()
-            output_queue.close()
             control_consumer.close()
 
-    # ---------- response path (leader only) ----------
+    # ---------- response path (leader only in flush_order mode) ----------
 
-    def _handle_response(self, message, ack, nack, control_senders, output_queue):
+    def _handle_response(self, message, ack, nack):
         try:
             msg_type, client_id, ctrl = self._coordinator.parse_message(message)
         except Exception:
@@ -309,51 +317,98 @@ class AggregatorWorker:
             nack()
             return
 
-        processor = data_count = None
-        with self._lock:
-            action = self._coordinator.process_control_message(msg_type, client_id, ctrl)
-            if isinstance(action, FlushAction) and action.is_leader:
-                if client_id in self._closed_by_client:
-                    ack()
-                    return
-                processor = self._processors_by_client.pop(client_id, None)
-                data_count = self._data_count_by_client.pop(client_id, 0)
-                self._closed_by_client.add(client_id)
+        if msg_type == MessageType.PROCESSED_ANSWER:
+            # Direct coordinator call (not via PersistentStateHandler).
+            # Limitation: if the leader crashes after acking but before snapshotting,
+            # the accumulated responder/processed state is lost.  Non-leaders' messages
+            # are redelivered by RabbitMQ and rebuild the state on the next run.
+            with self._lock:
+                action = self._coordinator.process_control_message(msg_type, client_id, ctrl)
+            if action is None:
+                ack()
+                return
+            if isinstance(action, BroadcastAction):
+                if action.sleep_before > 0:
+                    time.sleep(action.sleep_before)
+                for qname in action.queue_names:
+                    self._tl_sender(qname).send(action.message)
+                ack()
+            else:
+                logging.warning(
+                    "aggregation_unexpected_response_action | id=%s | action=%s", ID, action
+                )
+                ack()
 
-        if action is None:
-            ack()
-            return
-        if isinstance(action, BroadcastAction):
-            self._do_broadcast(action, control_senders)
-            ack()
-        elif isinstance(action, FlushAction) and action.is_leader:
-            self._emit_results(client_id, processor, data_count, output_queue)
-            ack()
+        elif msg_type == MessageType.FLUSH_ACK:
+            # Via PersistentStateHandler so the close_change is WAL-tracked.
+            # business_fn uses read-only coordinator accessors to predict whether this is
+            # the last FLUSH_ACK without calling the non-idempotent process_control_message.
+            # The actual coordinator mutation happens inside apply_change (single call).
+            sender_id = ctrl.sender_id
+            seq = client_id  # unique: at most one FLUSH_ACK per (client, non-leader) pair
+            msg_id = f"fa:{client_id}:{sender_id}"
+
+            try:
+                with self._lock:
+                    if self._state.is_closed(client_id):
+                        ack()
+                        return
+
+                    already = self._coordinator.has_flush_ack(client_id, ctrl.sender_id)
+                    new_ack_count = self._coordinator.flush_ack_count(client_id) + (
+                        0 if already else 1
+                    )
+
+                    def bfn(_pl):
+                        ack_change = AggregatorState.coordinator_msg_change(
+                            MessageType.FLUSH_ACK, client_id, ctrl.sender_id,
+                            ctrl.expected_total, ctrl.processed_count,
+                        )
+                        if new_ack_count >= AGGREGATION_AMOUNT - 1:
+                            # Last FLUSH_ACK received — leader emits results.
+                            results = self._state.results_for(client_id)
+                            data_count = self._state.data_count(client_id)
+                            outputs = self._build_result_outputs(client_id, results, data_count)
+                            compound = AggregatorState.compound_change(
+                                ack_change, AggregatorState.close_change(client_id)
+                            )
+                            return compound, outputs
+                        return ack_change, []
+
+                    instruction = self._handler.handle(
+                        msg_id, client_id, sender_id, seq, message, bfn
+                    )
+
+                for entry in instruction.outputs:
+                    self._tl_sender(entry.destination).send(entry.body)
+                with self._lock:
+                    self._handler.commit_done(msg_id, client_id, sender_id, seq)
+                ack()
+
+            except Exception:
+                logging.exception(
+                    "aggregation_flush_ack_error | configuration=%s | id=%s | client_id=%s",
+                    CONFIGURATION, ID, client_id,
+                )
+                nack()
+
         else:
             logging.warning(
-                "aggregation_unexpected_response_action | id=%s | action=%s", ID, action
+                "aggregation_unexpected_response_type | id=%s | msg_type=%s", ID, msg_type
             )
             ack()
 
     def _start_response_consumer(self):
-        # Assign before the _stopped check so handle_sigterm can always reach this consumer.
         response_consumer = MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, self._coordinator.my_response_queue()
         )
         self.response_consumer = response_consumer
-        control_senders = self._new_control_senders()
-        output_queue = MessageMiddlewareQueueRabbitMQ(MOM_HOST, OUTPUT_QUEUE)
         try:
             if not self._stopped:
                 response_consumer.start_consuming(
-                    lambda msg, ack, nack: self._handle_response(
-                        msg, ack, nack, control_senders, output_queue
-                    )
+                    lambda msg, ack, nack: self._handle_response(msg, ack, nack)
                 )
         finally:
-            for q in control_senders.values():
-                q.close()
-            output_queue.close()
             response_consumer.close()
 
     # ---------- lifecycle ----------
@@ -371,24 +426,15 @@ class AggregatorWorker:
             self.response_thread = threading.Thread(target=self._start_response_consumer)
             self.response_thread.start()
 
-        # Data-thread connections: response_queue for EOF reports, output for N==1 flush.
-        data_response = MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST, self._coordinator.response_queue_for(LEADER_ID)
-        )
-        data_output = MessageMiddlewareQueueRabbitMQ(MOM_HOST, OUTPUT_QUEUE)
         self._input_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{ID}"]
         )
         try:
             if not self._stopped:
                 self._input_exchange.start_consuming(
-                    lambda msg, ack, nack: self._process_data_message(
-                        msg, ack, nack, data_response, data_output
-                    )
+                    lambda msg, ack, nack: self._process_data_message(msg, ack, nack)
                 )
         finally:
-            data_response.close()
-            data_output.close()
             self.handle_sigterm()
             if self.control_thread is not None:
                 self.control_thread.join(timeout=5)
