@@ -187,11 +187,12 @@ class FilterWorker:
                     MOM_HOST, FILTER_Q1_QUEUE
                 )
             if USD_ENABLE_Q2:
-                output_queues[SUM_Q2_OUTPUT] = middleware.ShardedByClientPublisher(
+                output_queues[SUM_Q2_OUTPUT] = middleware.ShardedPublisher(
                     MOM_HOST,
                     SUM_Q2_EXCHANGE,
                     SUM_Q2_ROUTING_PREFIX,
                     SUM_Q2_AMOUNT,
+                    key_fn=middleware.body_digest_key,
                 )
             if USD_ENABLE_DATE:
                 output_queues[FILTER_DATE_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
@@ -216,11 +217,12 @@ class FilterWorker:
                         )
                     )
             if DATE_ENABLE_Q3:
-                output_queues[SUM_Q3_QUEUE] = middleware.ShardedByClientPublisher(
+                output_queues[SUM_Q3_QUEUE] = middleware.ShardedPublisher(
                     MOM_HOST,
                     SUM_Q3_EXCHANGE,
                     SUM_Q3_ROUTING_PREFIX,
                     SUM_Q3_AMOUNT,
+                    key_fn=middleware.body_digest_key,
                 )
                 if Q3_CANDIDATES_EXCHANGE and Q3_BARRIER_AMOUNT > 1:
                     output_queues[Q3_CANDIDATES_QUEUE] = (

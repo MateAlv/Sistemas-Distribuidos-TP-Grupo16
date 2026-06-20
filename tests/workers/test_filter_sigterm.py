@@ -55,6 +55,7 @@ def _setup_filter(pika_env, monkeypatch, configuration="USD"):
     monkeypatch.setattr(module.middleware, "MessageMiddlewareQueueRabbitMQ", factory)
     monkeypatch.setattr(module.middleware, "MessageMiddlewareExchangeRabbitMQ", factory)
     monkeypatch.setattr(module.middleware, "ShardedByClientPublisher", factory)
+    monkeypatch.setattr(module.middleware, "ShardedPublisher", factory)
     return module
 
 
