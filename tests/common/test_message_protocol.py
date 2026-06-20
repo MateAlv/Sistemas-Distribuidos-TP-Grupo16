@@ -73,6 +73,36 @@ def test_internal_protocol_header():
     assert res_payload == payload
 
 
+def test_internal_protocol_addressed_header():
+    client_id = uuid.uuid4()
+    payload = b"test_payload"
+    msg_type = 1
+    sender_id = 7
+    seq = 42
+
+    packet = InternalProtocol.create_addressed_packet(
+        msg_type,
+        client_id.bytes,
+        sender_id,
+        seq,
+        payload,
+    )
+    res_type, res_id, res_sender_id, res_seq, res_payload = (
+        InternalProtocol.unpack_addressed_packet(packet)
+    )
+
+    assert res_type == msg_type
+    assert res_id == int(client_id)
+    assert res_sender_id == sender_id
+    assert res_seq == seq
+    assert res_payload == payload
+
+
+def test_internal_protocol_addressed_header_keeps_legacy_size():
+    assert InternalProtocol.HEADER_SIZE == 17
+    assert InternalProtocol.ADDRESSED_HEADER_SIZE == 25
+
+
 def test_file_eof_serialization_integrity():
     eof = FileEof(
         rel_path="input/LI-Small_Trans.csv",
