@@ -13,6 +13,7 @@ from common.message_protocol.internal import (
     TransactionSerializer,
 )
 from common.message_protocol.internal.common import MessageType
+from common.routing import queue_name_for_worker
 
 
 ID = int(os.environ.get("ID", "0"))
@@ -113,13 +114,13 @@ class Q3BarrierWorker:
             exchange_name=Q3_AVERAGES_EXCHANGE,
             routing_prefix=Q3_AVERAGES_ROUTING_PREFIX,
             fallback_queue=AVERAGES_QUEUE,
-            queue_name=f"{Q3_AVERAGES_ROUTING_PREFIX}_{ID}",
+            queue_name=queue_name_for_worker(Q3_AVERAGES_ROUTING_PREFIX, ID),
         )
         self.candidates_input = self._build_input(
             exchange_name=Q3_CANDIDATES_EXCHANGE,
             routing_prefix=Q3_CANDIDATES_ROUTING_PREFIX,
             fallback_queue=CANDIDATES_QUEUE,
-            queue_name=f"{Q3_CANDIDATES_ROUTING_PREFIX}_{ID}",
+            queue_name=queue_name_for_worker(Q3_CANDIDATES_ROUTING_PREFIX, ID),
         )
         self.averages_output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
@@ -154,7 +155,7 @@ class Q3BarrierWorker:
             return middleware.MessageMiddlewareExchangeRabbitMQ(
                 MOM_HOST,
                 exchange_name,
-                routing_keys=[f"{routing_prefix}_{ID}"],
+                routing_keys=[queue_name_for_worker(routing_prefix, ID)],
                 queue_name=queue_name,
                 exclusive=False,
             )

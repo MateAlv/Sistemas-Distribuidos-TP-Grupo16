@@ -23,6 +23,7 @@ from common.message_protocol.internal.control_message_serializer import (
     ControlMessageSerializer,
 )
 from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
+from common.routing import queue_name_for_worker
 
 
 ID = int(os.environ["ID"])
@@ -80,7 +81,7 @@ class Q4JoinerWorker:
         self._blocks_emitted = 0
 
     def _input_routing_key(self) -> str:
-        return f"{Q4_JOINER_ROUTING_PREFIX}_{ID}"
+        return queue_name_for_worker(Q4_JOINER_ROUTING_PREFIX, ID)
 
     def _new_pair_reducer_output(self):
         return MessageMiddlewareExchangeRabbitMQ(

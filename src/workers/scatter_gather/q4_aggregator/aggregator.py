@@ -18,6 +18,7 @@ from common.message_protocol.internal.control_message_serializer import (
     ControlMessageSerializer,
 )
 from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
+from common.routing import queue_name_for_worker
 
 
 ID = int(os.environ["ID"])
@@ -73,7 +74,7 @@ class Q4AggregatorWorker:
         self._stopped = False
 
     def _input_routing_key(self) -> str:
-        return f"{Q4_AGGREGATOR_ROUTING_PREFIX}_{ID}"
+        return queue_name_for_worker(Q4_AGGREGATOR_ROUTING_PREFIX, ID)
 
     def _new_account_deduper_output(self):
         return MessageMiddlewareExchangeRabbitMQ(

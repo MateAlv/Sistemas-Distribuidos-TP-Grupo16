@@ -33,6 +33,7 @@ from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
     MessageMiddlewareQueueRabbitMQ,
 )
+from common.routing import queue_name_for_worker
 
 
 ID = int(os.environ["ID"])
@@ -106,8 +107,8 @@ class Q4FilterWorker:
             return MessageMiddlewareExchangeRabbitMQ(
                 MOM_HOST,
                 INPUT_EXCHANGE,
-                [f"{INPUT_ROUTING_PREFIX}_{ID}"],
-                queue_name=f"{INPUT_ROUTING_PREFIX}_{ID}",
+                [queue_name_for_worker(INPUT_ROUTING_PREFIX, ID)],
+                queue_name=queue_name_for_worker(INPUT_ROUTING_PREFIX, ID),
                 exclusive=False,
             )
         return MessageMiddlewareQueueRabbitMQ(
