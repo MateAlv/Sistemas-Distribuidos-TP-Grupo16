@@ -155,6 +155,15 @@ class AggregatorState:
         # Non-leader cleanup after FlushAction(is_leader=False).
         return {"type": "coordinator_cleanup", "client_id": client_id}
 
+    @staticmethod
+    def compound_change(*changes: dict) -> dict:
+        # Bundle multiple change dicts into one so PersistentStateHandler sees a
+        # single change per message (its one-change-per-handle() invariant).
+        return {"type": "compound", "changes": list(changes)}
+
+    def is_closed(self, client_id: int) -> bool:
+        return client_id in self._closed_by_client
+
     def results_for(self, client_id: int) -> list[bytes]:
         # Aggregated outputs to emit at EOF; read live, before the close drops
         # the processor.
@@ -186,6 +195,10 @@ class AggregatorState:
     def apply_change(self, change: dict) -> None:
         # Single mutation path, run live and on replay; dispatch by change kind.
         kind = change["type"]
+        if kind == "compound":
+            for sub in change["changes"]:
+                self.apply_change(sub)
+            return
         client_id = change["client_id"]
         if kind == "data":
             self._apply_data(client_id, change)

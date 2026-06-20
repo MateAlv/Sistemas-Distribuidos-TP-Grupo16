@@ -95,6 +95,7 @@ class FilterQ5UsdWorker:
         self.lock = threading.Lock()
         self.processed_by_client: dict[int, int] = {}
         self.forwarded_by_client: dict[int, int] = {}
+        self._agg_seq_by_client: dict[int, int] = {}
 
         self.control_consumer: MessageMiddlewareQueueRabbitMQ | None = None
         self.response_consumer: MessageMiddlewareQueueRabbitMQ | None = None
@@ -158,10 +159,19 @@ class FilterQ5UsdWorker:
         normalized = date[:10].replace("/", "-")
         return START_DATE <= normalized <= END_DATE
 
-    def _packet(self, msg_type: MessageType, client_id: int, payload: bytes) -> bytes:
-        return self._proto.create_packet(
+    def _next_agg_seq(self, client_id: int) -> int:
+        seq = self._agg_seq_by_client.get(client_id, 0)
+        self._agg_seq_by_client[client_id] = (seq + 1) & 0xFFFFFFFF
+        return seq
+
+    def _addressed_packet(
+        self, msg_type: MessageType, client_id: int, seq: int, payload: bytes
+    ) -> bytes:
+        return self._proto.create_addressed_packet(
             msg_type=msg_type,
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            sender_id=ID,
+            seq=seq,
             payload=payload,
         )
 
@@ -172,16 +182,18 @@ class FilterQ5UsdWorker:
 
     def _forward_transaction(self, payload: bytes, client_id: int):
         shard = client_id % AGGREGATION_AMOUNT
+        seq = self._next_agg_seq(client_id)
         self.output_exchanges[shard].send(
-            self._packet(MessageType.DATA, client_id, payload)
+            self._addressed_packet(MessageType.DATA, client_id, seq, payload)
         )
 
     def _forward_eof_to_aggregators(
         self, client_id: int, total_forwarded: int, exchanges
     ):
-        payload = self._eof_payload(total_forwarded)
+        eof_payload = self._eof_payload(total_forwarded)
         for index, exchange in enumerate(exchanges):
-            exchange.send(self._packet(MessageType.EOF, client_id, payload))
+            seq = self._next_agg_seq(client_id)
+            exchange.send(self._addressed_packet(MessageType.EOF, client_id, seq, eof_payload))
             logging.info(
                 "filter_q5_usd_forward_eof | id=%s | client_id=%s | "
                 "agg_index=%s | total_forwarded=%s",
