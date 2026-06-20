@@ -223,6 +223,35 @@ def test_file_ingestor_dual_outputs_and_filter_personal_inputs() -> None:
     assert "TRANSACTION_EXCHANGE" not in filter_q5_format_2_env
 
 
+def test_filter_usd_outputs_to_q1_and_date_personal_inputs() -> None:
+    config = _config({"enabled": False})
+    config["queries"] = ["q1", "q3"]
+    config["workers"]["filters"] = {"usd": 2, "q1": 3, "date": 4}
+    config["workers"]["sums"] = {"q3": 1}
+    config["workers"]["aggregators"] = {"q3": 1}
+    config["workers"]["joiners"] = {"q3": 1}
+
+    services = generate_compose.build_compose(config, expose_ports=False)["services"]
+
+    filter_usd_0_env = _env(services["filter_usd_0"])
+    assert filter_usd_0_env["FILTER_Q1_EXCHANGE"] == "filter_q1_exchange"
+    assert filter_usd_0_env["FILTER_Q1_ROUTING_PREFIX"] == "filter_q1"
+    assert filter_usd_0_env["FILTER_Q1_AMOUNT"] == "3"
+    assert filter_usd_0_env["FILTER_DATE_EXCHANGE"] == "filter_date_exchange"
+    assert filter_usd_0_env["FILTER_DATE_ROUTING_PREFIX"] == "filter_date"
+    assert filter_usd_0_env["FILTER_DATE_AMOUNT"] == "4"
+
+    filter_q1_2_env = _env(services["filter_q1_2"])
+    assert filter_q1_2_env["INPUT_QUEUE"] == "filter_q1_2"
+    assert filter_q1_2_env["INPUT_EXCHANGE"] == "filter_q1_exchange"
+    assert filter_q1_2_env["INPUT_ROUTING_PREFIX"] == "filter_q1"
+
+    filter_date_3_env = _env(services["filter_date_3"])
+    assert filter_date_3_env["INPUT_QUEUE"] == "filter_date_3"
+    assert filter_date_3_env["INPUT_EXCHANGE"] == "filter_date_exchange"
+    assert filter_date_3_env["INPUT_ROUTING_PREFIX"] == "filter_date"
+
+
 @pytest.mark.parametrize(
     ("monitor", "message"),
     [
