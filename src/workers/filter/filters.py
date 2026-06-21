@@ -271,21 +271,14 @@ class FilterWorker:
                     SUM_Q3_AMOUNT,
                     key_fn=middleware.body_digest_key,
                 )
-                if Q3_CANDIDATES_EXCHANGE and Q3_BARRIER_AMOUNT > 1:
-                    output_queues[Q3_CANDIDATES_QUEUE] = (
-                        middleware.ShardedByClientPublisher(
-                            MOM_HOST,
-                            Q3_CANDIDATES_EXCHANGE,
-                            Q3_CANDIDATES_ROUTING_PREFIX,
-                            Q3_BARRIER_AMOUNT,
-                        )
+                output_queues[Q3_CANDIDATES_QUEUE] = (
+                    middleware.ShardedByClientPublisher(
+                        MOM_HOST,
+                        Q3_CANDIDATES_EXCHANGE,
+                        Q3_CANDIDATES_ROUTING_PREFIX,
+                        Q3_BARRIER_AMOUNT,
                     )
-                else:
-                    output_queues[Q3_CANDIDATES_QUEUE] = (
-                        middleware.MessageMiddlewareQueueRabbitMQ(
-                            MOM_HOST, Q3_CANDIDATES_QUEUE
-                        )
-                    )
+                )
         return output_queues
 
     # ─── helpers ─────────────────────────────────────────────────────────────
@@ -317,17 +310,30 @@ class FilterWorker:
                 FILTER_Q5_USD_AMOUNT,
             )
             return
-        if CONFIGURATION != C_USD:
+        if CONFIGURATION == C_USD:
+            if USD_ENABLE_Q1:
+                self._ensure_sharded_output_bindings(
+                    FILTER_Q1_EXCHANGE, FILTER_Q1_ROUTING_PREFIX, FILTER_Q1_AMOUNT
+                )
+            if USD_ENABLE_Q2:
+                self._ensure_sharded_output_bindings(
+                    SUM_Q2_EXCHANGE, SUM_Q2_ROUTING_PREFIX, SUM_Q2_AMOUNT
+                )
+            if USD_ENABLE_DATE:
+                self._ensure_sharded_output_bindings(
+                    FILTER_DATE_EXCHANGE,
+                    FILTER_DATE_ROUTING_PREFIX,
+                    FILTER_DATE_AMOUNT,
+                )
             return
-        if USD_ENABLE_Q1:
+        if CONFIGURATION == C_DATE and DATE_ENABLE_Q3:
             self._ensure_sharded_output_bindings(
-                FILTER_Q1_EXCHANGE, FILTER_Q1_ROUTING_PREFIX, FILTER_Q1_AMOUNT
+                SUM_Q3_EXCHANGE, SUM_Q3_ROUTING_PREFIX, SUM_Q3_AMOUNT
             )
-        if USD_ENABLE_DATE:
             self._ensure_sharded_output_bindings(
-                FILTER_DATE_EXCHANGE,
-                FILTER_DATE_ROUTING_PREFIX,
-                FILTER_DATE_AMOUNT,
+                Q3_CANDIDATES_EXCHANGE,
+                Q3_CANDIDATES_ROUTING_PREFIX,
+                Q3_BARRIER_AMOUNT,
             )
 
     def _cleanup_client(self, client_id):

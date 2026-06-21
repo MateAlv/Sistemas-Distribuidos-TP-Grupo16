@@ -729,8 +729,10 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
             services[f"q3_barrier_{index}"] = q3_barrier_service(
                 index=index,
                 barrier_amount=barrier_amount,
-                averages_queue=JOIN_Q3_RESULTS_QUEUE,
-                candidates_queue=Q3_CANDIDATES_QUEUE,
+                averages_queue=worker_queue_name(Q3_AVERAGES_ROUTING_PREFIX, index),
+                candidates_queue=worker_queue_name(
+                    Q3_CANDIDATES_ROUTING_PREFIX, index
+                ),
                 output_queue=GATEWAY_Q3_QUEUE,
             )
 
@@ -1092,11 +1094,6 @@ def filter_service(
             f"SUM_Q3_AMOUNT={sum_q3_amount}",
             f"SUM_Q3_EXCHANGE={SUM_Q3_EXCHANGE}",
             f"SUM_Q3_ROUTING_PREFIX={SUM_Q3_PREFIX}",
-        ])
-    # Sharded mode: el filter_date publica candidates al exchange con routing
-    # key por client_id en lugar de la queue compartida.
-    if q3_barrier_amount > 1:
-        environment.extend([
             f"Q3_CANDIDATES_EXCHANGE={Q3_CANDIDATES_EXCHANGE}",
             f"Q3_CANDIDATES_ROUTING_PREFIX={Q3_CANDIDATES_ROUTING_PREFIX}",
         ])
@@ -1248,8 +1245,7 @@ def joiner_service(
         f"SUM_AMOUNT={sum_amount}",
         f"SUM_PREFIX={sum_prefix}",
     ]
-    # Sharded Q3: el joiner enruta averages por client_id al barrier shard.
-    if configuration == "Q3" and q3_barrier_amount > 1:
+    if configuration == "Q3":
         environment.extend([
             f"Q3_BARRIER_AMOUNT={q3_barrier_amount}",
             f"Q3_AVERAGES_EXCHANGE={Q3_AVERAGES_EXCHANGE}",
@@ -1279,15 +1275,12 @@ def q3_barrier_service(
         f"Q3_BARRIER_AMOUNT={barrier_amount}",
         "Q3_THRESHOLD_DIVISOR=100",
     ]
-    # Sharded mode: exponer los exchanges y prefijos de routing key. El barrier
-    # creará su queue bindeada al routing key "{prefix}_{ID}".
-    if barrier_amount > 1:
-        environment.extend([
-            f"Q3_AVERAGES_EXCHANGE={Q3_AVERAGES_EXCHANGE}",
-            f"Q3_CANDIDATES_EXCHANGE={Q3_CANDIDATES_EXCHANGE}",
-            f"Q3_AVERAGES_ROUTING_PREFIX={Q3_AVERAGES_ROUTING_PREFIX}",
-            f"Q3_CANDIDATES_ROUTING_PREFIX={Q3_CANDIDATES_ROUTING_PREFIX}",
-        ])
+    environment.extend([
+        f"Q3_AVERAGES_EXCHANGE={Q3_AVERAGES_EXCHANGE}",
+        f"Q3_CANDIDATES_EXCHANGE={Q3_CANDIDATES_EXCHANGE}",
+        f"Q3_AVERAGES_ROUTING_PREFIX={Q3_AVERAGES_ROUTING_PREFIX}",
+        f"Q3_CANDIDATES_ROUTING_PREFIX={Q3_CANDIDATES_ROUTING_PREFIX}",
+    ])
     return base_service(
         "workers/q3_barrier/Dockerfile",
         depends_on=depends_on_rabbitmq(),

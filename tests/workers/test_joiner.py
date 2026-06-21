@@ -13,6 +13,9 @@ os.environ.setdefault("CONFIGURATION", C_Q2)
 os.environ.setdefault("INPUT_QUEUE", "test_join_input")
 os.environ.setdefault("OUTPUT_QUEUE", "test_join_output")
 os.environ.setdefault("AGGREGATION_AMOUNT", "2")
+os.environ.setdefault("Q3_BARRIER_AMOUNT", "1")
+os.environ.setdefault("Q3_AVERAGES_EXCHANGE", "q3_averages_exchange")
+os.environ.setdefault("Q3_AVERAGES_ROUTING_PREFIX", "q3_averages")
 
 
 class _DummyQueue:
@@ -65,6 +68,45 @@ def _make_worker(configuration: str, aggregation_amount: int = 2) -> JoinerWorke
     worker.output_resource = DummyQueue()
     worker.output_queue = worker.output_resource
     return worker
+
+
+def test_q3_joiner_predeclares_average_bindings(monkeypatch):
+    import workers.joiner.joiners as module
+
+    module.CONFIGURATION = "Q3"
+    module.MOM_HOST = "rabbitmq"
+    module.INPUT_QUEUE = "join_q3_queue"
+    module.OUTPUT_QUEUE = "join_q3_results_queue"
+    module.AGGREGATION_AMOUNT = 1
+    module.Q3_BARRIER_AMOUNT = 2
+    module.Q3_AVERAGES_EXCHANGE = "q3_averages_exchange"
+    module.Q3_AVERAGES_ROUTING_PREFIX = "q3_averages"
+
+    calls = []
+    monkeypatch.setattr(module.middleware, "MessageMiddlewareQueueRabbitMQ", _DummyQueue)
+    monkeypatch.setattr(
+        module.middleware,
+        "ShardedByClientPublisher",
+        lambda *args, **kwargs: DummyQueue(),
+    )
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.JoinerWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "rabbitmq",
+            "q3_averages_exchange",
+            {
+                "q3_averages_0": "q3_averages_0",
+                "q3_averages_1": "q3_averages_1",
+            },
+        )
+    ]
 
 
 # --- Q5 ---

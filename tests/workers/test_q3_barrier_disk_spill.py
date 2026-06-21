@@ -45,10 +45,15 @@ class FakeQueue:
 def _import_barrier_module(monkeypatch):
     monkeypatch.setenv("ID", "0")
     monkeypatch.setenv("MOM_HOST", "rabbitmq")
-    monkeypatch.setenv("Q3_AVERAGES_QUEUE", "join_q3_results_queue")
-    monkeypatch.setenv("Q3_CANDIDATES_QUEUE", "q3_candidates_queue")
+    monkeypatch.setenv("Q3_AVERAGES_QUEUE", "q3_averages_0")
+    monkeypatch.setenv("Q3_CANDIDATES_QUEUE", "q3_candidates_0")
     monkeypatch.setenv("GATEWAY_Q3_QUEUE", "gateway_q3_results_queue")
     monkeypatch.setenv("Q3_THRESHOLD_DIVISOR", "100")
+    monkeypatch.setenv("Q3_BARRIER_AMOUNT", "1")
+    monkeypatch.setenv("Q3_AVERAGES_EXCHANGE", "q3_averages_exchange")
+    monkeypatch.setenv("Q3_CANDIDATES_EXCHANGE", "q3_candidates_exchange")
+    monkeypatch.setenv("Q3_AVERAGES_ROUTING_PREFIX", "q3_averages")
+    monkeypatch.setenv("Q3_CANDIDATES_ROUTING_PREFIX", "q3_candidates")
 
     fake_pika = types.SimpleNamespace(
         exceptions=types.SimpleNamespace(
@@ -65,6 +70,9 @@ def _import_barrier_module(monkeypatch):
     module = importlib.import_module("workers.q3_barrier.q3_barrier")
     monkeypatch.setattr(
         module.middleware, "MessageMiddlewareQueueRabbitMQ", FakeQueue
+    )
+    monkeypatch.setattr(
+        module.middleware, "MessageMiddlewareExchangeRabbitMQ", FakeQueue
     )
     return module
 
