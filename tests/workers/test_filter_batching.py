@@ -75,6 +75,9 @@ def _import_filter_module(
     monkeypatch.setenv("FILTER_Q3_QUEUE", "filter_q3_queue")
     monkeypatch.setenv("SCATTER_GATHER_MAPPER_QUEUE", "sg_mapper_queue")
     monkeypatch.setenv("FILTER_Q5_USD_QUEUE", "filter_q5_usd_queue")
+    monkeypatch.setenv("FILTER_Q5_USD_EXCHANGE", "filter_q5_usd_exchange")
+    monkeypatch.setenv("FILTER_Q5_USD_ROUTING_PREFIX", "filter_q5_usd")
+    monkeypatch.setenv("FILTER_Q5_USD_AMOUNT", "2")
     monkeypatch.setenv("SUM_PREFIX", "sum_q3")
     monkeypatch.setenv("SUM_Q3_QUEUE", "sum_q3_queue")
     monkeypatch.setenv("FILTER_AMOUNT", filter_amount)
@@ -273,6 +276,12 @@ def test_q5_filter_batches_wire_and_ach_to_filter_q5_usd(monkeypatch):
     module = _import_filter_module(monkeypatch, configuration="Q5")
     worker = module.FilterWorker()
 
+    q5_output = worker.output_queues["filter_q5_usd_queue"]
+    assert q5_output.exchange_name == "filter_q5_usd_exchange"
+    assert q5_output.routing_key_prefix == "filter_q5_usd"
+    assert q5_output.shard_count == 2
+    assert q5_output.key_fn is module.middleware.body_digest_key
+
     transactions = [
         _tx(1.0, "US Dollar", fmt="Wire"),
         _tx(2.0, "US Dollar", fmt="Credit Card"),  # no pasa filtro Q5
@@ -283,13 +292,35 @@ def test_q5_filter_batches_wire_and_ach_to_filter_q5_usd(monkeypatch):
     assert worker.processed_by_client[99] == 3
     assert worker.forwarded_by_client[99] == 2
 
-    q5_output = worker.output_queues["filter_q5_usd_queue"]
     assert len(q5_output.sent) == 1
 
     _, _, payload = InternalProtocol.unpack_packet(q5_output.sent[0])
     batch_txs = TransactionSerializer.deserialize_batch(payload)
     assert len(batch_txs) == 2
     assert {tx.format for tx in batch_txs} == {"Wire", "ACH"}
+
+
+def test_q5_filter_predeclares_q5_usd_bindings(monkeypatch):
+    module = _import_filter_module(monkeypatch, configuration="Q5")
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.FilterWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "rabbitmq",
+            "filter_q5_usd_exchange",
+            {
+                "filter_q5_usd_0": "filter_q5_usd_0",
+                "filter_q5_usd_1": "filter_q5_usd_1",
+            },
+        )
+    ]
 
 
 def test_date_filter_uses_notebook_q3_timestamp_bounds(monkeypatch):

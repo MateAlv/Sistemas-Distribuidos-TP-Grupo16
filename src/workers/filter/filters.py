@@ -93,6 +93,15 @@ else:
     FILTER_Q1_ROUTING_PREFIX = ""
     FILTER_Q1_AMOUNT = 0
 
+if CONFIGURATION == C_Q5:
+    FILTER_Q5_USD_EXCHANGE = os.environ["FILTER_Q5_USD_EXCHANGE"]
+    FILTER_Q5_USD_ROUTING_PREFIX = os.environ["FILTER_Q5_USD_ROUTING_PREFIX"]
+    FILTER_Q5_USD_AMOUNT = int(os.environ["FILTER_Q5_USD_AMOUNT"])
+else:
+    FILTER_Q5_USD_EXCHANGE = ""
+    FILTER_Q5_USD_ROUTING_PREFIX = ""
+    FILTER_Q5_USD_AMOUNT = 0
+
 if CONFIGURATION == C_USD and USD_ENABLE_Q2:
     SUM_Q2_EXCHANGE = os.environ["SUM_Q2_EXCHANGE"]
     SUM_Q2_ROUTING_PREFIX = os.environ["SUM_Q2_ROUTING_PREFIX"]
@@ -204,8 +213,12 @@ class FilterWorker:
                 MOM_HOST, GATEWAY_QUEUE
             )
         if CONFIGURATION == C_Q5:
-            output_queues[FILTER_Q5_USD_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                MOM_HOST, FILTER_Q5_USD_QUEUE
+            output_queues[FILTER_Q5_USD_QUEUE] = middleware.ShardedPublisher(
+                MOM_HOST,
+                FILTER_Q5_USD_EXCHANGE,
+                FILTER_Q5_USD_ROUTING_PREFIX,
+                FILTER_Q5_USD_AMOUNT,
+                key_fn=middleware.body_digest_key,
             )
         if CONFIGURATION == C_USD:
             if USD_ENABLE_Q1:
@@ -297,6 +310,13 @@ class FilterWorker:
         )
 
     def _ensure_output_bindings(self) -> None:
+        if CONFIGURATION == C_Q5:
+            self._ensure_sharded_output_bindings(
+                FILTER_Q5_USD_EXCHANGE,
+                FILTER_Q5_USD_ROUTING_PREFIX,
+                FILTER_Q5_USD_AMOUNT,
+            )
+            return
         if CONFIGURATION != C_USD:
             return
         if USD_ENABLE_Q1:
