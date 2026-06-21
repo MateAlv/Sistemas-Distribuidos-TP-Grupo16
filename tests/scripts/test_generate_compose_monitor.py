@@ -220,7 +220,15 @@ def test_file_ingestor_dual_outputs_and_filter_personal_inputs() -> None:
     assert filter_q5_format_2_env["INPUT_QUEUE"] == "filter_q5_format_2"
     assert filter_q5_format_2_env["INPUT_EXCHANGE"] == "filter_q5_format_exchange"
     assert filter_q5_format_2_env["INPUT_ROUTING_PREFIX"] == "filter_q5_format"
+    assert filter_q5_format_2_env["FILTER_Q5_USD_EXCHANGE"] == "filter_q5_usd_exchange"
+    assert filter_q5_format_2_env["FILTER_Q5_USD_ROUTING_PREFIX"] == "filter_q5_usd"
+    assert filter_q5_format_2_env["FILTER_Q5_USD_AMOUNT"] == "1"
     assert "TRANSACTION_EXCHANGE" not in filter_q5_format_2_env
+
+    filter_q5_usd_0_env = _env(services["filter_q5_usd_0"])
+    assert filter_q5_usd_0_env["INPUT_QUEUE"] == "filter_q5_usd_0"
+    assert filter_q5_usd_0_env["INPUT_EXCHANGE"] == "filter_q5_usd_exchange"
+    assert filter_q5_usd_0_env["INPUT_ROUTING_PREFIX"] == "filter_q5_usd"
 
 
 def test_filter_usd_outputs_to_q1_and_date_personal_inputs() -> None:

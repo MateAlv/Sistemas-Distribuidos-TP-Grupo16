@@ -30,6 +30,8 @@ FILTER_Q1_EXCHANGE = "filter_q1_exchange"
 FILTER_Q1_ROUTING_PREFIX = "filter_q1"
 FILTER_DATE_EXCHANGE = "filter_date_exchange"
 FILTER_DATE_ROUTING_PREFIX = "filter_date"
+FILTER_Q5_USD_EXCHANGE = "filter_q5_usd_exchange"
+FILTER_Q5_USD_ROUTING_PREFIX = "filter_q5_usd"
 FILTER_USD_QUEUE = "filter_usd_queue"
 FILTER_Q1_QUEUE = "filter_q1_queue"
 FILTER_DATE_QUEUE = "filter_date_queue"
@@ -599,6 +601,7 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 q4_filter_amount=counts["q4_filter"],
                 filter_q1_amount=counts["filter_q1"],
                 filter_date_amount=counts["filter_date"],
+                filter_q5_usd_amount=counts["filter_q5_usd"],
                 sum_q2_amount=counts["sum_q2"],
                 sum_q3_amount=counts["sum_q3"],
             )
@@ -618,6 +621,7 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 q4_filter_amount=counts["q4_filter"],
                 filter_q1_amount=counts["filter_q1"],
                 filter_date_amount=counts["filter_date"],
+                filter_q5_usd_amount=counts["filter_q5_usd"],
                 sum_q2_amount=counts["sum_q2"],
             )
 
@@ -628,7 +632,9 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 index=index,
                 amount=counts["filter_q5_usd"],
                 aggregation_amount=counts["aggregation_q5"],
-                input_queue=FILTER_Q5_USD_QUEUE,
+                input_queue=worker_queue_name(FILTER_Q5_USD_ROUTING_PREFIX, index),
+                input_exchange=FILTER_Q5_USD_EXCHANGE,
+                input_routing_prefix=FILTER_Q5_USD_ROUTING_PREFIX,
             )
 
     if q2_enabled:
@@ -1021,6 +1027,7 @@ def filter_service(
     q4_filter_amount: int = 1,
     filter_q1_amount: int = 1,
     filter_date_amount: int = 1,
+    filter_q5_usd_amount: int = 1,
     sum_q2_amount: int = 1,
     sum_q3_amount: int = 1,
 ) -> dict:
@@ -1074,6 +1081,12 @@ def filter_service(
             f"FILTER_DATE_EXCHANGE={FILTER_DATE_EXCHANGE}",
             f"FILTER_DATE_ROUTING_PREFIX={FILTER_DATE_ROUTING_PREFIX}",
         ])
+    if configuration == "Q5":
+        environment.extend([
+            f"FILTER_Q5_USD_AMOUNT={filter_q5_usd_amount}",
+            f"FILTER_Q5_USD_EXCHANGE={FILTER_Q5_USD_EXCHANGE}",
+            f"FILTER_Q5_USD_ROUTING_PREFIX={FILTER_Q5_USD_ROUTING_PREFIX}",
+        ])
     if "q3" in enabled_queries:
         environment.extend([
             f"SUM_Q3_AMOUNT={sum_q3_amount}",
@@ -1118,7 +1131,12 @@ def rates_service() -> dict:
 
 
 def filter_q5_usd_service(
-    index: int, amount: int, aggregation_amount: int, input_queue: str
+    index: int,
+    amount: int,
+    aggregation_amount: int,
+    input_queue: str,
+    input_exchange: str,
+    input_routing_prefix: str,
 ) -> dict:
     return base_service(
         "workers/filter_q5_usd/Dockerfile",
@@ -1128,7 +1146,9 @@ def filter_q5_usd_service(
             f"AGGREGATION_PREFIX={AGGREGATION_Q5_PREFIX}",
             f"FILTER_Q5_USD_AMOUNT={amount}",
             f"ID={index}",
+            f"INPUT_EXCHANGE={input_exchange}",
             f"INPUT_QUEUE={input_queue}",
+            f"INPUT_ROUTING_PREFIX={input_routing_prefix}",
             f"MOM_HOST={MOM_HOST}",
             "PYTHONUNBUFFERED=1",
             f"RATES_REQUEST_QUEUE={RATES_REQUEST_QUEUE}",

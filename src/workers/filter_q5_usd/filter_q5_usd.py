@@ -15,6 +15,7 @@ from common.message_protocol.internal import InternalProtocol, TransactionSerial
 from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.rates.rates_manager import RatesManager
+from common.routing import queue_name_for_worker
 
 CURRENCY_NAME_TO_ISO = {
     "US Dollar": "USD",
@@ -57,6 +58,8 @@ CURRENCY_NAME_TO_ISO = {
 ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
+INPUT_EXCHANGE = os.environ["INPUT_EXCHANGE"]
+INPUT_ROUTING_PREFIX = os.environ["INPUT_ROUTING_PREFIX"]
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 RATES_REQUEST_QUEUE = os.environ.get("RATES_REQUEST_QUEUE", "rates_requests")
@@ -77,7 +80,13 @@ class FilterQ5UsdWorker:
             mode=MODE,
         )
 
-        self.input_queue = MessageMiddlewareQueueRabbitMQ(MOM_HOST, INPUT_QUEUE)
+        self.input_queue = MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST,
+            INPUT_EXCHANGE,
+            [self._input_routing_key()],
+            queue_name=INPUT_QUEUE,
+            exclusive=False,
+        )
         self.output_exchanges = self._new_output_exchanges()
 
         # Named control queue senders for the main thread (EOF_RECEIVED broadcast).
@@ -130,6 +139,10 @@ class FilterQ5UsdWorker:
         }
 
     # ---------- helpers ----------
+
+    @staticmethod
+    def _input_routing_key() -> str:
+        return queue_name_for_worker(INPUT_ROUTING_PREFIX, ID)
 
     def _load_rates(self):
         with self.rates_lock:
@@ -465,9 +478,11 @@ class FilterQ5UsdWorker:
 
     def start(self):
         logging.info(
-            "filter_q5_usd_start | id=%s | input=%s | aggregation_prefix=%s | "
+            "filter_q5_usd_start | id=%s | input=%s | exchange=%s | routing_key=%s | "
+            "aggregation_prefix=%s | "
             "aggregation_amount=%s | cluster_size=%s | date_range=[%s, %s]",
-            ID, INPUT_QUEUE, AGGREGATION_PREFIX, AGGREGATION_AMOUNT,
+            ID, INPUT_QUEUE, INPUT_EXCHANGE, self._input_routing_key(),
+            AGGREGATION_PREFIX, AGGREGATION_AMOUNT,
             FILTER_Q5_USD_AMOUNT, START_DATE, END_DATE,
         )
 
