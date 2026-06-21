@@ -197,6 +197,42 @@ Variables de ejecución:
 | `CHUNK_LOG_EVERY` | Cada cuantos chunks cliente/gateway loguear progreso. Default: `100`. |
 | `RESULT_LOG_EVERY` | Cada cuantas lineas de resultado gateway->cliente loguear progreso. Default: `100`. |
 
+## Crash test de tolerancia a fallos
+
+El script `scripts/crash_test_aggregator.py` prueba la recuperación del aggregator ante una caída con SIGKILL durante el procesamiento. Levanta el stack, mata el container en el momento justo, lo reinicia y valida que el resultado sea correcto.
+
+**Queries soportadas:** `q2`, `q3`, `q5` (mismo binario de aggregator, distinta configuración).
+
+**Escenarios:**
+
+| Escenario | Descripción |
+|---|---|
+| `smoke` | 1 aggregator. Mata durante DATA. Prueba WAL replay y path N=1 de EOF. |
+| `A` | 2 aggregators. Mata el **no-líder** (agg_1). Prueba recepción de FLUSH_ORDER al reiniciar. |
+| `B` | 2 aggregators. Mata el **líder** (agg_0). Prueba reentrega de FLUSH_ACKs al reiniciar. |
+
+**Uso:**V
+
+```bash
+# smoke — 1 aggregator, kill durante DATA
+venv/bin/python scripts/crash_test_aggregator.py --query q5 --scenario smoke --dataset LI-Small
+venv/bin/python scripts/crash_test_aggregator.py --query q2 --scenario smoke --dataset LI-Small
+venv/bin/python scripts/crash_test_aggregator.py --query q3 --scenario smoke --dataset LI-Small
+
+# A — 2 aggregators, mata el no-líder
+venv/bin/python scripts/crash_test_aggregator.py --query q5 --scenario A --dataset LI-Small
+
+# B — 2 aggregators, mata el líder
+venv/bin/python scripts/crash_test_aggregator.py --query q5 --scenario B --dataset LI-Small
+
+# --keep deja el stack vivo para inspeccionar logs
+venv/bin/python scripts/crash_test_aggregator.py --query q5 --scenario B --dataset LI-Small --keep
+```
+
+Usar `venv/bin/python` (no `python3`): el script llama a `generate_compose.py` que necesita el paquete `yaml` del venv.
+
+Al terminar imprime `✓✓✓ CRASH TEST PASSED` o `✗✗✗ CRASH TEST FAILED` con los logs del container para debuggear.
+
 ## Monitor y recuperación
 
 El sistema incluye réplicas de monitor con heartbeats UDP, elección Bully y
