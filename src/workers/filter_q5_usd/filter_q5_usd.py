@@ -5,9 +5,9 @@ import threading
 import time
 
 from common.eof_coordinator import EofCoordinator, BroadcastAction, FlushAction, SendAnswerAction
+from common.fault_tolerance.handler.action import Action
 from common.fault_tolerance.handler.persistent_state_handler import PersistentStateHandler
 from common.fault_tolerance.inbox import MsgKind
-from common.logging_utils import should_log_progress
 from common.middleware import (
     LazyQueue,
     MessageMiddlewareQueueRabbitMQ,
@@ -168,6 +168,17 @@ class FilterQ5UsdWorker:
                     ID, entry.destination,
                 )
 
+    def _publish_commit_ack(self, instruction, ack) -> bool:
+        if instruction.action is Action.ACK:
+            ack()
+            return False
+        for entry in instruction.outputs:
+            self._tl_sender(entry.destination).send(entry.body)
+        with self._lock:
+            self._handler.commit_done(*instruction.ctx)
+        ack()
+        return True
+
     # ---------- packet helpers ----------
 
     def _load_rates(self):
@@ -249,8 +260,11 @@ class FilterQ5UsdWorker:
 
                 self._load_rates()  # RPC outside the handler lock
 
+                batch_stats = {"processed": 0, "forwarded": 0}
+
                 def bfn(pl):
                     transactions = self._tx_ser.deserialize_batch(pl)
+                    batch_stats["processed"] = len(transactions)
                     if not transactions:
                         return FilterQ5UsdState.data_change(client_id, 0, 0), []
 
@@ -281,6 +295,7 @@ class FilterQ5UsdWorker:
                         outputs.append((dest, pkt))
                         forwarded += 1
 
+                    batch_stats["forwarded"] = forwarded
                     return FilterQ5UsdState.data_change(
                         client_id, len(transactions), forwarded, seq_advance=forwarded
                     ), outputs
@@ -289,18 +304,17 @@ class FilterQ5UsdWorker:
                     instruction = self._handler.handle(
                         msg_id, client_id, sender_id, seq, payload, bfn
                     )
-                for entry in instruction.outputs:
-                    self._tl_sender(entry.destination).send(entry.body)
-                with self._lock:
-                    self._handler.commit_done(msg_id, client_id, sender_id, seq)
-                ack()
+                committed = self._publish_commit_ack(instruction, ack)
 
                 processed = self._state.processed_count(client_id)
-                if should_log_progress(processed):
+                if committed:
                     logging.info(
                         "filter_q5_usd_data_batch | id=%s | client_id=%s | "
+                        "batch_size=%s | forwarded_in_batch=%s | outputs=%s | "
                         "processed_total=%s | forwarded_total=%s",
-                        ID, client_id, processed, self._state.forwarded_count(client_id),
+                        ID, client_id, batch_stats["processed"],
+                        batch_stats["forwarded"], len(instruction.outputs),
+                        processed, self._state.forwarded_count(client_id),
                     )
 
             elif msg_type == MessageType.EOF:
@@ -355,13 +369,9 @@ class FilterQ5UsdWorker:
                     kind=MsgKind.CTRL_UPSTREAM_EOF,
                 )
 
-            for entry in instruction.outputs:
-                self._tl_sender(entry.destination).send(entry.body)
-            with self._lock:
-                self._handler.commit_done(
-                    msg_id, client_id, sender_id, seq, kind=MsgKind.CTRL_UPSTREAM_EOF
-                )
-            ack()
+            committed = self._publish_commit_ack(instruction, ack)
+            if not committed:
+                return
             logging.info(
                 "filter_q5_usd_upstream_eof | id=%s | client_id=%s | expected_total=%s",
                 ID, client_id, ctrl.expected_total,
@@ -451,13 +461,7 @@ class FilterQ5UsdWorker:
                     ack()
                     return
 
-            for entry in instruction.outputs:
-                self._tl_sender(entry.destination).send(entry.body)
-            with self._lock:
-                self._handler.commit_done(
-                    msg_id, client_id, sender_id, seq, kind=kind,
-                )
-            ack()
+            self._publish_commit_ack(instruction, ack)
 
         except Exception:
             logging.exception(
@@ -562,13 +566,7 @@ class FilterQ5UsdWorker:
                         kind=MsgKind.CTRL_FLUSH_ACK,
                     )
 
-                for entry in instruction.outputs:
-                    self._tl_sender(entry.destination).send(entry.body)
-                with self._lock:
-                    self._handler.commit_done(
-                        msg_id, client_id, sender_id, seq, kind=MsgKind.CTRL_FLUSH_ACK
-                    )
-                ack()
+                self._publish_commit_ack(instruction, ack)
 
             else:
                 logging.warning(
