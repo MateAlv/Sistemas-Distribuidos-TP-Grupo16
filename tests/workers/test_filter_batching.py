@@ -193,13 +193,13 @@ def test_usd_filter_q1_and_date_outputs_are_sharded(monkeypatch):
     assert q1_output.exchange_name == "filter_q1_exchange"
     assert q1_output.routing_key_prefix == "filter_q1"
     assert q1_output.shard_count == 3
-    assert q1_output.key_fn is module.middleware.body_digest_key
+    assert q1_output.key_fn is module.middleware.client_id_key
 
     date_output = worker.output_queues["filter_date_queue"]
     assert date_output.exchange_name == "filter_date_exchange"
     assert date_output.routing_key_prefix == "filter_date"
     assert date_output.shard_count == 4
-    assert date_output.key_fn is module.middleware.body_digest_key
+    assert date_output.key_fn is module.middleware.client_id_key
 
     worker._process_data_message(
         _data_packet(7, [_tx(15.0, "US Dollar"), _tx(20.0, "Euro")])
@@ -309,7 +309,20 @@ def test_q5_filter_batches_wire_and_ach_to_filter_q5_usd(monkeypatch):
     assert q5_output.exchange_name == "filter_q5_usd_exchange"
     assert q5_output.routing_key_prefix == "filter_q5_usd"
     assert q5_output.shard_count == 2
-    assert q5_output.key_fn is module.middleware.body_digest_key
+    assert q5_output.key_fn is module.middleware.client_id_key
+    old_packet = InternalProtocol.create_packet(
+        MessageType.DATA,
+        (99).to_bytes(16, byteorder="big"),
+        b"payload",
+    )
+    addressed_packet = InternalProtocol.create_addressed_packet(
+        MessageType.DATA,
+        (99).to_bytes(16, byteorder="big"),
+        sender_id=3,
+        seq=7,
+        payload=b"payload",
+    )
+    assert q5_output.key_fn(old_packet) == q5_output.key_fn(addressed_packet) == 99
 
     transactions = [
         _tx(1.0, "US Dollar", fmt="Wire"),
