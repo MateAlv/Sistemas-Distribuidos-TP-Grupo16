@@ -2,6 +2,8 @@ compose:
   output_file: docker-compose.yaml
   test_output_file: docker-compose.test.yaml
   rabbitmq_ports: true
+  rabbitmq_durable: false
+  rabbitmq_publisher_confirms: false
 
 settings:
   logging_level: INFO

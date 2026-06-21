@@ -8,6 +8,7 @@ from common.message_protocol.internal import (
     TransactionSerializer,
 )
 from common.message_protocol.internal.common import MessageType
+from common.routing import shard_for_key
 
 
 class FakeQueue:
@@ -31,7 +32,7 @@ class FakeExchange(FakeQueue):
     pass
 
 
-def _import_sum_module(monkeypatch):
+def _import_sum_module(monkeypatch, aggregation_amount: str = "1"):
     monkeypatch.setenv("ID", "0")
     monkeypatch.setenv("MOM_HOST", "rabbitmq")
     monkeypatch.setenv("INPUT_QUEUE", "sum_0")
@@ -40,7 +41,7 @@ def _import_sum_module(monkeypatch):
     monkeypatch.setenv("CONFIGURATION", "Q2")
     monkeypatch.setenv("SUM_AMOUNT", "1")
     monkeypatch.setenv("SUM_PREFIX", "sum")
-    monkeypatch.setenv("AGGREGATION_AMOUNT", "1")
+    monkeypatch.setenv("AGGREGATION_AMOUNT", aggregation_amount)
     monkeypatch.setenv("AGGREGATION_PREFIX", "aggregation")
 
     fake_pika = types.SimpleNamespace(
@@ -113,3 +114,11 @@ def test_sum_single_transaction_payload_still_counts_one(monkeypatch):
     worker._handle_data_packet(client_id, payload)
 
     assert worker._processed_by_client[9] == 1
+
+
+def test_sum_aggregation_index_uses_shared_routing(monkeypatch):
+    module = _import_sum_module(monkeypatch, aggregation_amount="5")
+    worker = module.SumWorker()
+    partition_key = "bank=014|account=0001"
+
+    assert worker._aggregation_index(partition_key) == shard_for_key(partition_key, 5)

@@ -10,9 +10,11 @@ from typing import Union
 from common.fault_tolerance._encoding import (
     read_length_prefixed_u16,
     read_length_prefixed_u32,
+    read_uint8,
     read_uint16,
     read_uint32,
 )
+from common.fault_tolerance.inbox.msg_kind import MsgKind
 from common.fault_tolerance.outbox.outbox_entry import OutboxEntry
 from common.fault_tolerance.wal.input_applied import InputApplied
 from common.fault_tolerance.wal.input_done import InputDone
@@ -80,6 +82,7 @@ def decode_input_applied(payload: bytes) -> InputApplied:
     msg_id_bytes, offset = read_length_prefixed_u16(payload, offset)
     client_id, offset = read_uint32(payload, offset)
     sender_id, offset = read_uint32(payload, offset)
+    kind_raw, offset = read_uint8(payload, offset)
     seq, offset = read_uint32(payload, offset)
     state_change_bytes, offset = read_length_prefixed_u32(payload, offset)
     outbox_count, offset = read_uint16(payload, offset)
@@ -97,6 +100,7 @@ def decode_input_applied(payload: bytes) -> InputApplied:
         seq=seq,
         state_change=_decode_json_state_change(state_change_bytes),
         outputs=outputs,
+        kind=MsgKind(kind_raw),
     )
 
 
@@ -105,6 +109,7 @@ def decode_input_done(payload: bytes) -> InputDone:
     msg_id_bytes, offset = read_length_prefixed_u16(payload, offset)
     client_id, offset = read_uint32(payload, offset)
     sender_id, offset = read_uint32(payload, offset)
+    kind_raw, offset = read_uint8(payload, offset)
     seq, offset = read_uint32(payload, offset)
     _ensure_consumed(payload, offset)
     return InputDone(
@@ -112,6 +117,7 @@ def decode_input_done(payload: bytes) -> InputDone:
         client_id=client_id,
         sender_id=sender_id,
         seq=seq,
+        kind=MsgKind(kind_raw),
     )
 
 
