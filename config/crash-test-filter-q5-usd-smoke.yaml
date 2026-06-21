@@ -6,6 +6,7 @@ settings:
   logging_level: INFO
   server_port: 5678
   chunk_max_bytes: 65536
+  filter_output_batch_bytes: 65536
   result_line_max_bytes: 1048576
   connect_timeout_seconds: 30
   io_timeout_seconds: 3600
