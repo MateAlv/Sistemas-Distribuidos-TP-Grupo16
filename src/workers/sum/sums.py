@@ -2,7 +2,6 @@ import logging
 import os
 import threading
 import time
-import zlib
 
 from common import middleware
 from common.constants import C_Q2, C_Q3
@@ -14,7 +13,7 @@ from common.message_protocol.internal.control_message_serializer import ControlM
 from common.message_protocol.internal import InternalProtocol
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 from common.middleware import LazyQueue, MessageMiddlewareQueueRabbitMQ
-from common.routing import queue_name_for_worker
+from common.routing import queue_name_for_worker, shard_for_key
 
 try:
     from processors import create_sum_processor
@@ -115,7 +114,7 @@ class SumWorker:
     # ---------- helpers ----------
 
     def _aggregation_index(self, partition_key: str) -> int:
-        return zlib.crc32(partition_key.encode("utf-8")) % AGGREGATION_AMOUNT
+        return shard_for_key(partition_key, AGGREGATION_AMOUNT)
 
     def _input_routing_key(self) -> str:
         if INPUT_ROUTING_PREFIX is None:
