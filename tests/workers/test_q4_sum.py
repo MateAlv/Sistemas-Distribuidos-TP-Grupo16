@@ -107,6 +107,30 @@ def _eof_counts(worker, output):
     return counts
 
 
+def test_q4_sum_predeclares_joiner_bindings(monkeypatch):
+    module, _ = _load_module(monkeypatch, block_partitions=3)
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.Q4SumWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "mom",
+            "q4_joiner",
+            {
+                "q4_joiner_0": "q4_joiner_0",
+                "q4_joiner_1": "q4_joiner_1",
+                "q4_joiner_2": "q4_joiner_2",
+            },
+        )
+    ]
+
+
 def test_edge_store_aggregates_counts_and_waits_for_all_source_eofs(monkeypatch):
     module, _ = _load_module(monkeypatch, source_amount=2, block_partitions=4)
     worker = module.Q4SumWorker()
