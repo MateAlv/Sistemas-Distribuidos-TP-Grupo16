@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Crash-recovery smoke test for the Q5 aggregator.
+"""Crash-recovery smoke test for the Q2 / Q3 / Q5 aggregator.
 
 Scenarios
 ---------
@@ -16,17 +16,17 @@ Scenarios
 
 Usage
 -----
-  python scripts/crash_test_aggregator.py --scenario smoke
-  python scripts/crash_test_aggregator.py --scenario A
-  python scripts/crash_test_aggregator.py --scenario B
-  python scripts/crash_test_aggregator.py --scenario A --dataset LI-Small --keep
+  python scripts/crash_test_aggregator.py --query q5 --scenario smoke
+  python scripts/crash_test_aggregator.py --query q5 --scenario A
+  python scripts/crash_test_aggregator.py --query q5 --scenario B
+  python scripts/crash_test_aggregator.py --query q2 --scenario smoke --dataset LI-Small
+  python scripts/crash_test_aggregator.py --query q3 --scenario B --dataset LI-Small --keep
 """
 
 import argparse
 import os
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -35,13 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import reference_results as ref  # noqa: E402  (after path insert)
 
-PROJECT = "crash-test-q5"
 COMPOSE_FILE = ROOT / "docker-compose.crash-test.yaml"
-
-# Pattern logged exactly once when the aggregator finishes startup and starts
-# consuming.  Fires regardless of message volume, so it works with small datasets.
-# Format: "aggregation_start | configuration=Q5 | id=<ID> | ..."
-_START_LOG_PREFIX = "aggregation_start | configuration=Q5 | id="
 
 # Seconds to sleep after the start log before killing, so the worker
 # has time to process at least a few messages and write WAL entries.
@@ -53,13 +47,44 @@ TRIGGER_TIMEOUT = 120
 # Seconds to wait for clients after restart.
 CLIENT_TIMEOUT = 300
 
+# ---------------------------------------------------------------------------
+# per-query configuration
+# ---------------------------------------------------------------------------
+
+_QUERY_CFG = {
+    "q2": {
+        "preset":      "q2-test",
+        "config_2agg": "crash-test-q2-2agg.yaml",
+        "container_prefix": "aggregation_q2",
+        "validate_script":  "validate_q2_output.py",
+        "env_dataset_dir":  "Q2_DATASET_DIR",
+        "env_dataset_trans": "Q2_DATASET_TRANS",
+    },
+    "q3": {
+        "preset":      "q3-test",
+        "config_2agg": "crash-test-q3-2agg.yaml",
+        "container_prefix": "aggregation_q3",
+        "validate_script":  "validate_q3_output.py",
+        "env_dataset_dir":  "Q3_DATASET_DIR",
+        "env_dataset_trans": "Q3_DATASET_TRANS",
+    },
+    "q5": {
+        "preset":      "q5-test",
+        "config_2agg": "crash-test-q5-2agg.yaml",
+        "container_prefix": "aggregation_q5",
+        "validate_script":  "validate_q5_output.py",
+        "env_dataset_dir":  "Q5_DATASET_DIR",
+        "env_dataset_trans": "Q5_DATASET_TRANS",
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
-def compose(*args):
-    return ["docker", "compose", "-p", PROJECT, "-f", str(COMPOSE_FILE), *args]
+def compose(project, *args):
+    return ["docker", "compose", "-p", project, "-f", str(COMPOSE_FILE), *args]
 
 
 def run(cmd, check=False, **kw):
@@ -122,11 +147,12 @@ class LogWatcher(threading.Thread):
 # compose lifecycle
 # ---------------------------------------------------------------------------
 
-def generate_compose(scenario: str, dataset: str):
+def generate_compose(scenario: str, dataset: str, query: str):
+    cfg = _QUERY_CFG[query]
     if scenario == "smoke":
         cmd = [
             sys.executable, str(ROOT / "scripts" / "generate_compose.py"),
-            "--preset", "q5-test",
+            "--preset", cfg["preset"],
             "--dataset", dataset,
             "--test-output", str(COMPOSE_FILE),
             "--skip-output",
@@ -134,40 +160,39 @@ def generate_compose(scenario: str, dataset: str):
     else:
         cmd = [
             sys.executable, str(ROOT / "scripts" / "generate_compose.py"),
-            "--config", str(ROOT / "config" / "crash-test-q5-2agg.yaml"),
+            "--config", str(ROOT / "config" / cfg["config_2agg"]),
             "--dataset", dataset,
             "--test-output", str(COMPOSE_FILE),
             "--skip-output",
         ]
-    log(f"Generating compose ({scenario}, dataset={dataset})...")
+    log(f"Generating compose ({query} / {scenario}, dataset={dataset})...")
     run(cmd, check=True)
 
 
-def teardown():
+def teardown(project):
     log("Tearing down stack...")
-    quiet(compose("down", "--volumes", "--remove-orphans"))
-    # also nuke leftover containers by project label
+    quiet(compose(project, "down", "--volumes", "--remove-orphans"))
     ids = subprocess.run(
-        ["docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={PROJECT}"],
+        ["docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={project}"],
         capture_output=True, text=True,
     ).stdout.split()
     if ids:
         quiet(["docker", "rm", "-f", *ids])
 
 
-def build_and_start():
+def build_and_start(project):
     log("Building images and starting stack...")
-    run(compose("up", "--build", "--remove-orphans", "--detach"), check=True)
+    run(compose(project, "up", "--build", "--remove-orphans", "--detach"), check=True)
 
 
-def restart_container(name: str):
+def restart_container(project, name: str):
     log(f"Restarting {name}...")
-    run(compose("up", "--detach", name), check=True)
+    run(compose(project, "up", "--detach", name), check=True)
 
 
-def wait_for_client(timeout: int) -> bool:
+def wait_for_client(project, timeout: int) -> bool:
     log(f"Waiting for client_0 (timeout={timeout}s)...")
-    result = run(compose("wait", "client_0"), timeout=timeout,
+    result = run(compose(project, "wait", "client_0"), timeout=timeout,
                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return result.returncode == 0
 
@@ -183,14 +208,19 @@ def clear_output():
 # validation
 # ---------------------------------------------------------------------------
 
-def validate(dataset: str) -> bool:
+def validate(dataset: str, query: str) -> bool:
+    cfg = _QUERY_CFG[query]
     dataset_dir = ROOT / "data" / "datasets" / dataset
     trans = f"{dataset}_Trans.csv"
 
-    log("Validating Q5 output...")
-    env = {**os.environ, "Q5_DATASET_DIR": str(dataset_dir), "Q5_DATASET_TRANS": trans}
+    log(f"Validating {query.upper()} output...")
+    env = {
+        **os.environ,
+        cfg["env_dataset_dir"]: str(dataset_dir),
+        cfg["env_dataset_trans"]: trans,
+    }
     result = run(
-        [sys.executable, str(ROOT / "scripts" / "validate_q5_output.py")],
+        [sys.executable, str(ROOT / "scripts" / cfg["validate_script"])],
         env=env,
     )
     return result.returncode == 0
@@ -204,29 +234,35 @@ def main():
     args = parse_args()
     scenario = args.scenario
     dataset = args.dataset
+    query = args.query
+
+    cfg = _QUERY_CFG[query]
+    prefix = cfg["container_prefix"]
+    project = f"crash-test-{query}"
 
     # Resolve target container and kill-trigger based on scenario.
     if scenario == "smoke":
-        target = "aggregation_q5_0"   # only one aggregator
+        target = f"{prefix}_0"   # only one aggregator
         kill_trigger_id = "0"
     elif scenario == "A":
-        target = "aggregation_q5_1"   # non-leader
+        target = f"{prefix}_1"   # non-leader
         kill_trigger_id = "1"
     elif scenario == "B":
-        target = "aggregation_q5_0"   # leader
+        target = f"{prefix}_0"   # leader
         kill_trigger_id = "0"
     else:
         die(f"unknown scenario: {scenario}")
 
-    kill_pattern = f"{_START_LOG_PREFIX}{kill_trigger_id}"
+    q_upper = query.upper()
+    kill_pattern = f"aggregation_start | configuration={q_upper} | id={kill_trigger_id}"
 
-    log(f"=== Crash test: scenario={scenario} target={target} dataset={dataset} ===")
+    log(f"=== Crash test: query={query} scenario={scenario} target={target} dataset={dataset} ===")
     print()
 
-    generate_compose(scenario, dataset)
-    teardown()
+    generate_compose(scenario, dataset, query)
+    teardown(project)
     clear_output()
-    build_and_start()
+    build_and_start(project)
 
     # ---- wait for target to finish startup ----
     log(f"Waiting for '{kill_pattern}' in {target} logs...")
@@ -234,7 +270,7 @@ def main():
     watcher.start()
 
     if not watcher.wait_for_match(TRIGGER_TIMEOUT):
-        teardown()
+        teardown(project)
         die(
             f"Timed out after {TRIGGER_TIMEOUT}s waiting for start log in {target}.\n"
             f"  Check 'docker logs {target}' for errors."
@@ -249,48 +285,52 @@ def main():
     log(f"Killing {target} with SIGKILL...")
     result = subprocess.run(["docker", "kill", target], capture_output=True, text=True)
     if result.returncode != 0:
-        teardown()
+        teardown(project)
         die(f"docker kill failed: {result.stderr.strip()}")
 
     time.sleep(1)  # let RabbitMQ detect the disconnect and requeue unACKed messages
 
     # ---- restart ----
-    restart_container(target)
+    restart_container(project, target)
 
     # ---- wait for completion ----
     try:
-        finished = wait_for_client(CLIENT_TIMEOUT)
+        finished = wait_for_client(project, CLIENT_TIMEOUT)
     except subprocess.TimeoutExpired:
         finished = False
 
     if not finished:
         log("WARNING: client_0 did not finish within timeout — dumping tail logs")
-        run(compose("logs", "--tail", "50", target))
-        teardown()
+        run(compose(project, "logs", "--tail", "50", target))
+        teardown(project)
         die(f"client_0 did not finish after crash+restart of {target}")
 
     # ---- validate ----
-    ok = validate(dataset)
+    ok = validate(dataset, query)
 
     if not args.keep:
-        teardown()
+        teardown(project)
     else:
         log(
             f"--keep set. Stack is up. Tear down with:\n"
-            f"  docker compose -p {PROJECT} -f {COMPOSE_FILE} down --volumes --remove-orphans"
+            f"  docker compose -p {project} -f {COMPOSE_FILE} down --volumes --remove-orphans"
         )
 
     print()
     if ok:
-        print(ref.green(f"✓✓✓ CRASH TEST PASSED (scenario={scenario}) ✓✓✓"))
+        print(ref.green(f"✓✓✓ CRASH TEST PASSED (query={query} scenario={scenario}) ✓✓✓"))
         return 0
     else:
-        print(ref.red(f"✗✗✗ CRASH TEST FAILED (scenario={scenario}) ✗✗✗"))
+        print(ref.red(f"✗✗✗ CRASH TEST FAILED (query={query} scenario={scenario}) ✗✗✗"))
         return 1
 
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument(
+        "--query", choices=["q2", "q3", "q5"], required=True,
+        help="Which aggregator to crash-test (q2, q3, or q5)",
+    )
     p.add_argument(
         "--scenario", choices=["smoke", "A", "B"], required=True,
         help="smoke=1 agg kill during data; A=kill non-leader; B=kill leader",
