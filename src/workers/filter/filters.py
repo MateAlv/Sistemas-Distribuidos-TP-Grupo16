@@ -218,7 +218,7 @@ class FilterWorker:
                 FILTER_Q5_USD_EXCHANGE,
                 FILTER_Q5_USD_ROUTING_PREFIX,
                 FILTER_Q5_USD_AMOUNT,
-                key_fn=middleware.body_digest_key,
+                key_fn=middleware.client_id_key,
             )
         if CONFIGURATION == C_USD:
             if USD_ENABLE_Q1:
@@ -227,7 +227,7 @@ class FilterWorker:
                     FILTER_Q1_EXCHANGE,
                     FILTER_Q1_ROUTING_PREFIX,
                     FILTER_Q1_AMOUNT,
-                    key_fn=middleware.body_digest_key,
+                    key_fn=middleware.client_id_key,
                 )
             if USD_ENABLE_Q2:
                 output_queues[SUM_Q2_OUTPUT] = middleware.ShardedPublisher(
@@ -235,7 +235,7 @@ class FilterWorker:
                     SUM_Q2_EXCHANGE,
                     SUM_Q2_ROUTING_PREFIX,
                     SUM_Q2_AMOUNT,
-                    key_fn=middleware.body_digest_key,
+                    key_fn=middleware.client_id_key,
                 )
             if USD_ENABLE_DATE:
                 output_queues[FILTER_DATE_QUEUE] = middleware.ShardedPublisher(
@@ -243,7 +243,7 @@ class FilterWorker:
                     FILTER_DATE_EXCHANGE,
                     FILTER_DATE_ROUTING_PREFIX,
                     FILTER_DATE_AMOUNT,
-                    key_fn=middleware.body_digest_key,
+                    key_fn=middleware.client_id_key,
                 )
         if CONFIGURATION == C_DATE:
             if DATE_ENABLE_Q4:
@@ -269,7 +269,7 @@ class FilterWorker:
                     SUM_Q3_EXCHANGE,
                     SUM_Q3_ROUTING_PREFIX,
                     SUM_Q3_AMOUNT,
-                    key_fn=middleware.body_digest_key,
+                    key_fn=middleware.client_id_key,
                 )
                 output_queues[Q3_CANDIDATES_QUEUE] = (
                     middleware.ShardedByClientPublisher(
