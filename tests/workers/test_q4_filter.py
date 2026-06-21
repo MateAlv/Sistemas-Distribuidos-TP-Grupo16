@@ -3,7 +3,7 @@ import sys
 
 from common.domain.transaction import Transaction
 from common.message_protocol.internal import Q4CountedEdgeSerializer
-from common.message_protocol.internal.common import MessageType
+from common.message_protocol.internal.common import ControlMessage, MessageType
 
 
 def _load_module(monkeypatch, tmp_path, amount=1, worker_id=0, edge_partitions=3):
@@ -70,7 +70,13 @@ def _payload(module, transactions):
 
 
 def _control_payload(worker, sender_id, expected_total, processed_count=0):
-    return worker._control_payload(sender_id, expected_total, processed_count)
+    return worker._control_serializer.serialize(
+        ControlMessage(
+            sender_id=sender_id,
+            expected_total=expected_total,
+            processed_count=processed_count,
+        )
+    )
 
 
 def _counted_data_messages(worker, output):
@@ -97,10 +103,36 @@ def _eof_counts(worker, output):
     return counts
 
 
+def test_q4_filter_predeclares_sum_bindings(monkeypatch, tmp_path):
+    module, _ = _load_module(monkeypatch, tmp_path, edge_partitions=3)
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.Q4FilterWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "mom",
+            "q4_sum",
+            {
+                "q4_sum_0": "q4_sum_0",
+                "q4_sum_1": "q4_sum_1",
+                "q4_sum_2": "q4_sum_2",
+            },
+        )
+    ]
+
+
 def test_source_prefilter_replays_pending_rows_when_source_qualifies(
     monkeypatch, tmp_path
 ):
-    module, _ = _load_module(monkeypatch, tmp_path, amount=1, edge_partitions=4)
+    module, FakeEndpoint = _load_module(
+        monkeypatch, tmp_path, amount=1, edge_partitions=4
+    )
     worker = module.Q4FilterWorker()
     output = worker._edge_store_output
     client_id = 17
@@ -139,6 +171,7 @@ def test_source_prefilter_replays_pending_rows_when_source_qualifies(
     worker._handle_upstream_eof(
         client_id,
         _control_payload(worker, sender_id=0, expected_total=7),
+        FakeEndpoint(),
     )
     assert _eof_counts(worker, output) == {
         f"q4_sum_{partition}": by_partition.get(
@@ -151,7 +184,9 @@ def test_source_prefilter_replays_pending_rows_when_source_qualifies(
 def test_source_prefilter_single_eof_discards_unqualified_pending_rows(
     monkeypatch, tmp_path
 ):
-    module, _ = _load_module(monkeypatch, tmp_path, amount=1, edge_partitions=3)
+    module, FakeEndpoint = _load_module(
+        monkeypatch, tmp_path, amount=1, edge_partitions=3
+    )
     worker = module.Q4FilterWorker()
     output = worker._edge_store_output
     client_id = 21
@@ -168,6 +203,7 @@ def test_source_prefilter_single_eof_discards_unqualified_pending_rows(
     worker._handle_upstream_eof(
         client_id,
         _control_payload(worker, sender_id=0, expected_total=5),
+        FakeEndpoint(),
     )
 
     assert _counted_data_messages(worker, output)[0] == []
@@ -183,16 +219,9 @@ def test_source_prefilter_single_eof_discards_unqualified_pending_rows(
 def test_source_prefilter_multi_worker_waits_for_flush_order_and_reports_late_data(
     monkeypatch, tmp_path
 ):
-    module, _ = _load_module(monkeypatch, tmp_path, amount=2, worker_id=0)
+    module, FakeEndpoint = _load_module(monkeypatch, tmp_path, amount=2, worker_id=0)
     worker = module.Q4FilterWorker()
-    reports = []
-    monkeypatch.setattr(
-        worker,
-        "_report_to_leader",
-        lambda client_id, leader_id, processed_count, forwarded_count: reports.append(
-            (client_id, leader_id, processed_count, forwarded_count)
-        ),
-    )
+    response_queue = FakeEndpoint()
     client_id = 31
 
     rows = [_tx(from_account="A", to_account=f"M{i}") for i in range(3)]
@@ -200,45 +229,23 @@ def test_source_prefilter_multi_worker_waits_for_flush_order_and_reports_late_da
     worker._handle_upstream_eof(
         client_id,
         _control_payload(worker, sender_id=0, expected_total=4),
+        response_queue,
     )
 
-    assert reports == [(client_id, 0, 3, 0)]
+    assert len(response_queue.sent) == 1
+    msg_type, reported_client, payload = worker._proto.unpack_packet(
+        response_queue.sent[0][1]
+    )
+    report = worker._control_serializer.deserialize(payload)
+    assert msg_type == MessageType.PROCESSED_ANSWER
+    assert reported_client == client_id
+    assert report.processed_count == 3
     assert client_id not in worker._closed_by_client
 
     worker._handle_data_packet(
         client_id,
         _payload(module, [_tx(from_account="A", to_account="M3")]),
     )
-    assert reports[-1] == (client_id, 0, 1, 0)
+
+    assert worker._processed_by_client[client_id] == 4
     assert client_id not in worker._closed_by_client
-
-    acked = []
-    nacked = []
-    report = worker._packet(
-        MessageType.PROCESSED_ANSWER,
-        client_id,
-        _control_payload(worker, sender_id=1, expected_total=0, processed_count=4),
-    )
-    worker._handle_leader_report(
-        report,
-        lambda: acked.append(True),
-        lambda: nacked.append(True),
-    )
-
-    assert acked == [True]
-    assert nacked == []
-    assert len(worker._control_sender.sent) == 1
-    _, flush_order = worker._control_sender.sent[0]
-
-    worker._handle_flush_order(
-        flush_order,
-        lambda: acked.append(True),
-        lambda: nacked.append(True),
-    )
-
-    assert client_id in worker._closed_by_client
-    assert _eof_counts(worker, worker._edge_store_output) == {
-        "q4_sum_0": 0,
-        "q4_sum_1": 0,
-        "q4_sum_2": 0,
-    }

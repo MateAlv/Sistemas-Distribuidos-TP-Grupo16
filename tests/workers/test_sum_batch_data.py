@@ -34,7 +34,9 @@ class FakeExchange(FakeQueue):
 def _import_sum_module(monkeypatch):
     monkeypatch.setenv("ID", "0")
     monkeypatch.setenv("MOM_HOST", "rabbitmq")
-    monkeypatch.setenv("INPUT_QUEUE", "sum_input")
+    monkeypatch.setenv("INPUT_QUEUE", "sum_0")
+    monkeypatch.setenv("INPUT_EXCHANGE", "sum_exchange")
+    monkeypatch.setenv("INPUT_ROUTING_PREFIX", "sum")
     monkeypatch.setenv("CONFIGURATION", "Q2")
     monkeypatch.setenv("SUM_AMOUNT", "1")
     monkeypatch.setenv("SUM_PREFIX", "sum")
@@ -97,7 +99,7 @@ def test_sum_processed_count_scales_with_batch_size(monkeypatch):
 
     worker._handle_data_packet(client_id_unpacked, payload)
 
-    assert worker.processed_by_client[client_id] == 3
+    assert worker._processed_by_client[client_id] == 3
 
 
 def test_sum_single_transaction_payload_still_counts_one(monkeypatch):
@@ -110,4 +112,4 @@ def test_sum_single_transaction_payload_still_counts_one(monkeypatch):
     )
     worker._handle_data_packet(client_id, payload)
 
-    assert worker.processed_by_client[9] == 1
+    assert worker._processed_by_client[9] == 1

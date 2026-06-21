@@ -22,7 +22,11 @@ from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import (
     ControlMessageSerializer,
 )
-from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
+from common.middleware.middleware_rabbitmq import (
+    ensure_exchange_queue_bindings,
+    MessageMiddlewareExchangeRabbitMQ,
+)
+from common.routing import queue_name_for_worker
 
 
 ID = int(os.environ["ID"])
@@ -80,13 +84,25 @@ class Q4JoinerWorker:
         self._blocks_emitted = 0
 
     def _input_routing_key(self) -> str:
-        return f"{Q4_JOINER_ROUTING_PREFIX}_{ID}"
+        return queue_name_for_worker(Q4_JOINER_ROUTING_PREFIX, ID)
 
     def _new_pair_reducer_output(self):
         return MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST,
             Q4_AGGREGATOR_EXCHANGE,
             [],
+        )
+
+    def _ensure_output_bindings(self) -> None:
+        ensure_exchange_queue_bindings(
+            MOM_HOST,
+            Q4_AGGREGATOR_EXCHANGE,
+            {
+                queue_name_for_worker(Q4_AGGREGATOR_ROUTING_PREFIX, index): (
+                    queue_name_for_worker(Q4_AGGREGATOR_ROUTING_PREFIX, index)
+                )
+                for index in range(Q4_AGGREGATOR_AMOUNT)
+            },
         )
 
     def _packet(self, msg_type: MessageType, client_id: int, payload: bytes) -> bytes:
@@ -350,6 +366,7 @@ class Q4JoinerWorker:
             nack()
 
     def start(self) -> None:
+        self._ensure_output_bindings()
         logging.info(
             "q4_joiner_start | id=%s | input_exchange=%s | input_key=%s | "
             "sum_amount=%s | pair_reducer_exchange=%s | "

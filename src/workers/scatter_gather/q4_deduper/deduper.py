@@ -20,6 +20,7 @@ from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
     MessageMiddlewareQueueRabbitMQ,
 )
+from common.routing import queue_name_for_worker
 
 
 ID = int(os.environ["ID"])
@@ -93,7 +94,7 @@ class Q4DeduperWorker:
         self._stopped = False
 
     def _input_routing_key(self) -> str:
-        return f"{Q4_DEDUPER_ROUTING_PREFIX}_{ID}"
+        return queue_name_for_worker(Q4_DEDUPER_ROUTING_PREFIX, ID)
 
     def _response_queue_name(self, worker_id: int = 0) -> str:
         return f"{Q4_DEDUPER_RESPONSE_QUEUE_PREFIX}_{worker_id}"
