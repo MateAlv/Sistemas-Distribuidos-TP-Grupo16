@@ -94,6 +94,30 @@ def _eof_counts(worker, output):
     return counts
 
 
+def test_q4_aggregator_predeclares_deduper_bindings(monkeypatch):
+    module, _ = _load_module(monkeypatch, account_partitions=3)
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.Q4AggregatorWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "mom",
+            "q4_deduper",
+            {
+                "q4_deduper_0": "q4_deduper_0",
+                "q4_deduper_1": "q4_deduper_1",
+                "q4_deduper_2": "q4_deduper_2",
+            },
+        )
+    ]
+
+
 def test_pair_reducer_emits_candidates_once_when_pair_reaches_threshold(
     monkeypatch,
 ):

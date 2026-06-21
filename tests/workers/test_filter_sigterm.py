@@ -29,7 +29,9 @@ def _setup_filter(pika_env, monkeypatch, configuration="USD"):
     monkeypatch.setenv("GATEWAY_QUEUE", "gateway_results_queue")
     monkeypatch.setenv("FILTER_DATE_QUEUE", "filter_date_queue")
     monkeypatch.setenv("FILTER_Q1_QUEUE", "filter_q1_queue")
-    monkeypatch.setenv("SUM_Q2_QUEUE", "sum_q2_queue")
+    monkeypatch.setenv("SUM_Q2_EXCHANGE", "sum_q2_exchange")
+    monkeypatch.setenv("SUM_Q2_ROUTING_PREFIX", "sum_q2")
+    monkeypatch.setenv("SUM_Q2_AMOUNT", "1")
     monkeypatch.setenv("FILTER_Q3_QUEUE", "filter_q3_queue")
     monkeypatch.setenv("SCATTER_GATHER_MAPPER_QUEUE", "sg_mapper_queue")
     monkeypatch.setenv("FILTER_Q5_USD_QUEUE", "filter_q5_usd_queue")
@@ -52,6 +54,8 @@ def _setup_filter(pika_env, monkeypatch, configuration="USD"):
 
     monkeypatch.setattr(module.middleware, "MessageMiddlewareQueueRabbitMQ", factory)
     monkeypatch.setattr(module.middleware, "MessageMiddlewareExchangeRabbitMQ", factory)
+    monkeypatch.setattr(module.middleware, "ShardedByClientPublisher", factory)
+    monkeypatch.setattr(module.middleware, "ShardedPublisher", factory)
     return module
 
 

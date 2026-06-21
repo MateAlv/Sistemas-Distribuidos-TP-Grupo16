@@ -2,8 +2,6 @@ import importlib
 import sys
 import types
 
-import pytest
-
 from common.message_protocol.internal.common import ControlMessage, MessageType
 
 
@@ -31,7 +29,9 @@ class FakeExchange(FakeQueue):
 def import_sum_module(monkeypatch):
     monkeypatch.setenv("ID", "0")
     monkeypatch.setenv("MOM_HOST", "rabbitmq")
-    monkeypatch.setenv("INPUT_QUEUE", "sum_input")
+    monkeypatch.setenv("INPUT_QUEUE", "sum_0")
+    monkeypatch.setenv("INPUT_EXCHANGE", "sum_exchange")
+    monkeypatch.setenv("INPUT_ROUTING_PREFIX", "sum")
     monkeypatch.setenv("CONFIGURATION", "Q2")
     monkeypatch.setenv("SUM_AMOUNT", "1")
     monkeypatch.setenv("SUM_PREFIX", "sum")
@@ -60,102 +60,67 @@ def import_sum_module(monkeypatch):
     return module
 
 
-def test_eof_broadcast_snapshots_partials_while_holding_lock(monkeypatch):
+def test_single_worker_eof_snapshots_partials_while_holding_lock(monkeypatch):
     module = import_sum_module(monkeypatch)
     worker = module.SumWorker()
     client_id = 7
     output_exchange = FakeExchange()
-    reports = []
-    events = []
-
-    worker.processed_by_client[client_id] = 3
+    worker._output_exchanges = [output_exchange]
+    worker._processed_by_client[client_id] = 3
 
     def partials_for_client(client_id_received):
         assert client_id_received == client_id
-        assert worker.lock.locked()
-        assert client_id_received not in worker.pending_eof_by_client
+        assert worker._lock.locked()
         return [("001", b"serialized-partial")]
 
-    def report_to_leader(
-        client_id_received,
-        leader_id,
-        processed_count,
-        forwarded_count,
-    ):
-        reports.append(
-            (
-                client_id_received,
-                leader_id,
-                processed_count,
-                forwarded_count,
-            )
-        )
-
     monkeypatch.setattr(worker, "_partials_for_client", partials_for_client)
-    monkeypatch.setattr(worker, "_report_to_leader", report_to_leader)
 
-    payload = worker.control_serializer.serialize(
+    payload = worker._control_serializer.serialize(
         ControlMessage(sender_id=0, expected_total=3, processed_count=0)
     )
-    message = worker.internal_protocol.create_packet(
-        msg_type=MessageType.EOF_RECEIVED,
-        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-        payload=payload,
+
+    worker._handle_upstream_eof(client_id, payload)
+
+    assert client_id not in worker._processed_by_client
+    assert len(output_exchange.sent) == 2
+
+    data_type, data_client_id, data_payload = worker._internal_protocol.unpack_packet(
+        output_exchange.sent[0]
+    )
+    eof_type, eof_client_id, eof_payload = worker._internal_protocol.unpack_packet(
+        output_exchange.sent[1]
     )
 
-    worker._handle_eof_broadcast(
-        message,
-        ack=lambda: events.append("ack"),
-        nack=lambda: events.append("nack"),
-        output_exchanges=[output_exchange],
-    )
-
-    assert events == ["ack"]
-    assert client_id in worker.pending_eof_by_client
-    assert len(output_exchange.sent) == 1
-    assert reports == [(client_id, 0, 3, 1)]
+    assert data_type == MessageType.DATA
+    assert data_client_id == client_id
+    assert data_payload == b"serialized-partial"
+    assert eof_type == MessageType.EOF
+    assert eof_client_id == client_id
+    eof_control = worker._control_serializer.deserialize(eof_payload)
+    assert eof_control.expected_total == 1
 
 
-def test_duplicate_eof_broadcast_is_acked_without_reflushing(monkeypatch):
+def test_single_worker_eof_without_partials_forwards_zero_expected_total(monkeypatch):
     module = import_sum_module(monkeypatch)
     worker = module.SumWorker()
-    client_id = 7
+    client_id = 11
     output_exchange = FakeExchange()
-    events = []
+    worker._output_exchanges = [output_exchange]
+    worker._processed_by_client[client_id] = 0
 
-    worker.pending_eof_by_client[client_id] = (3, 0)
+    monkeypatch.setattr(worker, "_partials_for_client", lambda _: [])
 
-    monkeypatch.setattr(
-        worker,
-        "_partials_for_client",
-        lambda client_id: pytest.fail("partials should not be read again"),
-    )
-    monkeypatch.setattr(
-        worker,
-        "_forward_partials",
-        lambda *args: pytest.fail("partials should not be forwarded again"),
-    )
-    monkeypatch.setattr(
-        worker,
-        "_report_to_leader",
-        lambda *args, **kwargs: pytest.fail("leader should not be reported again"),
+    payload = worker._control_serializer.serialize(
+        ControlMessage(sender_id=0, expected_total=0, processed_count=0)
     )
 
-    payload = worker.control_serializer.serialize(
-        ControlMessage(sender_id=0, expected_total=3, processed_count=0)
-    )
-    message = worker.internal_protocol.create_packet(
-        msg_type=MessageType.EOF_RECEIVED,
-        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-        payload=payload,
-    )
+    worker._handle_upstream_eof(client_id, payload)
 
-    worker._handle_eof_broadcast(
-        message,
-        ack=lambda: events.append("ack"),
-        nack=lambda: events.append("nack"),
-        output_exchanges=[output_exchange],
+    assert len(output_exchange.sent) == 1
+    eof_type, eof_client_id, eof_payload = worker._internal_protocol.unpack_packet(
+        output_exchange.sent[0]
     )
-
-    assert events == ["ack"]
-    assert output_exchange.sent == []
+    eof_control = worker._control_serializer.deserialize(eof_payload)
+    assert eof_type == MessageType.EOF
+    assert eof_client_id == client_id
+    assert eof_control.expected_total == 0
