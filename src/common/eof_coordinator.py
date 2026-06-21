@@ -538,6 +538,38 @@ class EofCoordinator:
         )
         return FlushAction(is_leader=True, total_forwarded=total_forwarded)
 
+    # ─── read-only accessors (for business_fn prediction) ───────────────────
+    # These allow callers to predict the outcome of a coordinator call WITHOUT
+    # making a mutating call, which is required when coordinator methods are
+    # non-idempotent (e.g. += accumulation in _on_processed_answer/_on_flush_ack).
+    # All are safe to call under the worker's main lock.
+
+    def responder_count(self, client_id: int) -> int:
+        """Number of distinct senders that have sent PROCESSED_ANSWER for client_id."""
+        return len(self._leader_responders.get(client_id, set()))
+
+    def has_responder(self, client_id: int, sender_id: int) -> bool:
+        return sender_id in self._leader_responders.get(client_id, set())
+
+    def accumulated_processed(self, client_id: int) -> int:
+        """Sum of processed_count from all PROCESSED_ANSWERs received so far."""
+        return self._leader_processed.get(client_id, 0)
+
+    def leader_expected(self, client_id: int) -> int | None:
+        """Expected total from the upstream EOF, or None if not yet received."""
+        return self._leader_expected.get(client_id)
+
+    def flush_ack_count(self, client_id: int) -> int:
+        """Number of distinct non-leaders that have sent FLUSH_ACK for client_id."""
+        return len(self._flush_acks.get(client_id, set()))
+
+    def has_flush_ack(self, client_id: int, sender_id: int) -> bool:
+        return sender_id in self._flush_acks.get(client_id, set())
+
+    def accumulated_forwarded(self, client_id: int) -> int:
+        """Sum of forwarded counts from all FLUSH_ACKs received so far."""
+        return self._forwarded_from_acks.get(client_id, 0)
+
     # ─── snapshot / restore ──────────────────────────────────────────────────
 
     def snapshot(self) -> dict:

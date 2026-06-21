@@ -27,7 +27,7 @@ from common.fault_tolerance.handler.sender_sequencer import (
 from common.fault_tolerance.handler.worker_loop_instruction import (
     WorkerLoopInstruction,
 )
-from common.fault_tolerance.inbox import Inbox, InboxStatus
+from common.fault_tolerance.inbox import Inbox, InboxStatus, MsgKind
 from common.fault_tolerance.outbox import Outbox, OutboxEntry
 from common.fault_tolerance.snapshot import LastState, Snapshot
 from common.fault_tolerance.wal import InputApplied, InputDone, Wal, WalRecord
@@ -91,8 +91,9 @@ class PersistentStateHandler:
         seq: int,
         payload: bytes,
         business_fn: BusinessFn,
+        kind: MsgKind = MsgKind.DATA,
     ) -> WorkerLoopInstruction:
-        status = self.inbox.classify(client_id, sender_id, seq)
+        status = self.inbox.classify(client_id, sender_id, seq, kind)
         if status is InboxStatus.DONE:
             return WorkerLoopInstruction(Action.ACK)
 
@@ -100,25 +101,26 @@ class PersistentStateHandler:
             state_change, logical_outputs = business_fn(payload)
             outputs = self.sequencer.stamp(client_id, msg_id, logical_outputs)
             self.wal.append(
-                InputApplied(msg_id, client_id, sender_id, seq, state_change, outputs)
+                InputApplied(msg_id, client_id, sender_id, seq, state_change, outputs, kind)
             )
             self.sequencer.advance(client_id, len(outputs))
             self.worker_state.apply_change(state_change)
-            self.inbox.mark_applied(client_id, sender_id, seq)
+            self.inbox.mark_applied(client_id, sender_id, seq, kind)
             self.outbox.add(client_id, msg_id, outputs)
             self.applied_since_snapshot += 1
 
         return WorkerLoopInstruction(
             Action.PUBLISH_THEN_COMMIT,
             outputs=self.outbox.entries_for_input(client_id, msg_id),
-            ctx=(msg_id, client_id, sender_id, seq),
+            ctx=(msg_id, client_id, sender_id, seq, kind),
         )
 
     def commit_done(
-        self, msg_id: str, client_id: int, sender_id: int, seq: int
+        self, msg_id: str, client_id: int, sender_id: int, seq: int,
+        kind: MsgKind = MsgKind.DATA,
     ) -> WorkerLoopInstruction:
-        self.wal.append(InputDone(msg_id, client_id, sender_id, seq))
-        self.inbox.mark_done(client_id, sender_id, seq)
+        self.wal.append(InputDone(msg_id, client_id, sender_id, seq, kind))
+        self.inbox.mark_done(client_id, sender_id, seq, kind)
         self.outbox.remove_input(client_id, msg_id)
         self.maybe_snapshot()
         return WorkerLoopInstruction(Action.ACK)
@@ -141,21 +143,21 @@ class PersistentStateHandler:
         """Replay one record into memory, skipping anything already reflected in
         the loaded snapshot. Returns whether an applied input was (re)counted."""
         if isinstance(record, InputApplied):
-            if self.inbox.classify(record.client_id, record.sender_id, record.seq) is (
+            if self.inbox.classify(record.client_id, record.sender_id, record.seq, record.kind) is (
                 InboxStatus.NEW
             ):
                 self.worker_state.apply_change(record.state_change)
-                self.inbox.mark_applied(record.client_id, record.sender_id, record.seq)
+                self.inbox.mark_applied(record.client_id, record.sender_id, record.seq, record.kind)
                 self.outbox.add(record.client_id, record.msg_id, record.outputs)
                 self.sequencer.observe(record.outputs)
                 return True
             return False
 
         if isinstance(record, InputDone):
-            if self.inbox.classify(record.client_id, record.sender_id, record.seq) is not (
+            if self.inbox.classify(record.client_id, record.sender_id, record.seq, record.kind) is not (
                 InboxStatus.DONE
             ):
-                self.inbox.mark_done(record.client_id, record.sender_id, record.seq)
+                self.inbox.mark_done(record.client_id, record.sender_id, record.seq, record.kind)
                 self.outbox.remove_input(record.client_id, record.msg_id)
             return False
 
