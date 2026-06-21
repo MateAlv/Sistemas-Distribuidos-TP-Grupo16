@@ -11,9 +11,27 @@ from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 from common.last_state import LastStateManager
-from common.middleware import LazyQueue, MessageMiddlewareQueueRabbitMQ
-from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
+from common.middleware import (
+    LazyQueue,
+    MessageMiddlewareQueueRabbitMQ,
+    ShardedPublisher,
+    body_digest_key,
+)
+from common.middleware.middleware_rabbitmq import (
+    MessageMiddlewareExchangeRabbitMQ,
+    ensure_exchange_queue_bindings,
+)
+from common.routing import queue_name_for_worker
 from workers.file_ingestor.line_batch_parser import LineBatchParser
+
+
+@dataclass(frozen=True)
+class FileIngestorOutputConfig:
+    name: str
+    exchange: str
+    routing_prefix: str
+    shard_count: int
+
 
 @dataclass(frozen=True)
 class FileIngestorConfig:
@@ -21,7 +39,9 @@ class FileIngestorConfig:
     total_instances: int
     mom_host: str
     queue_name: str
-    transaction_output_exchange: str
+    input_exchange: str
+    input_routing_prefix: str
+    outputs: tuple[FileIngestorOutputConfig, ...]
     control_queue_prefix: str
     response_queue_prefix: str
     logging_level: str
@@ -46,8 +66,8 @@ class FileIngestor:
         self._line_batch_serializer = LineBatchSerializer()
         self._control_serializer = ControlMessageSerializer()
 
-        self._input_queue: MessageMiddlewareQueueRabbitMQ | None = None
-        self._transaction_output: MessageMiddlewareExchangeRabbitMQ | None = None
+        self._input_queue: MessageMiddlewareQueueRabbitMQ | MessageMiddlewareExchangeRabbitMQ | None = None
+        self._downstream_outputs: dict[str, ShardedPublisher] | None = None
         # Named control queue senders for the main thread (EOF_RECEIVED broadcast).
         # Pika connections are not thread-safe; each thread creates its own senders.
         self._main_control_senders: dict = self._new_control_senders()
@@ -140,18 +160,25 @@ class FileIngestor:
             for i in range(self._config.total_instances)
         }
 
-    def _new_transaction_sender(self) -> MessageMiddlewareExchangeRabbitMQ:
-        return MessageMiddlewareExchangeRabbitMQ(
-            host=self._config.mom_host,
-            exchange_name=self._config.transaction_output_exchange,
-            routing_keys=[],
-            exchange_type="fanout",
-        )
+    def _new_downstream_senders(self) -> dict[str, ShardedPublisher]:
+        return {
+            output.name: ShardedPublisher(
+                self._config.mom_host,
+                output.exchange,
+                output.routing_prefix,
+                output.shard_count,
+                key_fn=body_digest_key,
+            )
+            for output in self._config.outputs
+        }
 
-    def _transaction_sender(self) -> MessageMiddlewareExchangeRabbitMQ:
-        if self._transaction_output is None:
-            self._transaction_output = self._new_transaction_sender()
-        return self._transaction_output
+    def _downstream_senders(self) -> dict[str, ShardedPublisher]:
+        if self._downstream_outputs is None:
+            self._downstream_outputs = self._new_downstream_senders()
+        return self._downstream_outputs
+
+    def _input_routing_key(self) -> str:
+        return queue_name_for_worker(self._config.input_routing_prefix, self._config.id)
 
     # ---------- helpers ----------
 
@@ -173,30 +200,30 @@ class FileIngestor:
 
     def _send_transaction_batch(
         self,
-        sender: MessageMiddlewareExchangeRabbitMQ,
+        senders: dict[str, ShardedPublisher],
         client_id: int,
         transactions: list[Transaction],
     ) -> None:
-        sender.send(
-            self._packet(
-                MessageType.DATA,
-                client_id,
-                self._transaction_serializer.serialize_batch(transactions),
-            )
+        message = self._packet(
+            MessageType.DATA,
+            client_id,
+            self._transaction_serializer.serialize_batch(transactions),
         )
+        for sender in senders.values():
+            sender.send(message)
 
     def _forward_eof_downstream(
         self,
-        sender: MessageMiddlewareExchangeRabbitMQ,
+        senders: dict[str, ShardedPublisher],
         client_id: int,
         total_forwarded: int,
     ) -> None:
-        sender.send(
-            self._packet(MessageType.EOF, client_id, self._eof_payload(total_forwarded))
-        )
+        message = self._packet(MessageType.EOF, client_id, self._eof_payload(total_forwarded))
+        for sender in senders.values():
+            sender.send(message)
         logging.info(
-            "file_ingestor_eof_forwarded | id=%s | client_id=%s | total_fwd=%s",
-            self._config.id, client_id, total_forwarded,
+            "file_ingestor_eof_forwarded | id=%s | client_id=%s | outputs=%s | total_fwd=%s",
+            self._config.id, client_id, ",".join(senders), total_forwarded,
         )
 
     def _do_broadcast(self, action: BroadcastAction, control_senders: dict) -> None:
@@ -213,7 +240,7 @@ class FileIngestor:
 
         if transactions:
             self._send_transaction_batch(
-                self._transaction_sender(), client_id, transactions
+                self._downstream_senders(), client_id, transactions
             )
 
         forwarded = len(transactions)
@@ -254,7 +281,7 @@ class FileIngestor:
             with self._lock:
                 self._processed_by_client.pop(client_id, None)
             self._forward_eof_downstream(
-                self._transaction_sender(), client_id, action.total_forwarded
+                self._downstream_senders(), client_id, action.total_forwarded
             )
 
     def _process_message(self, message: bytes, ack, nack) -> None:
@@ -382,7 +409,7 @@ class FileIngestor:
     # ---------- response path (líder) ----------
 
     def _handle_response(
-        self, message: bytes, ack, nack, control_senders: dict, eof_sender
+        self, message: bytes, ack, nack, control_senders: dict, eof_senders
     ) -> None:
         try:
             msg_type, client_id, ctrl = self._coordinator.parse_message(message)
@@ -417,7 +444,7 @@ class FileIngestor:
         elif isinstance(action, FlushAction) and action.is_leader:
             total_fwd = action.total_forwarded + own_fwd
             try:
-                self._forward_eof_downstream(eof_sender, client_id, total_fwd)
+                self._forward_eof_downstream(eof_senders, client_id, total_fwd)
                 ack()
             except Exception:
                 logging.exception(
@@ -438,7 +465,7 @@ class FileIngestor:
             self._config.mom_host, self._coordinator.my_response_queue()
         )
         control_senders = self._new_control_senders()
-        eof_sender = self._new_transaction_sender()
+        eof_senders = self._new_downstream_senders()
 
         # Register before blocking so stop() can reach us even if called concurrently.
         with self._stopped_lock:
@@ -452,7 +479,8 @@ class FileIngestor:
                 except Exception:
                     pass
             try:
-                eof_sender.close()
+                for sender in eof_senders.values():
+                    sender.close()
             except Exception:
                 pass
             try:
@@ -464,7 +492,7 @@ class FileIngestor:
         try:
             consumer.start_consuming(
                 lambda msg, ack, nack: self._handle_response(
-                    msg, ack, nack, control_senders, eof_sender
+                    msg, ack, nack, control_senders, eof_senders
                 )
             )
         except Exception as e:
@@ -480,7 +508,8 @@ class FileIngestor:
                 except Exception:
                     pass
             try:
-                eof_sender.close()
+                for sender in eof_senders.values():
+                    sender.close()
             except Exception:
                 pass
             try:
@@ -491,12 +520,15 @@ class FileIngestor:
     # ---------- lifecycle ----------
 
     def start(self) -> None:
+        self._ensure_output_bindings()
         logging.info(
-            "file_ingestor_start | id=%s | mom_host=%s | queue=%s | "
-            "control_prefix=%s | response_prefix=%s | total_instances=%s",
+            "file_ingestor_start | id=%s | mom_host=%s | exchange=%s | queue=%s | "
+            "routing_key=%s | control_prefix=%s | response_prefix=%s | total_instances=%s",
             self._config.id,
             self._config.mom_host,
+            self._config.input_exchange,
             self._config.queue_name,
+            self._input_routing_key(),
             self._config.control_queue_prefix,
             self._config.response_queue_prefix,
             self._config.total_instances,
@@ -507,8 +539,12 @@ class FileIngestor:
         self._control_thread.start()
         self._response_thread.start()
 
-        self._input_queue = MessageMiddlewareQueueRabbitMQ(
-            self._config.mom_host, self._config.queue_name
+        self._input_queue = MessageMiddlewareExchangeRabbitMQ(
+            self._config.mom_host,
+            self._config.input_exchange,
+            [self._input_routing_key()],
+            queue_name=self._config.queue_name,
+            exclusive=False,
         )
         try:
             if not self._stopped:
@@ -539,7 +575,8 @@ class FileIngestor:
             return
         self._closed = True
         resources = (
-            [self._input_queue, self._transaction_output]
+            [self._input_queue]
+            + list((self._downstream_outputs or {}).values())
             + list(self._main_control_senders.values())
         )
         for resource in resources:
@@ -551,3 +588,14 @@ class FileIngestor:
                 logging.warning(
                     "file_ingestor_close_error | id=%s | error=%s", self._config.id, e
                 )
+
+    def _ensure_output_bindings(self) -> None:
+        for output in self._config.outputs:
+            def queue_name(index: int) -> str:
+                return queue_name_for_worker(output.routing_prefix, index)
+
+            ensure_exchange_queue_bindings(
+                self._config.mom_host,
+                output.exchange,
+                {queue_name(index): queue_name(index) for index in range(output.shard_count)},
+            )

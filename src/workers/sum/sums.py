@@ -14,6 +14,7 @@ from common.message_protocol.internal.control_message_serializer import ControlM
 from common.message_protocol.internal import InternalProtocol
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 from common.middleware import LazyQueue, MessageMiddlewareQueueRabbitMQ
+from common.routing import queue_name_for_worker
 
 try:
     from processors import create_sum_processor
@@ -23,8 +24,14 @@ except ImportError:
 
 ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
-INPUT_QUEUE = os.environ["INPUT_QUEUE"]
 CONFIGURATION = os.getenv("CONFIGURATION", C_Q2)
+INPUT_QUEUE = os.environ["INPUT_QUEUE"]
+if CONFIGURATION in (C_Q2, C_Q3):
+    INPUT_EXCHANGE = os.environ["INPUT_EXCHANGE"]
+    INPUT_ROUTING_PREFIX = os.environ["INPUT_ROUTING_PREFIX"]
+else:
+    INPUT_EXCHANGE = os.getenv("INPUT_EXCHANGE")
+    INPUT_ROUTING_PREFIX = os.getenv("INPUT_ROUTING_PREFIX")
 SUM_AMOUNT = int(os.environ["SUM_AMOUNT"])
 SUM_PREFIX = os.environ["SUM_PREFIX"]
 SUM_CONTROL_QUEUE_PREFIX = f"{SUM_PREFIX}_control"
@@ -104,6 +111,11 @@ class SumWorker:
 
     def _aggregation_index(self, partition_key: str) -> int:
         return zlib.crc32(partition_key.encode("utf-8")) % AGGREGATION_AMOUNT
+
+    def _input_routing_key(self) -> str:
+        if INPUT_ROUTING_PREFIX is None:
+            raise RuntimeError("INPUT_ROUTING_PREFIX is required for sharded input")
+        return queue_name_for_worker(INPUT_ROUTING_PREFIX, ID)
 
     def _packet(self, msg_type: MessageType, client_id: int, payload: bytes) -> bytes:
         return self._internal_protocol.create_packet(
@@ -495,10 +507,13 @@ class SumWorker:
     # ---------- lifecycle ----------
 
     def start(self) -> None:
+        input_kind = "exchange" if CONFIGURATION in (C_Q2, C_Q3) else "queue"
         logging.info(
-            "sum_start | configuration=%s | id=%s | mom_host=%s | queue=%s | "
+            "sum_start | configuration=%s | id=%s | mom_host=%s | input=%s | "
+            "input_kind=%s | "
             "sum_amount=%s | aggregation_amount=%s",
-            CONFIGURATION, ID, MOM_HOST, INPUT_QUEUE, SUM_AMOUNT, AGGREGATION_AMOUNT,
+            CONFIGURATION, ID, MOM_HOST, INPUT_QUEUE, input_kind,
+            SUM_AMOUNT, AGGREGATION_AMOUNT,
         )
 
         self._control_thread = threading.Thread(target=self._run_control_consumer)
@@ -506,7 +521,19 @@ class SumWorker:
         self._control_thread.start()
         self._response_thread.start()
 
-        self._input_queue = middleware.MessageMiddlewareQueueRabbitMQ(MOM_HOST, INPUT_QUEUE)
+        if CONFIGURATION in (C_Q2, C_Q3):
+            self._input_queue = middleware.MessageMiddlewareExchangeRabbitMQ(
+                MOM_HOST,
+                INPUT_EXCHANGE,
+                [self._input_routing_key()],
+                queue_name=INPUT_QUEUE,
+                exclusive=False,
+            )
+        else:
+            self._input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
+                MOM_HOST,
+                INPUT_QUEUE,
+            )
         try:
             if not self._stopped:
                 self._input_queue.start_consuming(self._process_message)

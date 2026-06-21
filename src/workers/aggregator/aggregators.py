@@ -13,6 +13,7 @@ from common.message_protocol.internal.common.control_message import ControlMessa
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal import InternalProtocol
 from common.middleware import LazyQueue, MessageMiddlewareQueueRabbitMQ
+from common.routing import queue_name_for_worker
 
 try:
     from processors import create_aggregator_processor
@@ -66,6 +67,9 @@ class AggregatorWorker:
         self._last_state = LastStateManager(STATE_DIR) if STATE_DIR else None
         self._msg_count = 0
         self._restore_snapshot()
+
+    def _input_routing_key(self) -> str:
+        return queue_name_for_worker(AGGREGATION_PREFIX, ID)
 
     # ---------- snapshot ----------
 
@@ -362,7 +366,7 @@ class AggregatorWorker:
         logging.info(
             "aggregation_start | configuration=%s | id=%s | exchange=%s | "
             "output_queue=%s | leader=%s | total=%s",
-            CONFIGURATION, ID, f"{AGGREGATION_PREFIX}_{ID}", OUTPUT_QUEUE,
+            CONFIGURATION, ID, self._input_routing_key(), OUTPUT_QUEUE,
             ID == LEADER_ID, AGGREGATION_AMOUNT,
         )
         self.control_thread = threading.Thread(target=self._start_control_consumer)
@@ -377,7 +381,11 @@ class AggregatorWorker:
         )
         data_output = MessageMiddlewareQueueRabbitMQ(MOM_HOST, OUTPUT_QUEUE)
         self._input_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{ID}"]
+            MOM_HOST,
+            AGGREGATION_PREFIX,
+            [self._input_routing_key()],
+            queue_name=self._input_routing_key(),
+            exclusive=False,
         )
         try:
             if not self._stopped:

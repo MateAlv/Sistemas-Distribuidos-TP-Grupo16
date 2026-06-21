@@ -19,8 +19,16 @@ from common.message_protocol.internal import (
     LineBatchSerializer,
     MessageType,
 )
-from common.middleware import MessageMiddlewareQueueRabbitMQ
-from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
+from common.middleware import (
+    MessageMiddlewareQueueRabbitMQ,
+    ShardedPublisher,
+    body_digest_key,
+)
+from common.middleware.middleware_rabbitmq import (
+    MessageMiddlewareExchangeRabbitMQ,
+    ensure_exchange_queue_bindings,
+)
+from common.routing import queue_name_for_worker
 from workers.common.line_splitter import LineSplitter, parse_csv_line
 
 
@@ -30,7 +38,9 @@ class FileSplitterConfig:
     mom_host: str
     input_exchange: str
     queue_name: str
-    output_queue: str
+    output_exchange: str
+    output_routing_prefix: str
+    output_shard_count: int
     max_line_bytes: int
     max_batch_bytes: int
     logging_level: str
@@ -64,7 +74,7 @@ class FileSplitter:
     def __init__(self, config: FileSplitterConfig) -> None:
         self._config = config
         self._consumer: MessageMiddlewareExchangeRabbitMQ | None = None
-        self._line_batch_output: MessageMiddlewareQueueRabbitMQ | None = None
+        self._line_batch_output: ShardedPublisher | None = None
         self._accounts_output: MessageMiddlewareQueueRabbitMQ | None = None
         self._line_batch_serializer = LineBatchSerializer()
         self._control_serializer = ControlMessageSerializer()
@@ -76,15 +86,19 @@ class FileSplitter:
 
     def start(self) -> None:
         routing_key = self._input_routing_key()
+        self._ensure_line_batch_bindings()
         logging.info(
             "file_splitter_start | id=%s | mom_host=%s | exchange=%s | queue=%s | "
-            "routing_key=%s | output_queue=%s | max_batch_bytes=%s",
+            "routing_key=%s | output_exchange=%s | output_prefix=%s | "
+            "output_shards=%s | max_batch_bytes=%s",
             self._config.id,
             self._config.mom_host,
             self._config.input_exchange,
             self._config.queue_name,
             routing_key,
-            self._config.output_queue,
+            self._config.output_exchange,
+            self._config.output_routing_prefix,
+            self._config.output_shard_count,
             self._config.max_batch_bytes,
         )
 
@@ -426,10 +440,10 @@ class FileSplitter:
         self._line_batch_sender().send(message)
         logging.info(
             "file_splitter_transaction_eof_sent | id=%s | client_id=%s | "
-            "output_queue=%s | expected_total=%s",
+            "output_exchange=%s | expected_total=%s",
             self._config.id,
             client_id,
-            self._config.output_queue,
+            self._config.output_exchange,
             expected_total,
         )
 
@@ -484,13 +498,30 @@ class FileSplitter:
             self._files[key] = state
         return state
 
-    def _line_batch_sender(self) -> MessageMiddlewareQueueRabbitMQ:
+    def _line_batch_sender(self) -> ShardedPublisher:
         if self._line_batch_output is None:
-            self._line_batch_output = MessageMiddlewareQueueRabbitMQ(
+            self._line_batch_output = ShardedPublisher(
                 self._config.mom_host,
-                self._config.output_queue,
+                self._config.output_exchange,
+                self._config.output_routing_prefix,
+                self._config.output_shard_count,
+                key_fn=body_digest_key,
             )
         return self._line_batch_output
+
+    def _ensure_line_batch_bindings(self) -> None:
+        def queue_name(index: int) -> str:
+            return queue_name_for_worker(self._config.output_routing_prefix, index)
+
+        bindings = {
+            queue_name(index): queue_name(index)
+            for index in range(self._config.output_shard_count)
+        }
+        ensure_exchange_queue_bindings(
+            self._config.mom_host,
+            self._config.output_exchange,
+            bindings,
+        )
 
     def _accounts_sender(self) -> MessageMiddlewareQueueRabbitMQ:
         if self._accounts_output is None:

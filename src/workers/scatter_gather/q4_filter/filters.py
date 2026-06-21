@@ -30,9 +30,11 @@ from common.message_protocol.internal.control_message_serializer import (
 )
 from common.middleware import LazyQueue
 from common.middleware.middleware_rabbitmq import (
+    ensure_exchange_queue_bindings,
     MessageMiddlewareExchangeRabbitMQ,
     MessageMiddlewareQueueRabbitMQ,
 )
+from common.routing import queue_name_for_worker
 
 
 ID = int(os.environ["ID"])
@@ -106,8 +108,8 @@ class Q4FilterWorker:
             return MessageMiddlewareExchangeRabbitMQ(
                 MOM_HOST,
                 INPUT_EXCHANGE,
-                [f"{INPUT_ROUTING_PREFIX}_{ID}"],
-                queue_name=f"{INPUT_ROUTING_PREFIX}_{ID}",
+                [queue_name_for_worker(INPUT_ROUTING_PREFIX, ID)],
+                queue_name=queue_name_for_worker(INPUT_ROUTING_PREFIX, ID),
                 exclusive=False,
             )
         return MessageMiddlewareQueueRabbitMQ(
@@ -116,6 +118,18 @@ class Q4FilterWorker:
 
     def _new_edge_store_output(self):
         return MessageMiddlewareExchangeRabbitMQ(MOM_HOST, Q4_SUM_EXCHANGE, [])
+
+    def _ensure_output_bindings(self) -> None:
+        ensure_exchange_queue_bindings(
+            MOM_HOST,
+            Q4_SUM_EXCHANGE,
+            {
+                queue_name_for_worker(Q4_SUM_ROUTING_PREFIX, index): (
+                    queue_name_for_worker(Q4_SUM_ROUTING_PREFIX, index)
+                )
+                for index in range(Q4_SUM_AMOUNT)
+            },
+        )
 
     def _new_control_senders(self) -> dict:
         return {
@@ -447,6 +461,7 @@ class Q4FilterWorker:
     # ---------- lifecycle ----------
 
     def start(self) -> None:
+        self._ensure_output_bindings()
         logging.info(
             "q4_filter_start | id=%s | amount=%s | input_exchange=%s | "
             "edge_store_exchange=%s | sum_amount=%s | leader=%s",

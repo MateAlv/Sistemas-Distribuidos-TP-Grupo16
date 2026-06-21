@@ -101,6 +101,30 @@ def _eof_counts(worker, output):
     return counts
 
 
+def test_q4_joiner_predeclares_aggregator_bindings(monkeypatch):
+    module, _ = _load_module(monkeypatch, pair_partitions=3)
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.Q4JoinerWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "mom",
+            "q4_aggregator",
+            {
+                "q4_aggregator_0": "q4_aggregator_0",
+                "q4_aggregator_1": "q4_aggregator_1",
+                "q4_aggregator_2": "q4_aggregator_2",
+            },
+        )
+    ]
+
+
 def test_block_joiner_waits_for_all_eofs_and_emits_weighted_pair_pathss(
     monkeypatch,
 ):
