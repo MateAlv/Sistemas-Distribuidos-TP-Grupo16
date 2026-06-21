@@ -8,8 +8,9 @@ from aggregator_1 (sender_id=1, seq=client_id=0) would match a DATA message from
 filter_q5_usd_1 (sender_id=1, seq=0) and be silently discarded as DONE.
 
 The fix: the inbox key is now (client_id, kind, sender_id, seq) where MsgKind
-is an explicit enum field — DATA, CTRL_FLUSH_ORDER, CTRL_FLUSH_ACK.  Different
-kinds are always in separate buckets regardless of sender_id or seq values.
+is an explicit enum field — DATA, CTRL_FLUSH_ORDER, CTRL_FLUSH_ACK, etc.
+Different kinds are always in separate buckets regardless of sender_id or seq
+values.
 """
 
 import pytest
@@ -158,6 +159,25 @@ def test_flush_order_kind_does_not_collide_with_data():
     assert called, "business_fn MUST be called: FLUSH_ORDER is a new event"
 
 
+def test_eof_received_kind_does_not_collide_with_data():
+    """MsgKind.CTRL_EOF_RECEIVED never collides with DATA for the same sender."""
+    handler, ws = _make_handler()
+
+    # Process DATA from the same sender/seq tuple that EOF_RECEIVED uses.
+    _process_data(handler, seq=CLIENT)
+    assert ws.total == 1
+
+    bfn, called = _ctrl_bfn()
+    msg_id = f"er:{CLIENT}:{UPSTREAM_SENDER}"
+    instr = handler.handle(
+        msg_id, CLIENT, UPSTREAM_SENDER, CLIENT, b"eof-received", bfn,
+        kind=MsgKind.CTRL_EOF_RECEIVED,
+    )
+
+    assert called, "business_fn MUST be called: EOF_RECEIVED is a new event"
+    assert instr.action is Action.PUBLISH_THEN_COMMIT
+
+
 def test_flush_ack_idempotent_on_redeliver():
     """A redelivered FLUSH_ACK (same kind+sender+seq) is correctly deduplicated."""
     handler, ws = _make_handler()
@@ -192,6 +212,7 @@ def test_data_and_ctrl_kinds_are_independent_per_sender():
         (MsgKind.DATA, 1),
         (MsgKind.CTRL_FLUSH_ORDER, 100),
         (MsgKind.CTRL_FLUSH_ACK, 10000),
+        (MsgKind.CTRL_EOF_RECEIVED, 100000),
     ]:
         bfn = lambda _p, d=delta: (change(d), [])
         instr = handler.handle(
@@ -201,4 +222,4 @@ def test_data_and_ctrl_kinds_are_independent_per_sender():
         assert instr.action is Action.PUBLISH_THEN_COMMIT
         handler.commit_done(*instr.ctx)
 
-    assert ws.total == 1 + 100 + 10000
+    assert ws.total == 1 + 100 + 10000 + 100000

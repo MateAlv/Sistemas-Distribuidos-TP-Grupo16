@@ -386,6 +386,11 @@ class FilterQ5UsdWorker:
         sender_id = ctrl.sender_id
         seq = client_id
         msg_id = f"ctrl:{msg_type.value}:{client_id}:{sender_id}"
+        kind_by_type = {
+            MessageType.EOF_RECEIVED: MsgKind.CTRL_EOF_RECEIVED,
+            MessageType.FLUSH_ORDER: MsgKind.CTRL_FLUSH_ORDER,
+        }
+        kind = kind_by_type.get(msg_type)
 
         try:
             with self._lock:
@@ -410,7 +415,8 @@ class FilterQ5UsdWorker:
                         return change, []
 
                     instruction = self._handler.handle(
-                        msg_id, client_id, sender_id, seq, message, bfn
+                        msg_id, client_id, sender_id, seq, message, bfn,
+                        kind=kind,
                     )
 
                 elif msg_type == MessageType.FLUSH_ORDER:
@@ -434,7 +440,7 @@ class FilterQ5UsdWorker:
 
                     instruction = self._handler.handle(
                         msg_id, client_id, sender_id, seq, message, bfn,
-                        kind=MsgKind.CTRL_FLUSH_ORDER,
+                        kind=kind,
                     )
 
                 else:
@@ -449,8 +455,7 @@ class FilterQ5UsdWorker:
                 self._tl_sender(entry.destination).send(entry.body)
             with self._lock:
                 self._handler.commit_done(
-                    msg_id, client_id, sender_id, seq,
-                    kind=MsgKind.CTRL_FLUSH_ORDER if msg_type == MessageType.FLUSH_ORDER else MsgKind.DATA,
+                    msg_id, client_id, sender_id, seq, kind=kind,
                 )
             ack()
 
