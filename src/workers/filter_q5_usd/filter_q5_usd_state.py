@@ -173,8 +173,8 @@ class FilterQ5UsdState:
             return
         self._processed_by_client = {int(k): v for k, v in data["processed_by_client"].items()}
         self._forwarded_by_client = {int(k): v for k, v in data["forwarded_by_client"].items()}
-        self._agg_seq_by_client = {int(k): v for k, v in data["agg_seq_by_client"].items()}
-        self._closed_by_client = set(data["closed_by_client"])
+        self._agg_seq_by_client = {int(k): v for k, v in data.get("agg_seq_by_client", {}).items()}
+        self._closed_by_client = set(data.get("closed_by_client", []))
         self._coordinator.restore(data["eof_coordinator"])
 
     def apply_change(self, change: dict) -> None:
