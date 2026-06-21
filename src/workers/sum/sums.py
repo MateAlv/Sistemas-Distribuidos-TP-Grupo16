@@ -2,7 +2,6 @@ import logging
 import os
 import threading
 import time
-import zlib
 
 from common import middleware
 from common.constants import C_Q2, C_Q3
@@ -14,7 +13,7 @@ from common.message_protocol.internal.control_message_serializer import ControlM
 from common.message_protocol.internal import InternalProtocol
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 from common.middleware import LazyQueue, MessageMiddlewareQueueRabbitMQ
-from common.routing import queue_name_for_worker
+from common.routing import queue_name_for_worker, shard_for_key
 
 try:
     from processors import create_sum_processor
@@ -61,6 +60,11 @@ class SumWorker:
         self._processed_by_client: dict[int, int] = {}
         self._processors_by_client: dict = {}
         self._partials_forwarded = 0
+        # In-memory monotonic seq counter per client for addressed packets sent to
+        # the aggregator exchange.  Resets to 0 on restart; the aggregator's inbox
+        # treats any seq it has already marked DONE as a duplicate and ignores it,
+        # so a post-restart sequence collision is safe.
+        self._agg_seq_by_client: dict[int, int] = {}
 
         # Named control queue senders for the main thread (EOF_RECEIVED broadcast).
         # Pika connections are not thread-safe; each thread creates its own senders.
@@ -110,7 +114,7 @@ class SumWorker:
     # ---------- helpers ----------
 
     def _aggregation_index(self, partition_key: str) -> int:
-        return zlib.crc32(partition_key.encode("utf-8")) % AGGREGATION_AMOUNT
+        return shard_for_key(partition_key, AGGREGATION_AMOUNT)
 
     def _input_routing_key(self) -> str:
         if INPUT_ROUTING_PREFIX is None:
@@ -121,6 +125,22 @@ class SumWorker:
         return self._internal_protocol.create_packet(
             msg_type=msg_type,
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            payload=payload,
+        )
+
+    def _next_agg_seq(self, client_id: int) -> int:
+        seq = self._agg_seq_by_client.get(client_id, 0)
+        self._agg_seq_by_client[client_id] = (seq + 1) & 0xFFFFFFFF
+        return seq
+
+    def _addressed_packet(
+        self, msg_type: MessageType, client_id: int, seq: int, payload: bytes
+    ) -> bytes:
+        return self._internal_protocol.create_addressed_packet(
+            msg_type=msg_type,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            sender_id=ID,
+            seq=seq,
             payload=payload,
         )
 
@@ -159,7 +179,8 @@ class SumWorker:
         exchanges,
     ) -> None:
         index = self._aggregation_index(partition_key)
-        exchanges[index].send(self._packet(MessageType.DATA, client_id, payload))
+        seq = self._next_agg_seq(client_id)
+        exchanges[index].send(self._addressed_packet(MessageType.DATA, client_id, seq, payload))
         self._partials_forwarded += 1
         if should_log_progress(self._partials_forwarded):
             logging.info(
@@ -180,7 +201,8 @@ class SumWorker:
     ) -> None:
         payload = self._eof_payload(expected_total)
         for index, exchange in enumerate(exchanges):
-            exchange.send(self._packet(MessageType.EOF, client_id, payload))
+            seq = self._next_agg_seq(client_id)
+            exchange.send(self._addressed_packet(MessageType.EOF, client_id, seq, payload))
             logging.info(
                 "sum_forward_eof_to_aggregator | configuration=%s | id=%s | "
                 "client_id=%s | aggregation_index=%s | expected_total=%s",

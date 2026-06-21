@@ -1,21 +1,77 @@
 """WorkerState adapter for the aggregator.
 
-Wraps the aggregator's mutable state -- per-client reduction processors, the
-per-client data counters, the closed-client set and the EOF coordinator --
-behind the snapshot/restore/apply_change contract the durable-state engine
-expects.
+Wraps the aggregator's mutable state — per-client reduction processors, data
+counters, the closed-client set and the EofCoordinator — behind the
+snapshot/restore/apply_change contract the durable-state engine expects.
 
-apply_change is the single mutation path: it runs live when a message is
-processed and again, verbatim, when the WAL is replayed on recovery. There are
-two kinds of change, both treated as ordinary inputs by the handler:
+apply_change is the single mutation path: runs live when a message is processed
+and verbatim again during WAL replay on recovery.
 
-  - "data": a DATA message. The raw payload travels inside the change
-    (base64-encoded, since the WAL frames state changes as JSON) so that parsing
-    and accumulation stay on this one path and reproduce identically on replay.
-  - "close": an EOF flush. The client's aggregated results are emitted as outbox
-    outputs (computed live, before the change is applied) and the client is then
-    closed and dropped. Replay only re-applies the close; the results are not
-    recomputed, they are republished from the durable outbox.
+Change types
+------------
+  "data"
+      A DATA message arrived. The raw payload is base64-encoded (WAL is JSON)
+      so that deserialization + accumulation replay identically.
+  "close"
+      The client was flushed and cleaned up. Results are computed live via
+      results_for() and placed in the outbox BEFORE this change is applied;
+      replay only re-closes, not re-computes.
+  "coordinator_upstream_eof"
+      coordinator.on_upstream_eof was called. apply_change replays the call;
+      the returned action is discarded (no I/O on replay).
+  "coordinator_msg"
+      coordinator.process_control_message was called with a state-mutating
+      type: EOF_RECEIVED, PROCESSED_ANSWER, or FLUSH_ACK (broadcast mode).
+      FLUSH_ACK uses the standard path — _on_flush_ack handles coordinator
+      leader-state cleanup internally.
+  "coordinator_cleanup"
+      coordinator.cleanup_client was called (non-leader, after receiving
+      FLUSH_ORDER → FlushAction(is_leader=False)).
+
+Caller protocol (one change dict per handle() call to PersistentStateHandler)
+------------------------------------------------------------------------------
+  DATA message
+    → data_change(client_id, payload)
+
+  Upstream EOF received (data thread):
+    action = coordinator.on_upstream_eof(client_id, expected_total, count, fwd)
+    → coordinator_upstream_eof_change(client_id, expected_total, count, fwd)
+    Execute action outside the lock (I/O).
+
+  Control EOF_RECEIVED (broadcast, control thread):
+    action = coordinator.process_control_message(EOF_RECEIVED, client_id, ctrl, count, fwd)
+    → coordinator_msg_change(EOF_RECEIVED, client_id, ctrl.sender_id,
+                              ctrl.expected_total, ctrl.processed_count, count, fwd)
+    Execute action outside the lock.
+
+  Response PROCESSED_ANSWER (leader, response thread):
+    action = coordinator.process_control_message(PROCESSED_ANSWER, client_id, ctrl)
+    → coordinator_msg_change(PROCESSED_ANSWER, client_id, ctrl.sender_id,
+                              ctrl.expected_total, ctrl.processed_count)
+    Execute action outside the lock.
+
+  Non-leader close (FLUSH_ORDER received → FlushAction(is_leader=False)):
+    coordinator.cleanup_client(client_id) must happen before business close.
+    PersistentStateHandler.handle() supports one change per message — bundle
+    both mutations into a single compound change dict, for example:
+      {"type": "non_leader_close", "client_id": N}
+    and handle it in apply_change as: cleanup_client → _apply_close.
+    The two separate change constructors (coordinator_cleanup_change +
+    close_change) are provided for direct apply_change sequences when the
+    caller handles its own WAL framing.
+
+  Leader close (final FLUSH_ACK → FlushAction(is_leader=True), or N=1):
+    action = coordinator.process_control_message(FLUSH_ACK, client_id, ctrl)
+    → coordinator_msg_change(FLUSH_ACK, client_id, ctrl.sender_id,
+                              ctrl.expected_total, ctrl.processed_count)
+    Read results_for(client_id) → emit to outbox.
+    → close_change(client_id)
+    (_on_flush_ack already cleaned coordinator state; no coordinator_cleanup needed.)
+
+  N=1 shortcut (on_upstream_eof returns FlushAction directly):
+    → coordinator_upstream_eof_change(...)
+    Read results_for(client_id) → emit to outbox.
+    → close_change(client_id)
 """
 
 from __future__ import annotations
@@ -24,6 +80,7 @@ import base64
 from collections.abc import Callable
 
 from common.eof_coordinator import EofCoordinator
+from common.message_protocol.internal.common import ControlMessage, MessageType
 
 ProcessorFactory = Callable[[str], object]
 
@@ -60,6 +117,53 @@ class AggregatorState:
         # only records that the client must be closed and dropped.
         return {"type": "close", "client_id": client_id}
 
+    @staticmethod
+    def coordinator_upstream_eof_change(
+        client_id: int, expected_total: int, count: int, forwarded: int
+    ) -> dict:
+        return {
+            "type": "coordinator_upstream_eof",
+            "client_id": client_id,
+            "expected_total": expected_total,
+            "count": count,
+            "forwarded": forwarded,
+        }
+
+    @staticmethod
+    def coordinator_msg_change(
+        msg_type: MessageType,
+        client_id: int,
+        sender_id: int,
+        expected_total: int,
+        processed_count: int,
+        count: int = 0,
+        forwarded: int = 0,
+    ) -> dict:
+        return {
+            "type": "coordinator_msg",
+            "msg_type": msg_type.value,
+            "client_id": client_id,
+            "sender_id": sender_id,
+            "expected_total": expected_total,
+            "processed_count": processed_count,
+            "count": count,
+            "forwarded": forwarded,
+        }
+
+    @staticmethod
+    def coordinator_cleanup_change(client_id: int) -> dict:
+        # Non-leader cleanup after FlushAction(is_leader=False).
+        return {"type": "coordinator_cleanup", "client_id": client_id}
+
+    @staticmethod
+    def compound_change(*changes: dict) -> dict:
+        # Bundle multiple change dicts into one so PersistentStateHandler sees a
+        # single change per message (its one-change-per-handle() invariant).
+        return {"type": "compound", "changes": list(changes)}
+
+    def is_closed(self, client_id: int) -> bool:
+        return client_id in self._closed_by_client
+
     def results_for(self, client_id: int) -> list[bytes]:
         # Aggregated outputs to emit at EOF; read live, before the close drops
         # the processor.
@@ -91,11 +195,31 @@ class AggregatorState:
     def apply_change(self, change: dict) -> None:
         # Single mutation path, run live and on replay; dispatch by change kind.
         kind = change["type"]
+        if kind == "compound":
+            for sub in change["changes"]:
+                self.apply_change(sub)
+            return
         client_id = change["client_id"]
         if kind == "data":
             self._apply_data(client_id, change)
         elif kind == "close":
             self._apply_close(client_id)
+        elif kind == "coordinator_upstream_eof":
+            self._coordinator.on_upstream_eof(
+                client_id, change["expected_total"], change["count"], change["forwarded"]
+            )
+        elif kind == "coordinator_msg":
+            ctrl = ControlMessage(
+                sender_id=change["sender_id"],
+                expected_total=change["expected_total"],
+                processed_count=change["processed_count"],
+            )
+            self._coordinator.process_control_message(
+                MessageType(change["msg_type"]),
+                client_id, ctrl, change["count"], change["forwarded"],
+            )
+        elif kind == "coordinator_cleanup":
+            self._coordinator.cleanup_client(client_id)
         else:
             raise ValueError(f"unknown change type: {kind}")
 

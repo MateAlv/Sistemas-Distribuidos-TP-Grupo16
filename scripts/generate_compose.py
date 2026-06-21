@@ -84,7 +84,6 @@ Q3_CANDIDATES_ROUTING_PREFIX = "q3_candidates"
 WORKER_STATE_DIR = "/worker_state"
 DEFAULT_SNAPSHOT_INTERVAL = 1000
 RABBITMQ_DURABLE_ENV = "RABBITMQ_DURABLE=true"
-RABBITMQ_PUBLISHER_CONFIRMS_ENV = "RABBITMQ_PUBLISHER_CONFIRMS=true"
 OBSERVABILITY_DEFAULTS = {
     "FLOW_LOG_ENABLED": "1",
     "FLOW_LOG_EVERY_MESSAGES": "100000",
@@ -804,7 +803,6 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
     ]
     for name in rabbitmq_service_names:
         add_env_once(services[name], RABBITMQ_DURABLE_ENV)
-        add_env_once(services[name], RABBITMQ_PUBLISHER_CONFIRMS_ENV)
 
     worker_service_names = [
         name
@@ -868,6 +866,16 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                     f"MONITOR_PORT={monitor_port}",
                 ]
             )
+
+    rabbitmq_env_vars = []
+    if bool_value(config, "rabbitmq_durable", False):
+        rabbitmq_env_vars.append("RABBITMQ_DURABLE=true")
+    if bool_value(config, "rabbitmq_publisher_confirms", False):
+        rabbitmq_env_vars.append("RABBITMQ_PUBLISHER_CONFIRMS=true")
+    if rabbitmq_env_vars:
+        for name, service in services.items():
+            if name != "rabbitmq":
+                service.setdefault("environment", []).extend(rabbitmq_env_vars)
 
     if settings.get("chaos", {}).get("enabled", False):
         services["chaos_monkey"] = chaos_monkey_service(settings, client_names)
