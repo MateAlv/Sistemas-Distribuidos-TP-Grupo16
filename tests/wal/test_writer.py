@@ -99,11 +99,11 @@ class TestWriteInputApplied:
         # Verify the serialized entry round-trips correctly.
         data = wal_path.read_bytes()
         _, payload, _ = _read_record(data)
-        # skip msg_id, client_id, sender_id, seq, state_change_blob
+        # skip msg_id, client_id, sender_id, kind, seq, state_change_blob
         offset = 0
         msg_id_len = struct.unpack_from(UINT16_FORMAT, payload, offset)[0]
         offset += 2 + msg_id_len
-        offset += 4 + 4 + 4  # client_id, sender_id, seq
+        offset += 4 + 4 + 1 + 4  # client_id, sender_id, kind (1 byte), seq
         sc_len = struct.unpack_from(UINT32_FORMAT, payload, offset)[0]
         offset += 4 + sc_len
         count = struct.unpack_from(UINT16_FORMAT, payload, offset)[0]

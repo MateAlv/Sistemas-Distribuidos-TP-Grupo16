@@ -7,6 +7,7 @@ from common import middleware
 from common.constants import C_Q2, C_Q3, C_Q5
 from common.eof_coordinator import EofCoordinator, BroadcastAction, FlushAction, SendAnswerAction
 from common.fault_tolerance.handler.persistent_state_handler import PersistentStateHandler
+from common.fault_tolerance.inbox import MsgKind
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal.common import MessageType
 from common.message_protocol.internal.common.control_message import ControlMessage
@@ -25,6 +26,7 @@ except ImportError:
 ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
 CONFIGURATION = os.environ["CONFIGURATION"]
+
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 OUTPUT_QUEUE = os.environ["OUTPUT_QUEUE"]
@@ -151,7 +153,7 @@ class AggregatorWorker:
                     )
                 # DATA has no outputs; commit immediately.
                 with self._lock:
-                    self._handler.commit_done(msg_id, client_id, sender_id, seq)
+                    self._handler.commit_done(*instruction.ctx)
                 ack()
 
                 count = self._state.data_count(client_id)
@@ -202,7 +204,7 @@ class AggregatorWorker:
                 for entry in instruction.outputs:
                     self._tl_sender(entry.destination).send(entry.body)
                 with self._lock:
-                    self._handler.commit_done(msg_id, client_id, sender_id, seq)
+                    self._handler.commit_done(*instruction.ctx)
                 ack()
                 logging.info(
                     "aggregation_upstream_eof | configuration=%s | id=%s | "
@@ -250,10 +252,12 @@ class AggregatorWorker:
             return
 
         # Non-leader: flush results and send FLUSH_ACK to the leader.
+        # MsgKind.CTRL_FLUSH_ORDER separates this from DATA messages in the inbox,
+        # so real sender_id values are safe even when they equal upstream worker IDs.
         # seq=client_id is unique: at most one FLUSH_ORDER per (client, leader) pair.
         sender_id = ctrl.sender_id
         seq = client_id
-        msg_id = f"fo:{client_id}:{sender_id}"
+        msg_id = f"fo:{client_id}:{ctrl.sender_id}"
 
         try:
             with self._lock:
@@ -275,13 +279,14 @@ class AggregatorWorker:
                     return compound, outputs + [(flush_ack_dest, flush_ack_msg)]
 
                 instruction = self._handler.handle(
-                    msg_id, client_id, sender_id, seq, message, bfn
+                    msg_id, client_id, sender_id, seq, message, bfn,
+                    kind=MsgKind.CTRL_FLUSH_ORDER,
                 )
 
             for entry in instruction.outputs:
                 self._tl_sender(entry.destination).send(entry.body)
             with self._lock:
-                self._handler.commit_done(msg_id, client_id, sender_id, seq)
+                self._handler.commit_done(*instruction.ctx)
             ack()
 
         except Exception:
@@ -344,9 +349,10 @@ class AggregatorWorker:
             # business_fn uses read-only coordinator accessors to predict whether this is
             # the last FLUSH_ACK without calling the non-idempotent process_control_message.
             # The actual coordinator mutation happens inside apply_change (single call).
+            # MsgKind.CTRL_FLUSH_ACK separates from DATA so real sender_id values are safe.
             sender_id = ctrl.sender_id
             seq = client_id  # unique: at most one FLUSH_ACK per (client, non-leader) pair
-            msg_id = f"fa:{client_id}:{sender_id}"
+            msg_id = f"fa:{client_id}:{ctrl.sender_id}"
 
             try:
                 with self._lock:
@@ -376,13 +382,14 @@ class AggregatorWorker:
                         return ack_change, []
 
                     instruction = self._handler.handle(
-                        msg_id, client_id, sender_id, seq, message, bfn
+                        msg_id, client_id, sender_id, seq, message, bfn,
+                        kind=MsgKind.CTRL_FLUSH_ACK,
                     )
 
                 for entry in instruction.outputs:
                     self._tl_sender(entry.destination).send(entry.body)
                 with self._lock:
-                    self._handler.commit_done(msg_id, client_id, sender_id, seq)
+                    self._handler.commit_done(*instruction.ctx)
                 ack()
 
             except Exception:
