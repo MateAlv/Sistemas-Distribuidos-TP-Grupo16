@@ -23,18 +23,14 @@ CANDIDATES_QUEUE = os.environ["Q3_CANDIDATES_QUEUE"]
 OUTPUT_QUEUE = os.environ["GATEWAY_Q3_QUEUE"]
 THRESHOLD_DIVISOR = float(os.getenv("Q3_THRESHOLD_DIVISOR", "100"))
 
-# Sharding: cuando hay >1 barriers, los publishers (joiner_q3 y filter_date)
-# enrutan por client_id a un exchange. Cada barrier crea su propia queue
-# bindeada al routing key "{prefix}_{ID}" para recibir solo sus clientes.
+# Sharding: publishers (joiner_q3 y filter_date) enrutan por client_id a un
+# exchange. Cada barrier crea su propia queue bindeada al routing key
+# "{prefix}_{ID}", incluso si hay un solo shard.
 Q3_BARRIER_AMOUNT = int(os.getenv("Q3_BARRIER_AMOUNT", "1"))
-Q3_AVERAGES_EXCHANGE = os.getenv("Q3_AVERAGES_EXCHANGE")
-Q3_CANDIDATES_EXCHANGE = os.getenv("Q3_CANDIDATES_EXCHANGE")
-Q3_AVERAGES_ROUTING_PREFIX = os.getenv(
-    "Q3_AVERAGES_ROUTING_PREFIX", "q3_averages"
-)
-Q3_CANDIDATES_ROUTING_PREFIX = os.getenv(
-    "Q3_CANDIDATES_ROUTING_PREFIX", "q3_candidates"
-)
+Q3_AVERAGES_EXCHANGE = os.environ["Q3_AVERAGES_EXCHANGE"]
+Q3_CANDIDATES_EXCHANGE = os.environ["Q3_CANDIDATES_EXCHANGE"]
+Q3_AVERAGES_ROUTING_PREFIX = os.environ["Q3_AVERAGES_ROUTING_PREFIX"]
+Q3_CANDIDATES_ROUTING_PREFIX = os.environ["Q3_CANDIDATES_ROUTING_PREFIX"]
 Q3_OUTPUT_BATCH_BYTES = int(os.getenv("Q3_OUTPUT_BATCH_BYTES", str(1024 * 1024)))
 Q3_OUTPUT_BATCH_MAX_TX = int(os.getenv("Q3_OUTPUT_BATCH_MAX_TX", "5000"))
 
@@ -113,13 +109,11 @@ class Q3BarrierWorker:
         self.averages_input = self._build_input(
             exchange_name=Q3_AVERAGES_EXCHANGE,
             routing_prefix=Q3_AVERAGES_ROUTING_PREFIX,
-            fallback_queue=AVERAGES_QUEUE,
             queue_name=queue_name_for_worker(Q3_AVERAGES_ROUTING_PREFIX, ID),
         )
         self.candidates_input = self._build_input(
             exchange_name=Q3_CANDIDATES_EXCHANGE,
             routing_prefix=Q3_CANDIDATES_ROUTING_PREFIX,
-            fallback_queue=CANDIDATES_QUEUE,
             queue_name=queue_name_for_worker(Q3_CANDIDATES_ROUTING_PREFIX, ID),
         )
         self.averages_output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
@@ -138,29 +132,16 @@ class Q3BarrierWorker:
 
     def _build_input(
         self,
-        exchange_name: str | None,
+        exchange_name: str,
         routing_prefix: str,
-        fallback_queue: str,
         queue_name: str,
     ):
-        """
-        Si hay sharding (exchange seteado y Q3_BARRIER_AMOUNT>1), crea una
-        queue bindeada al exchange con routing key "{prefix}_{ID}". Cada barrier
-        recibe solo los clientes con client_id % N == ID.
-
-        Sin sharding (Q3_BARRIER_AMOUNT==1 o sin exchange), consume directo de
-        la queue legacy compartida — compatibilidad con presets de 1 barrier.
-        """
-        if exchange_name and Q3_BARRIER_AMOUNT > 1:
-            return middleware.MessageMiddlewareExchangeRabbitMQ(
-                MOM_HOST,
-                exchange_name,
-                routing_keys=[queue_name_for_worker(routing_prefix, ID)],
-                queue_name=queue_name,
-                exclusive=False,
-            )
-        return middleware.MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST, fallback_queue
+        return middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST,
+            exchange_name,
+            routing_keys=[queue_name_for_worker(routing_prefix, ID)],
+            queue_name=queue_name,
+            exclusive=False,
         )
 
     def _state_for_client(self, client_id: int) -> _ClientState:

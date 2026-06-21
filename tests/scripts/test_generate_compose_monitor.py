@@ -157,6 +157,35 @@ def test_q2_sum_uses_sharded_exchange_and_personal_queue() -> None:
     assert sum_1_env["INPUT_QUEUE"] == "sum_q2_1"
 
 
+def test_q3_barrier_always_uses_direct_personal_inputs() -> None:
+    config = _config({"enabled": False})
+    config["queries"] = ["q3"]
+    config["workers"]["filters"] = {"usd": 1, "date": 1}
+    config["workers"]["sums"] = {"q3": 1}
+    config["workers"]["aggregators"] = {"q3": 1}
+    config["workers"]["joiners"] = {"q3": 1}
+    config["workers"]["q3_barrier"] = 1
+
+    services = generate_compose.build_compose(config, expose_ports=False)["services"]
+
+    filter_date_env = _env(services["filter_date_0"])
+    assert filter_date_env["Q3_CANDIDATES_EXCHANGE"] == "q3_candidates_exchange"
+    assert filter_date_env["Q3_CANDIDATES_ROUTING_PREFIX"] == "q3_candidates"
+
+    join_q3_env = _env(services["join_q3"])
+    assert join_q3_env["Q3_BARRIER_AMOUNT"] == "1"
+    assert join_q3_env["Q3_AVERAGES_EXCHANGE"] == "q3_averages_exchange"
+    assert join_q3_env["Q3_AVERAGES_ROUTING_PREFIX"] == "q3_averages"
+
+    barrier_env = _env(services["q3_barrier_0"])
+    assert barrier_env["Q3_AVERAGES_QUEUE"] == "q3_averages_0"
+    assert barrier_env["Q3_CANDIDATES_QUEUE"] == "q3_candidates_0"
+    assert barrier_env["Q3_AVERAGES_EXCHANGE"] == "q3_averages_exchange"
+    assert barrier_env["Q3_AVERAGES_ROUTING_PREFIX"] == "q3_averages"
+    assert barrier_env["Q3_CANDIDATES_EXCHANGE"] == "q3_candidates_exchange"
+    assert barrier_env["Q3_CANDIDATES_ROUTING_PREFIX"] == "q3_candidates"
+
+
 def test_file_ingestors_use_sharded_exchange_and_personal_queue() -> None:
     config = _config({"enabled": False})
     config["workers"]["file_splitters"] = 1

@@ -80,6 +80,9 @@ def _import_filter_module(
     monkeypatch.setenv("FILTER_Q5_USD_AMOUNT", "2")
     monkeypatch.setenv("SUM_PREFIX", "sum_q3")
     monkeypatch.setenv("SUM_Q3_QUEUE", "sum_q3_queue")
+    monkeypatch.setenv("SUM_Q3_EXCHANGE", "sum_q3_exchange")
+    monkeypatch.setenv("SUM_Q3_ROUTING_PREFIX", "sum_q3")
+    monkeypatch.setenv("SUM_Q3_AMOUNT", "1")
     monkeypatch.setenv("FILTER_AMOUNT", filter_amount)
     monkeypatch.setenv("FILTER_PREFIX", "filter")
     monkeypatch.setenv("USD_ENABLE_Q1", usd_enable_q1)
@@ -247,6 +250,32 @@ def test_usd_filter_predeclares_q1_and_date_bindings(monkeypatch):
     ]
 
 
+def test_usd_filter_predeclares_sum_q2_bindings(monkeypatch):
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="USD",
+        usd_enable_q1="0",
+        usd_enable_q2="1",
+        usd_enable_date="0",
+    )
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.FilterWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "rabbitmq",
+            "sum_q2_exchange",
+            {"sum_q2_0": "sum_q2_0"},
+        )
+    ]
+
+
 def test_usd_filter_buffers_until_flush(monkeypatch):
     monkeypatch.setenv("FILTER_OUTPUT_BATCH_MAX_TX", "1000")
     monkeypatch.setenv("FILTER_OUTPUT_BATCH_BYTES", str(10 * 1024 * 1024))
@@ -388,6 +417,43 @@ def test_date_filter_uses_notebook_q3_timestamp_bounds(monkeypatch):
             tx.from_account for tx in TransactionSerializer.deserialize_batch(payload)
         )
     assert candidate_accounts == ["start", "end"]
+
+
+def test_date_filter_predeclares_sum_q3_and_candidates_bindings(monkeypatch):
+    monkeypatch.setenv("Q3_BARRIER_AMOUNT", "2")
+    monkeypatch.setenv("Q3_CANDIDATES_EXCHANGE", "q3_candidates_exchange")
+    monkeypatch.setenv("Q3_CANDIDATES_ROUTING_PREFIX", "q3_candidates")
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="DATE",
+        usd_enable_q2="0",
+        date_enable_q3="1",
+        date_enable_q4="0",
+    )
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.FilterWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "rabbitmq",
+            "sum_q3_exchange",
+            {"sum_q3_0": "sum_q3_0"},
+        ),
+        (
+            "rabbitmq",
+            "q3_candidates_exchange",
+            {
+                "q3_candidates_0": "q3_candidates_0",
+                "q3_candidates_1": "q3_candidates_1",
+            },
+        ),
+    ]
 
 
 def test_date_filter_uses_notebook_q4_timestamp_bounds(monkeypatch):

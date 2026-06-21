@@ -10,6 +10,8 @@ from common.message_protocol.internal.common import MessageType
 from common.message_protocol.internal.common.control_message import ControlMessage
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal import InternalProtocol
+from common.middleware.middleware_rabbitmq import ensure_exchange_queue_bindings
+from common.routing import queue_name_for_worker
 
 try:
     from processors import create_joiner_processor
@@ -25,12 +27,13 @@ OUTPUT_QUEUE = os.environ["OUTPUT_QUEUE"]
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 MAX_CLIENTS = 500
 
-# Sharding opcional del output Q3 por client_id (para soportar N q3_barrier)
-Q3_AVERAGES_EXCHANGE = os.getenv("Q3_AVERAGES_EXCHANGE")
+# Q3 output routes by client_id to the barrier shard that also receives that
+# client's candidates.
+Q3_AVERAGES_EXCHANGE = os.environ["Q3_AVERAGES_EXCHANGE"] if CONFIGURATION == C_Q3 else ""
 Q3_AVERAGES_ROUTING_PREFIX = os.getenv(
     "Q3_AVERAGES_ROUTING_PREFIX", "q3_averages"
 )
-Q3_BARRIER_AMOUNT = int(os.getenv("Q3_BARRIER_AMOUNT", "1"))
+Q3_BARRIER_AMOUNT = int(os.environ["Q3_BARRIER_AMOUNT"]) if CONFIGURATION == C_Q3 else 0
 
 
 
@@ -111,11 +114,7 @@ class JoinerWorker:
         )
 
     def _build_output(self, configuration: str):
-        if (
-            configuration == C_Q3
-            and Q3_AVERAGES_EXCHANGE
-            and Q3_BARRIER_AMOUNT > 1
-        ):
+        if configuration == C_Q3:
             return middleware.ShardedByClientPublisher(
                 MOM_HOST,
                 Q3_AVERAGES_EXCHANGE,
@@ -123,6 +122,20 @@ class JoinerWorker:
                 Q3_BARRIER_AMOUNT,
             )
         return middleware.MessageMiddlewareQueueRabbitMQ(MOM_HOST, OUTPUT_QUEUE)
+
+    def _ensure_output_bindings(self) -> None:
+        if CONFIGURATION != C_Q3:
+            return
+        ensure_exchange_queue_bindings(
+            MOM_HOST,
+            Q3_AVERAGES_EXCHANGE,
+            {
+                queue_name_for_worker(Q3_AVERAGES_ROUTING_PREFIX, index): (
+                    queue_name_for_worker(Q3_AVERAGES_ROUTING_PREFIX, index)
+                )
+                for index in range(Q3_BARRIER_AMOUNT)
+            },
+        )
 
     def _process_message(self, message: bytes) -> None:
         msg_type, client_id, payload = self.internal_protocol.unpack_packet(message)
@@ -188,6 +201,7 @@ class JoinerWorker:
             nack()
 
     def start(self):
+        self._ensure_output_bindings()
         logging.info(
             "joiner_start | configuration=%s | id=%s | input=%s | output=%s | "
             "aggregation_amount=%s",
