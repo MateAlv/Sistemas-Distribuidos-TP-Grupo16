@@ -14,6 +14,7 @@ from common.message_protocol.internal.common.control_message import ControlMessa
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal import InternalProtocol
 from common.middleware import LazyQueue, MessageMiddlewareQueueRabbitMQ
+from common.routing import queue_name_for_worker
 
 try:
     from aggregator_state import AggregatorState
@@ -79,11 +80,14 @@ class AggregatorWorker:
         self.response_thread = None
         self.closed = False
         self._stopped = False
-
+        
         self._handler.recover()
         self._republish_pending()
 
     # ---------- connection helpers ----------
+    
+    def _input_routing_key(self) -> str:
+        return queue_name_for_worker(AGGREGATION_PREFIX, ID)
 
     def _tl_sender(self, destination: str) -> LazyQueue:
         """Return the thread-local lazy queue for the given destination."""
@@ -424,7 +428,7 @@ class AggregatorWorker:
         logging.info(
             "aggregation_start | configuration=%s | id=%s | exchange=%s | "
             "output_queue=%s | leader=%s | total=%s",
-            CONFIGURATION, ID, f"{AGGREGATION_PREFIX}_{ID}", OUTPUT_QUEUE,
+            CONFIGURATION, ID, self._input_routing_key(), OUTPUT_QUEUE,
             ID == LEADER_ID, AGGREGATION_AMOUNT,
         )
         self.control_thread = threading.Thread(target=self._start_control_consumer)
@@ -434,7 +438,11 @@ class AggregatorWorker:
             self.response_thread.start()
 
         self._input_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{ID}"]
+            MOM_HOST,
+            AGGREGATION_PREFIX,
+            [self._input_routing_key()],
+            queue_name=self._input_routing_key(),
+            exclusive=False,
         )
         try:
             if not self._stopped:

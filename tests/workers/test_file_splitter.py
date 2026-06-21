@@ -235,6 +235,11 @@ def test_file_splitter_stop_does_not_close_outputs_until_start_unwinds(monkeypat
         "MessageMiddlewareExchangeRabbitMQ",
         StopRecordingConsumer,
     )
+    monkeypatch.setattr(
+        file_splitter_module,
+        "ensure_exchange_queue_bindings",
+        lambda *args, **kwargs: None,
+    )
     splitter, sender = _splitter(max_batch_bytes=4096)
 
     splitter.start()
@@ -245,6 +250,31 @@ def test_file_splitter_stop_does_not_close_outputs_until_start_unwinds(monkeypat
     assert splitter._line_batch_output is None
 
 
+def test_file_splitter_predeclares_line_batch_bindings(monkeypatch):
+    calls = []
+    splitter, _ = _splitter(max_batch_bytes=4096)
+
+    monkeypatch.setattr(
+        file_splitter_module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    splitter._ensure_line_batch_bindings()
+
+    assert calls == [
+        (
+            "localhost",
+            "line_batch_exchange",
+            {
+                "file_ingestor_0": "file_ingestor_0",
+                "file_ingestor_1": "file_ingestor_1",
+                "file_ingestor_2": "file_ingestor_2",
+            },
+        )
+    ]
+
+
 def _splitter(max_batch_bytes: int) -> tuple[FileSplitter, RecordingSender]:
     sender = RecordingSender()
     splitter = FileSplitter(
@@ -253,7 +283,9 @@ def _splitter(max_batch_bytes: int) -> tuple[FileSplitter, RecordingSender]:
             mom_host="localhost",
             input_exchange="file_ingestor_exchange",
             queue_name="file_splitter_5",
-            output_queue="line_batch_queue",
+            output_exchange="line_batch_exchange",
+            output_routing_prefix="file_ingestor",
+            output_shard_count=3,
             max_line_bytes=1024,
             max_batch_bytes=max_batch_bytes,
             logging_level="INFO",

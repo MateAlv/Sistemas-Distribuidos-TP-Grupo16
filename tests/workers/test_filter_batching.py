@@ -31,6 +31,19 @@ class FakeExchange(FakeQueue):
     pass
 
 
+class FakeShardedPublisher(FakeQueue):
+    def __init__(self, host, exchange_name, routing_key_prefix, shard_count, key_fn=None):
+        super().__init__()
+        self.host = host
+        self.exchange_name = exchange_name
+        self.routing_key_prefix = routing_key_prefix
+        self.shard_count = shard_count
+        self.key_fn = key_fn
+
+    def send_to_all(self, message):
+        self.sent.append(message)
+
+
 def _import_filter_module(
     monkeypatch,
     configuration: str = "USD",
@@ -41,8 +54,8 @@ def _import_filter_module(
     date_enable_q3: str = "0",
     date_enable_q4: str = "0",
 ):
-    # Solo activamos USD_ENABLE_Q2 para acotar el output del filter al
-    # SUM_Q2_QUEUE en este test. El resto se desactiva con flags.
+    # Solo activamos USD_ENABLE_Q2 para acotar el output del filter al sum_q2.
+    # El resto se desactiva con flags.
     monkeypatch.setenv("ID", "0")
     monkeypatch.setenv("MOM_HOST", "rabbitmq")
     monkeypatch.setenv("CONFIGURATION", configuration)
@@ -50,12 +63,26 @@ def _import_filter_module(
     monkeypatch.setenv("GATEWAY_QUEUE", "gateway_results_queue")
     monkeypatch.setenv("FILTER_DATE_QUEUE", "filter_date_queue")
     monkeypatch.setenv("FILTER_Q1_QUEUE", "filter_q1_queue")
-    monkeypatch.setenv("SUM_Q2_QUEUE", "sum_q2_queue")
+    monkeypatch.setenv("FILTER_DATE_EXCHANGE", "filter_date_exchange")
+    monkeypatch.setenv("FILTER_DATE_ROUTING_PREFIX", "filter_date")
+    monkeypatch.setenv("FILTER_DATE_AMOUNT", "4")
+    monkeypatch.setenv("FILTER_Q1_EXCHANGE", "filter_q1_exchange")
+    monkeypatch.setenv("FILTER_Q1_ROUTING_PREFIX", "filter_q1")
+    monkeypatch.setenv("FILTER_Q1_AMOUNT", "3")
+    monkeypatch.setenv("SUM_Q2_EXCHANGE", "sum_q2_exchange")
+    monkeypatch.setenv("SUM_Q2_ROUTING_PREFIX", "sum_q2")
+    monkeypatch.setenv("SUM_Q2_AMOUNT", "1")
     monkeypatch.setenv("FILTER_Q3_QUEUE", "filter_q3_queue")
     monkeypatch.setenv("SCATTER_GATHER_MAPPER_QUEUE", "sg_mapper_queue")
     monkeypatch.setenv("FILTER_Q5_USD_QUEUE", "filter_q5_usd_queue")
+    monkeypatch.setenv("FILTER_Q5_USD_EXCHANGE", "filter_q5_usd_exchange")
+    monkeypatch.setenv("FILTER_Q5_USD_ROUTING_PREFIX", "filter_q5_usd")
+    monkeypatch.setenv("FILTER_Q5_USD_AMOUNT", "2")
     monkeypatch.setenv("SUM_PREFIX", "sum_q3")
     monkeypatch.setenv("SUM_Q3_QUEUE", "sum_q3_queue")
+    monkeypatch.setenv("SUM_Q3_EXCHANGE", "sum_q3_exchange")
+    monkeypatch.setenv("SUM_Q3_ROUTING_PREFIX", "sum_q3")
+    monkeypatch.setenv("SUM_Q3_AMOUNT", "1")
     monkeypatch.setenv("FILTER_AMOUNT", filter_amount)
     monkeypatch.setenv("FILTER_PREFIX", "filter")
     monkeypatch.setenv("USD_ENABLE_Q1", usd_enable_q1)
@@ -83,6 +110,10 @@ def _import_filter_module(
         "MessageMiddlewareExchangeRabbitMQ",
         FakeExchange,
     )
+    monkeypatch.setattr(module.middleware, "LazyQueue", FakeQueue)
+    monkeypatch.setattr(module.middleware, "ShardedByClientPublisher", FakeShardedPublisher)
+    monkeypatch.setattr(module.middleware, "ShardedPublisher", FakeShardedPublisher)
+    monkeypatch.setattr(module.middleware, "body_digest_key", lambda message: message)
     return module
 
 
@@ -120,6 +151,11 @@ def test_usd_filter_processes_batched_payload(monkeypatch):
     module = _import_filter_module(monkeypatch, configuration="USD")
     worker = module.FilterWorker()
 
+    sum_q2_output = worker.output_queues["sum_q2"]
+    assert sum_q2_output.exchange_name == "sum_q2_exchange"
+    assert sum_q2_output.routing_key_prefix == "sum_q2"
+    assert sum_q2_output.shard_count == 1
+
     transactions = [
         _tx(10.0, "US Dollar"),
         _tx(20.0, "Euro"),
@@ -132,7 +168,6 @@ def test_usd_filter_processes_batched_payload(monkeypatch):
     assert worker.processed_by_client[42] == 3
     assert worker.forwarded_by_client[42] == 2
 
-    sum_q2_output = worker.output_queues["sum_q2_queue"]
     assert len(sum_q2_output.sent) == 1
 
     msg_type, client_id, payload = InternalProtocol.unpack_packet(sum_q2_output.sent[0])
@@ -141,6 +176,104 @@ def test_usd_filter_processes_batched_payload(monkeypatch):
     batch_txs = TransactionSerializer.deserialize_batch(payload)
     assert len(batch_txs) == 2
     assert all(tx.currency == "US Dollar" for tx in batch_txs)
+
+
+def test_usd_filter_q1_and_date_outputs_are_sharded(monkeypatch):
+    monkeypatch.setenv("FILTER_OUTPUT_BATCH_MAX_TX", "1")
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="USD",
+        usd_enable_q1="1",
+        usd_enable_q2="0",
+        usd_enable_date="1",
+    )
+    worker = module.FilterWorker()
+
+    q1_output = worker.output_queues["filter_q1_queue"]
+    assert q1_output.exchange_name == "filter_q1_exchange"
+    assert q1_output.routing_key_prefix == "filter_q1"
+    assert q1_output.shard_count == 3
+    assert q1_output.key_fn is module.middleware.body_digest_key
+
+    date_output = worker.output_queues["filter_date_queue"]
+    assert date_output.exchange_name == "filter_date_exchange"
+    assert date_output.routing_key_prefix == "filter_date"
+    assert date_output.shard_count == 4
+    assert date_output.key_fn is module.middleware.body_digest_key
+
+    worker._process_data_message(
+        _data_packet(7, [_tx(15.0, "US Dollar"), _tx(20.0, "Euro")])
+    )
+
+    assert len(q1_output.sent) == 1
+    assert len(date_output.sent) == 1
+    assert q1_output.sent[0] == date_output.sent[0]
+
+
+def test_usd_filter_predeclares_q1_and_date_bindings(monkeypatch):
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="USD",
+        usd_enable_q1="1",
+        usd_enable_q2="0",
+        usd_enable_date="1",
+    )
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.FilterWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "rabbitmq",
+            "filter_q1_exchange",
+            {
+                "filter_q1_0": "filter_q1_0",
+                "filter_q1_1": "filter_q1_1",
+                "filter_q1_2": "filter_q1_2",
+            },
+        ),
+        (
+            "rabbitmq",
+            "filter_date_exchange",
+            {
+                "filter_date_0": "filter_date_0",
+                "filter_date_1": "filter_date_1",
+                "filter_date_2": "filter_date_2",
+                "filter_date_3": "filter_date_3",
+            },
+        ),
+    ]
+
+
+def test_usd_filter_predeclares_sum_q2_bindings(monkeypatch):
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="USD",
+        usd_enable_q1="0",
+        usd_enable_q2="1",
+        usd_enable_date="0",
+    )
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.FilterWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "rabbitmq",
+            "sum_q2_exchange",
+            {"sum_q2_0": "sum_q2_0"},
+        )
+    ]
 
 
 def test_usd_filter_buffers_until_flush(monkeypatch):
@@ -154,10 +287,10 @@ def test_usd_filter_buffers_until_flush(monkeypatch):
 
     assert worker.processed_by_client[7] == 1
     assert worker.forwarded_by_client[7] == 1
-    assert len(worker.output_queues["sum_q2_queue"].sent) == 0
+    assert len(worker.output_queues["sum_q2"].sent) == 0
 
     worker._flush_batcher_for_client(7)
-    sent = worker.output_queues["sum_q2_queue"].sent
+    sent = worker.output_queues["sum_q2"].sent
     assert len(sent) == 1
     msg_type, client_id, payload = InternalProtocol.unpack_packet(sent[0])
     assert msg_type == MessageType.DATA
@@ -172,6 +305,12 @@ def test_q5_filter_batches_wire_and_ach_to_filter_q5_usd(monkeypatch):
     module = _import_filter_module(monkeypatch, configuration="Q5")
     worker = module.FilterWorker()
 
+    q5_output = worker.output_queues["filter_q5_usd_queue"]
+    assert q5_output.exchange_name == "filter_q5_usd_exchange"
+    assert q5_output.routing_key_prefix == "filter_q5_usd"
+    assert q5_output.shard_count == 2
+    assert q5_output.key_fn is module.middleware.body_digest_key
+
     transactions = [
         _tx(1.0, "US Dollar", fmt="Wire"),
         _tx(2.0, "US Dollar", fmt="Credit Card"),  # no pasa filtro Q5
@@ -182,13 +321,35 @@ def test_q5_filter_batches_wire_and_ach_to_filter_q5_usd(monkeypatch):
     assert worker.processed_by_client[99] == 3
     assert worker.forwarded_by_client[99] == 2
 
-    q5_output = worker.output_queues["filter_q5_usd_queue"]
     assert len(q5_output.sent) == 1
 
     _, _, payload = InternalProtocol.unpack_packet(q5_output.sent[0])
     batch_txs = TransactionSerializer.deserialize_batch(payload)
     assert len(batch_txs) == 2
     assert {tx.format for tx in batch_txs} == {"Wire", "ACH"}
+
+
+def test_q5_filter_predeclares_q5_usd_bindings(monkeypatch):
+    module = _import_filter_module(monkeypatch, configuration="Q5")
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.FilterWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "rabbitmq",
+            "filter_q5_usd_exchange",
+            {
+                "filter_q5_usd_0": "filter_q5_usd_0",
+                "filter_q5_usd_1": "filter_q5_usd_1",
+            },
+        )
+    ]
 
 
 def test_date_filter_uses_notebook_q3_timestamp_bounds(monkeypatch):
@@ -256,6 +417,43 @@ def test_date_filter_uses_notebook_q3_timestamp_bounds(monkeypatch):
             tx.from_account for tx in TransactionSerializer.deserialize_batch(payload)
         )
     assert candidate_accounts == ["start", "end"]
+
+
+def test_date_filter_predeclares_sum_q3_and_candidates_bindings(monkeypatch):
+    monkeypatch.setenv("Q3_BARRIER_AMOUNT", "2")
+    monkeypatch.setenv("Q3_CANDIDATES_EXCHANGE", "q3_candidates_exchange")
+    monkeypatch.setenv("Q3_CANDIDATES_ROUTING_PREFIX", "q3_candidates")
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="DATE",
+        usd_enable_q2="0",
+        date_enable_q3="1",
+        date_enable_q4="0",
+    )
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.FilterWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "rabbitmq",
+            "sum_q3_exchange",
+            {"sum_q3_0": "sum_q3_0"},
+        ),
+        (
+            "rabbitmq",
+            "q3_candidates_exchange",
+            {
+                "q3_candidates_0": "q3_candidates_0",
+                "q3_candidates_1": "q3_candidates_1",
+            },
+        ),
+    ]
 
 
 def test_date_filter_uses_notebook_q4_timestamp_bounds(monkeypatch):
@@ -403,7 +601,7 @@ def test_eof_flushes_partial_batch_before_forwarding(monkeypatch):
 
     # 1 DATA con 1 USD tx -> queda en buffer.
     worker._process_data_message(_data_packet(11, [_tx(5.0, "US Dollar")]))
-    sum_q2_output = worker.output_queues["sum_q2_queue"]
+    sum_q2_output = worker.output_queues["sum_q2"]
     assert len(sum_q2_output.sent) == 0
 
     # EOF: expected_total = 1 (las DATA que procesaron upstream). El filter
@@ -421,7 +619,7 @@ def test_eof_flushes_partial_batch_before_forwarding(monkeypatch):
     )
     worker._process_data_message(eof_message)
 
-    # Tras el EOF: 2 publishes en sum_q2_queue: primero el batch (DATA con 1 tx),
+    # Tras el EOF: 2 publishes en sum_q2: primero el batch (DATA con 1 tx),
     # despues el EOF.
     assert len(sum_q2_output.sent) == 2
     data_msg_type, _, data_payload = InternalProtocol.unpack_packet(sum_q2_output.sent[0])
@@ -445,18 +643,18 @@ def test_batcher_isolates_buffers_between_clients(monkeypatch):
     assert worker.forwarded_by_client[1] == 1
     assert worker.forwarded_by_client[2] == 1
     # Nada se publico (limites altos, sin EOF).
-    assert len(worker.output_queues["sum_q2_queue"].sent) == 0
+    assert len(worker.output_queues["sum_q2"].sent) == 0
 
     # Flushear solo client 1 no toca el buffer del client 2.
     worker._flush_batcher_for_client(1)
-    sent = worker.output_queues["sum_q2_queue"].sent
+    sent = worker.output_queues["sum_q2"].sent
     assert len(sent) == 1
     _, client_id, payload = InternalProtocol.unpack_packet(sent[0])
     assert client_id == 1
     assert TransactionSerializer.deserialize_batch(payload)[0].amount == 1.0
 
     worker._flush_batcher_for_client(2)
-    sent_now = worker.output_queues["sum_q2_queue"].sent
+    sent_now = worker.output_queues["sum_q2"].sent
     assert len(sent_now) == 2
     _, client_id, payload = InternalProtocol.unpack_packet(sent_now[1])
     assert client_id == 2

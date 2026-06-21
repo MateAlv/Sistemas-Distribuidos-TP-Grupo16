@@ -84,6 +84,211 @@ def test_build_compose_omits_monitors_when_disabled() -> None:
     assert "MONITOR_HOSTS" not in _env(services["filter_usd_0"])
 
 
+def test_build_compose_adds_worker_state_volumes_and_durable_env() -> None:
+    compose = generate_compose.build_compose(
+        _config({"enabled": False}),
+        expose_ports=False,
+    )
+    services = compose["services"]
+    volumes = compose["volumes"]
+
+    worker_names = {
+        "file_splitter_0",
+        "file_ingestor_0",
+        "filter_usd_0",
+        "filter_q1_0",
+    }
+    for name in worker_names:
+        env = _env(services[name])
+        volume_name = f"{name}_state"
+        assert env["RABBITMQ_DURABLE"] == "true"
+        assert env["STATE_DIR"] == "/worker_state"
+        assert env["SNAPSHOT_INTERVAL"] == "1000"
+        assert services[name]["volumes"] == [f"{volume_name}:/worker_state"]
+        assert volume_name in volumes
+
+    gateway_env = _env(services["gateway"])
+    assert gateway_env["RABBITMQ_DURABLE"] == "true"
+    assert "STATE_DIR" not in gateway_env
+    assert "volumes" not in services["gateway"]
+
+    client_env = _env(services["client_0"])
+    assert "RABBITMQ_DURABLE" not in client_env
+    assert "STATE_DIR" not in client_env
+
+    assert "RABBITMQ_DURABLE" not in _env(services["rabbitmq"])
+
+
+def test_rates_service_is_durable_but_has_no_worker_state_volume() -> None:
+    config = _config({"enabled": False})
+    config["queries"] = ["q5"]
+
+    services = generate_compose.build_compose(config, expose_ports=False)["services"]
+
+    env = _env(services["rates_service"])
+    assert env["RABBITMQ_DURABLE"] == "true"
+    assert "STATE_DIR" not in env
+    assert services["rates_service"]["volumes"] == ["./data/rates:/data/rates:rw"]
+
+
+def test_q2_sum_uses_sharded_exchange_and_personal_queue() -> None:
+    config = _config({"enabled": False})
+    config["queries"] = ["q2"]
+    config["workers"]["sums"] = {"q2": 2}
+    config["workers"]["aggregators"] = {"q2": 1}
+    config["workers"]["joiners"] = {"q2": 1}
+
+    services = generate_compose.build_compose(config, expose_ports=False)["services"]
+
+    filter_env = _env(services["filter_usd_0"])
+    assert filter_env["SUM_Q2_EXCHANGE"] == "sum_q2_exchange"
+    assert filter_env["SUM_Q2_ROUTING_PREFIX"] == "sum_q2"
+    assert filter_env["SUM_Q2_AMOUNT"] == "2"
+    assert "SUM_Q2_QUEUE" not in filter_env
+
+    sum_0_env = _env(services["sum_q2_0"])
+    assert sum_0_env["INPUT_EXCHANGE"] == "sum_q2_exchange"
+    assert sum_0_env["INPUT_ROUTING_PREFIX"] == "sum_q2"
+    assert sum_0_env["INPUT_QUEUE"] == "sum_q2_0"
+
+    sum_1_env = _env(services["sum_q2_1"])
+    assert sum_1_env["INPUT_EXCHANGE"] == "sum_q2_exchange"
+    assert sum_1_env["INPUT_ROUTING_PREFIX"] == "sum_q2"
+    assert sum_1_env["INPUT_QUEUE"] == "sum_q2_1"
+
+
+def test_q3_barrier_always_uses_direct_personal_inputs() -> None:
+    config = _config({"enabled": False})
+    config["queries"] = ["q3"]
+    config["workers"]["filters"] = {"usd": 1, "date": 1}
+    config["workers"]["sums"] = {"q3": 1}
+    config["workers"]["aggregators"] = {"q3": 1}
+    config["workers"]["joiners"] = {"q3": 1}
+    config["workers"]["q3_barrier"] = 1
+
+    services = generate_compose.build_compose(config, expose_ports=False)["services"]
+
+    filter_date_env = _env(services["filter_date_0"])
+    assert filter_date_env["Q3_CANDIDATES_EXCHANGE"] == "q3_candidates_exchange"
+    assert filter_date_env["Q3_CANDIDATES_ROUTING_PREFIX"] == "q3_candidates"
+
+    join_q3_env = _env(services["join_q3"])
+    assert join_q3_env["Q3_BARRIER_AMOUNT"] == "1"
+    assert join_q3_env["Q3_AVERAGES_EXCHANGE"] == "q3_averages_exchange"
+    assert join_q3_env["Q3_AVERAGES_ROUTING_PREFIX"] == "q3_averages"
+
+    barrier_env = _env(services["q3_barrier_0"])
+    assert barrier_env["Q3_AVERAGES_QUEUE"] == "q3_averages_0"
+    assert barrier_env["Q3_CANDIDATES_QUEUE"] == "q3_candidates_0"
+    assert barrier_env["Q3_AVERAGES_EXCHANGE"] == "q3_averages_exchange"
+    assert barrier_env["Q3_AVERAGES_ROUTING_PREFIX"] == "q3_averages"
+    assert barrier_env["Q3_CANDIDATES_EXCHANGE"] == "q3_candidates_exchange"
+    assert barrier_env["Q3_CANDIDATES_ROUTING_PREFIX"] == "q3_candidates"
+
+
+def test_file_ingestors_use_sharded_exchange_and_personal_queue() -> None:
+    config = _config({"enabled": False})
+    config["workers"]["file_splitters"] = 1
+    config["workers"]["file_ingestors"] = 2
+
+    services = generate_compose.build_compose(config, expose_ports=False)["services"]
+
+    splitter_env = _env(services["file_splitter_0"])
+    assert splitter_env["LINE_BATCH_OUTPUT_EXCHANGE"] == "line_batch_exchange"
+    assert splitter_env["LINE_BATCH_OUTPUT_ROUTING_PREFIX"] == "file_ingestor"
+    assert splitter_env["FILE_INGESTOR_AMOUNT"] == "2"
+    assert "LINE_BATCH_OUTPUT_QUEUE" not in splitter_env
+
+    ingestor_0_env = _env(services["file_ingestor_0"])
+    assert ingestor_0_env["LINE_BATCH_INPUT_EXCHANGE"] == "line_batch_exchange"
+    assert ingestor_0_env["LINE_BATCH_INPUT_ROUTING_PREFIX"] == "file_ingestor"
+    assert ingestor_0_env["LINE_BATCH_INPUT_QUEUE"] == "file_ingestor_0"
+    assert ingestor_0_env["FILTER_USD_EXCHANGE"] == "filter_usd_exchange"
+    assert ingestor_0_env["FILTER_USD_ROUTING_PREFIX"] == "filter_usd"
+    assert ingestor_0_env["FILTER_USD_AMOUNT"] == "1"
+    assert "FILTER_Q5_FORMAT_EXCHANGE" not in ingestor_0_env
+    assert "TRANSACTION_OUTPUT_EXCHANGE" not in ingestor_0_env
+
+    ingestor_1_env = _env(services["file_ingestor_1"])
+    assert ingestor_1_env["LINE_BATCH_INPUT_EXCHANGE"] == "line_batch_exchange"
+    assert ingestor_1_env["LINE_BATCH_INPUT_ROUTING_PREFIX"] == "file_ingestor"
+    assert ingestor_1_env["LINE_BATCH_INPUT_QUEUE"] == "file_ingestor_1"
+
+
+def test_file_ingestor_dual_outputs_and_filter_personal_inputs() -> None:
+    config = _config({"enabled": False})
+    config["queries"] = ["q1", "q5"]
+    config["workers"]["file_ingestors"] = 1
+    config["workers"]["filters"] = {
+        "usd": 2,
+        "q1": 1,
+        "q5_format": 3,
+        "q5_usd": 1,
+    }
+    config["workers"]["aggregators"] = {"q5": 1}
+    config["workers"]["joiners"] = {"q5": 1}
+
+    services = generate_compose.build_compose(config, expose_ports=False)["services"]
+
+    ingestor_env = _env(services["file_ingestor_0"])
+    assert ingestor_env["FILTER_USD_EXCHANGE"] == "filter_usd_exchange"
+    assert ingestor_env["FILTER_USD_ROUTING_PREFIX"] == "filter_usd"
+    assert ingestor_env["FILTER_USD_AMOUNT"] == "2"
+    assert ingestor_env["FILTER_Q5_FORMAT_EXCHANGE"] == "filter_q5_format_exchange"
+    assert ingestor_env["FILTER_Q5_FORMAT_ROUTING_PREFIX"] == "filter_q5_format"
+    assert ingestor_env["FILTER_Q5_FORMAT_AMOUNT"] == "3"
+    assert "TRANSACTION_OUTPUT_EXCHANGE" not in ingestor_env
+
+    filter_usd_1_env = _env(services["filter_usd_1"])
+    assert filter_usd_1_env["INPUT_QUEUE"] == "filter_usd_1"
+    assert filter_usd_1_env["INPUT_EXCHANGE"] == "filter_usd_exchange"
+    assert filter_usd_1_env["INPUT_ROUTING_PREFIX"] == "filter_usd"
+    assert "TRANSACTION_EXCHANGE" not in filter_usd_1_env
+
+    filter_q5_format_2_env = _env(services["filter_q5_format_2"])
+    assert filter_q5_format_2_env["INPUT_QUEUE"] == "filter_q5_format_2"
+    assert filter_q5_format_2_env["INPUT_EXCHANGE"] == "filter_q5_format_exchange"
+    assert filter_q5_format_2_env["INPUT_ROUTING_PREFIX"] == "filter_q5_format"
+    assert filter_q5_format_2_env["FILTER_Q5_USD_EXCHANGE"] == "filter_q5_usd_exchange"
+    assert filter_q5_format_2_env["FILTER_Q5_USD_ROUTING_PREFIX"] == "filter_q5_usd"
+    assert filter_q5_format_2_env["FILTER_Q5_USD_AMOUNT"] == "1"
+    assert "TRANSACTION_EXCHANGE" not in filter_q5_format_2_env
+
+    filter_q5_usd_0_env = _env(services["filter_q5_usd_0"])
+    assert filter_q5_usd_0_env["INPUT_QUEUE"] == "filter_q5_usd_0"
+    assert filter_q5_usd_0_env["INPUT_EXCHANGE"] == "filter_q5_usd_exchange"
+    assert filter_q5_usd_0_env["INPUT_ROUTING_PREFIX"] == "filter_q5_usd"
+
+
+def test_filter_usd_outputs_to_q1_and_date_personal_inputs() -> None:
+    config = _config({"enabled": False})
+    config["queries"] = ["q1", "q3"]
+    config["workers"]["filters"] = {"usd": 2, "q1": 3, "date": 4}
+    config["workers"]["sums"] = {"q3": 1}
+    config["workers"]["aggregators"] = {"q3": 1}
+    config["workers"]["joiners"] = {"q3": 1}
+
+    services = generate_compose.build_compose(config, expose_ports=False)["services"]
+
+    filter_usd_0_env = _env(services["filter_usd_0"])
+    assert filter_usd_0_env["FILTER_Q1_EXCHANGE"] == "filter_q1_exchange"
+    assert filter_usd_0_env["FILTER_Q1_ROUTING_PREFIX"] == "filter_q1"
+    assert filter_usd_0_env["FILTER_Q1_AMOUNT"] == "3"
+    assert filter_usd_0_env["FILTER_DATE_EXCHANGE"] == "filter_date_exchange"
+    assert filter_usd_0_env["FILTER_DATE_ROUTING_PREFIX"] == "filter_date"
+    assert filter_usd_0_env["FILTER_DATE_AMOUNT"] == "4"
+
+    filter_q1_2_env = _env(services["filter_q1_2"])
+    assert filter_q1_2_env["INPUT_QUEUE"] == "filter_q1_2"
+    assert filter_q1_2_env["INPUT_EXCHANGE"] == "filter_q1_exchange"
+    assert filter_q1_2_env["INPUT_ROUTING_PREFIX"] == "filter_q1"
+
+    filter_date_3_env = _env(services["filter_date_3"])
+    assert filter_date_3_env["INPUT_QUEUE"] == "filter_date_3"
+    assert filter_date_3_env["INPUT_EXCHANGE"] == "filter_date_exchange"
+    assert filter_date_3_env["INPUT_ROUTING_PREFIX"] == "filter_date"
+
+
 @pytest.mark.parametrize(
     ("monitor", "message"),
     [

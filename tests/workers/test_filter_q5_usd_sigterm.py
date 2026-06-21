@@ -11,7 +11,9 @@ import threading
 def _setup(pika_env, monkeypatch):
     monkeypatch.setenv("ID", "0")
     monkeypatch.setenv("MOM_HOST", "rabbitmq")
-    monkeypatch.setenv("INPUT_QUEUE", "filter_q5_usd_queue")
+    monkeypatch.setenv("INPUT_EXCHANGE", "filter_q5_usd_exchange")
+    monkeypatch.setenv("INPUT_QUEUE", "filter_q5_usd_0")
+    monkeypatch.setenv("INPUT_ROUTING_PREFIX", "filter_q5_usd")
     monkeypatch.setenv("AGGREGATION_AMOUNT", "1")
     monkeypatch.setenv("AGGREGATION_PREFIX", "aggregation_q5")
     monkeypatch.setenv("FILTER_Q5_USD_AMOUNT", "1")
@@ -24,6 +26,7 @@ def _setup(pika_env, monkeypatch):
     # The module imports these names directly, so patch them on the module.
     monkeypatch.setattr(module, "MessageMiddlewareQueueRabbitMQ", factory)
     monkeypatch.setattr(module, "MessageMiddlewareExchangeRabbitMQ", factory)
+    monkeypatch.setattr(module, "LazyQueue", factory)
     return module
 
 
@@ -66,7 +69,7 @@ def test_filter_q5_usd_sigterm_stops_all_consumers_and_closes(pika_env, monkeypa
     assert worker.input_queue.closed          # close() (main)
     assert worker.control_consumer.closed     # control thread finally
     assert worker.response_consumer.closed    # response thread finally
-    assert worker.control_sender.closed       # close() (main)
+    assert all(q.closed for q in worker._main_control_senders.values())
     assert all(ex.closed for ex in worker.output_exchanges)
 
 
