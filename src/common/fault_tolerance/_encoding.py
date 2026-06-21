@@ -4,8 +4,10 @@ Low-level binary encoding helpers shared by WAL and outbox serialization.
 
 import struct
 
+UINT8_FORMAT  = ">B"
 UINT16_FORMAT = ">H"
 UINT32_FORMAT = ">I"
+UINT8_SIZE  = struct.calcsize(UINT8_FORMAT)
 UINT16_SIZE = struct.calcsize(UINT16_FORMAT)
 UINT32_SIZE = struct.calcsize(UINT32_FORMAT)
 
@@ -20,6 +22,11 @@ def read_exact(data: bytes, offset: int, n: int) -> tuple[bytes, int]:
             f"truncated data: need {n} bytes at offset {offset}, have {len(data) - offset}"
         )
     return data[offset:end], end
+
+
+def read_uint8(data: bytes, offset: int) -> tuple[int, int]:
+    raw, new_offset = read_exact(data, offset, UINT8_SIZE)
+    return struct.unpack(UINT8_FORMAT, raw)[0], new_offset
 
 
 def read_uint16(data: bytes, offset: int) -> tuple[int, int]:
