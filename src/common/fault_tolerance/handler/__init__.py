@@ -6,10 +6,12 @@ from common.fault_tolerance.handler.sender_sequencer import SenderSequencer
 from common.fault_tolerance.handler.worker_loop_instruction import (
     WorkerLoopInstruction,
 )
+from common.fault_tolerance.handler.worker_runner import WorkerRunner
 
 __all__ = [
     "Action",
     "PersistentStateHandler",
     "SenderSequencer",
     "WorkerLoopInstruction",
+    "WorkerRunner",
 ]
