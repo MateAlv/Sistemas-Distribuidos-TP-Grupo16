@@ -357,9 +357,6 @@ class BankNameJoinerWorker:
     def _emit_results(self, client_id: int) -> None:
         with self._lock:
             state = self._states.pop(client_id, None)
-            self._closed_by_client[client_id] = time.monotonic()
-            if len(self._closed_by_client) > MAX_CLOSED_CLIENTS:
-                self._cleanup_closed_clients()
 
         if state is None:
             return
@@ -367,32 +364,45 @@ class BankNameJoinerWorker:
         output_queue = self._output_queue_for_thread()
         missing = 0
         emitted = 0
-        for bank_id, partial in state.q2_results.items():
-            bank_names = state.bank_names.get(bank_id, [])
-            if not bank_names:
-                missing += 1
-                continue
-            for bank_name in bank_names:
-                result = Q2BankMaxResult(
-                    bank_id=partial.bank_id,
-                    from_account=partial.from_account,
-                    bank_name=bank_name,
-                    amount=partial.amount,
-                )
-                payload = Q2BankMaxResultSerializer.serialize(result)
-                output_queue.send(
-                    self._packet(MessageType.DATA, client_id, payload)
-                )
-                emitted += 1
+        try:
+            for bank_id, partial in state.q2_results.items():
+                bank_names = state.bank_names.get(bank_id, [])
+                if not bank_names:
+                    missing += 1
+                    continue
+                for bank_name in bank_names:
+                    result = Q2BankMaxResult(
+                        bank_id=partial.bank_id,
+                        from_account=partial.from_account,
+                        bank_name=bank_name,
+                        amount=partial.amount,
+                    )
+                    payload = Q2BankMaxResultSerializer.serialize(result)
+                    output_queue.send(
+                        self._packet(MessageType.DATA, client_id, payload)
+                    )
+                    emitted += 1
 
-        control_payload = self._control_serializer.serialize(
-            ControlMessage(
-                sender_id=self._config.id,
-                expected_total=emitted,
-                processed_count=0,
+            control_payload = self._control_serializer.serialize(
+                ControlMessage(
+                    sender_id=self._config.id,
+                    expected_total=emitted,
+                    processed_count=0,
+                )
             )
-        )
-        output_queue.send(self._packet(MessageType.EOF, client_id, control_payload))
+            output_queue.send(self._packet(MessageType.EOF, client_id, control_payload))
+        except Exception:
+            # Restore state so the triggering message can be nacked and retried.
+            # Without this, _closed_by_client would never be set, and a redelivery
+            # would find no state and silently discard the client's results.
+            with self._lock:
+                self._states.setdefault(client_id, state)
+            raise
+
+        with self._lock:
+            self._closed_by_client[client_id] = time.monotonic()
+            if len(self._closed_by_client) > MAX_CLOSED_CLIENTS:
+                self._cleanup_closed_clients()
 
         logging.info(
             "q2_bank_name_joiner_emit | id=%s | client_id=%s | results=%s | "
