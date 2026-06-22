@@ -43,18 +43,22 @@ class DummyQueue:
 
 
 def _send_data(worker, client_id: int, payload: bytes) -> None:
-    packet = worker.internal_protocol.create_packet(
+    packet = worker.internal_protocol.create_addressed_packet(
         msg_type=MessageType.DATA,
         client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        sender_id=0,
+        seq=worker.data_count_by_client.get(client_id, 0),
         payload=payload,
     )
     worker._process_message(packet)
 
 
 def _send_eof(worker, client_id: int) -> None:
-    packet = worker.internal_protocol.create_packet(
+    packet = worker.internal_protocol.create_addressed_packet(
         msg_type=MessageType.EOF,
         client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        sender_id=0,
+        seq=worker.eof_count_by_client.get(client_id, 0),
         payload=b"",
     )
     worker._process_message(packet)
