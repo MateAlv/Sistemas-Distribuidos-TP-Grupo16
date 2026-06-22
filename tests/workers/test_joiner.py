@@ -1,4 +1,5 @@
 import os
+import tempfile
 
 from common.constants import C_Q2, C_Q5
 from common.domain.partial_result import Q2BankMaxPartial
@@ -58,7 +59,7 @@ def _send_eof(worker, client_id: int) -> None:
         msg_type=MessageType.EOF,
         client_id_bytes=client_id.to_bytes(16, byteorder="big"),
         sender_id=0,
-        seq=worker.eof_count_by_client.get(client_id, 0),
+        seq=10_000 + worker.eof_count_by_client.get(client_id, 0),
         payload=b"",
     )
     worker._process_message(packet)
@@ -68,6 +69,7 @@ def _make_worker(configuration: str, aggregation_amount: int = 2) -> JoinerWorke
     import workers.joiner.joiners as jm
     jm.CONFIGURATION = configuration
     jm.AGGREGATION_AMOUNT = aggregation_amount
+    jm.STATE_DIR = tempfile.mkdtemp(prefix="joiner-test-")
     worker = JoinerWorker()
     worker.output_resource = DummyQueue()
     worker.output_queue = worker.output_resource
