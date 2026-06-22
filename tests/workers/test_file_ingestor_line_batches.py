@@ -121,6 +121,8 @@ def test_file_ingestor_broadcasts_eof_on_upstream_eof(tmp_path):
         for i in range(ingestor._config.total_instances)
     }
     ingestor._main_control_senders = control_senders
+    # EOF outputs (the broadcast) ride the outbox, published via _data_publishers.
+    ingestor._data_publishers = {**outputs, **control_senders}
     calls = AckNack()
 
     ingestor._on_input_message(_eof_packet(9, expected_total=42), calls.ack, calls.nack)
@@ -277,9 +279,10 @@ def _ingestor(outputs: dict[str, RecordingSender], tmp_path) -> FileIngestor:
         )
     )
     ingestor._downstream_outputs = outputs
+    ingestor._data_publishers = dict(outputs)
     ingestor._runner = WorkerRunner(
         handler=ingestor._handler,
-        publishers=outputs,
+        publishers=ingestor._data_publishers,
         process_payload=ingestor._data_process_payload,
         lock=ingestor._lock,
     )

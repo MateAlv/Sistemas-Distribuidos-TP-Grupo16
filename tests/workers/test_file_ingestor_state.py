@@ -25,10 +25,31 @@ def test_apply_data_accumulates_per_client():
     assert state.processed_count(99) == 0
 
 
-def test_drop_client_clears_count():
+def test_close_marks_closed_and_drops_count():
     state = FileIngestorState(_coordinator())
     state.apply_change(FileIngestorState.data_change(7, 3))
-    state.drop_client(7)
+    state.apply_change(FileIngestorState.close_change(7))
+    assert state.processed_count(7) == 0
+    assert state.is_closed(7)
+
+
+def test_closed_client_ignores_late_data():
+    state = FileIngestorState(_coordinator())
+    state.apply_change(FileIngestorState.close_change(7))
+    state.apply_change(FileIngestorState.data_change(7, 5))  # late straggler
+    assert state.processed_count(7) == 0
+
+
+def test_compound_change_applies_all_subchanges():
+    state = FileIngestorState(_coordinator())
+    state.apply_change(FileIngestorState.data_change(7, 4))
+    state.apply_change(
+        FileIngestorState.compound_change(
+            FileIngestorState.coordinator_cleanup_change(7),
+            FileIngestorState.close_change(7),
+        )
+    )
+    assert state.is_closed(7)
     assert state.processed_count(7) == 0
 
 
