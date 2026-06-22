@@ -55,10 +55,13 @@ from common.message_protocol.internal import InternalProtocol, LineBatchSerializ
 from workers.common.line_splitter import LineSplitter, parse_csv_line
 from workers.file_splitter.file_splitter import FileKey, FileState
 
-# Fixed per-packet overhead: internal envelope header + LineBatch fixed header.
-# Must stay in sync with _batch_packet_size() in file_splitter.py — any divergence
-# causes flush decisions on replay to differ from live, corrupting batch_id counters.
+# Fixed per-packet overhead must stay in sync with _batch_packet_size() in
+# file_splitter.py — any divergence causes flush decisions on replay to differ
+# from live, corrupting batch_id counters.
 _PACKET_FIXED = InternalProtocol.HEADER_SIZE + LineBatchSerializer.FIXED_HEADER_SIZE
+_ADDRESSED_PACKET_FIXED = (
+    InternalProtocol.ADDRESSED_HEADER_SIZE + LineBatchSerializer.FIXED_HEADER_SIZE
+)
 
 
 class FileSplitterState:
@@ -201,7 +204,12 @@ class FileSplitterState:
         # replay, producing mismatched batch_id sequences and wrong expected_total.
         rel_path_bytes = len(key.rel_path.encode("utf-8"))
         header_bytes = sum(4 + len(col.encode("utf-8")) for col in (state.header or ()))
-        return _PACKET_FIXED + rel_path_bytes + header_bytes + state.batch_payload_bytes + extra
+        fixed_size = (
+            _ADDRESSED_PACKET_FIXED
+            if state.file_type == FILE_TYPE_ACCOUNTS
+            else _PACKET_FIXED
+        )
+        return fixed_size + rel_path_bytes + header_bytes + state.batch_payload_bytes + extra
 
     def _flush_batch_state(self, key: FileKey, state: FileState) -> None:
         # Updates all batch counters as if a batch was sent; no actual I/O.
