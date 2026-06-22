@@ -167,6 +167,7 @@ class FilterQ5UsdWorker:
                     "filter_q5_usd_republish_error | id=%s | destination=%s",
                     ID, entry.destination,
                 )
+                raise
 
     def _publish_commit_ack(self, instruction, ack) -> bool:
         if instruction.action is Action.ACK:
