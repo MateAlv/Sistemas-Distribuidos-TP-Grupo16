@@ -184,8 +184,9 @@ def test_q2_reduces_global_max_across_shards():
 
     max_by_bank = {}
     for packet in data_packets:
-        m_type, _, payload = worker.internal_protocol.unpack_packet(packet)
+        m_type, _, sender_id, _, payload = worker.internal_protocol.unpack_addressed_packet(packet)
         assert m_type == MessageType.DATA
+        assert sender_id == 0
         r = Q2BankMaxPartialSerializer.deserialize(payload)
         max_by_bank[r.bank_id] = r.amount
 
@@ -193,8 +194,10 @@ def test_q2_reduces_global_max_across_shards():
     assert max_by_bank["BANK_Y"] == 50.0
     assert max_by_bank["BANK_Z"] == 30.0
 
-    m_type, _, payload = worker.internal_protocol.unpack_packet(eof_packet)
+    m_type, _, sender_id, seq, payload = worker.internal_protocol.unpack_addressed_packet(eof_packet)
     assert m_type == MessageType.EOF
+    assert sender_id == 0
+    assert seq == 3
     ctrl = ControlMessageSerializer().deserialize(payload)
     assert ctrl.expected_total == 3
 
@@ -231,7 +234,7 @@ def test_q2_reduces_equal_max_by_earliest_row_across_shards():
     _send_eof(worker, 4)
 
     result = Q2BankMaxPartialSerializer.deserialize(
-        worker.internal_protocol.unpack_packet(out.sent[0])[2]
+        worker.internal_protocol.unpack_addressed_packet(out.sent[0])[4]
     )
     assert result.from_account == "earlier"
     assert result.row_number == 10

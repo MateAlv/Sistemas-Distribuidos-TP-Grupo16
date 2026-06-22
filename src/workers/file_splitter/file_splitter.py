@@ -388,9 +388,11 @@ class FileSplitter:
         )
         payload = self._line_batch_serializer.serialize(batch)
         if state.file_type == FILE_TYPE_ACCOUNTS:
-            message = self._internal_protocol.create_packet(
+            message = self._internal_protocol.create_addressed_packet(
                 msg_type=MessageType.DATA,
                 client_id_bytes=key.client_id.to_bytes(16, byteorder="big"),
+                sender_id=self._config.id,
+                seq=state.batch_id,
                 payload=payload,
             )
             self._accounts_sender().send(message)
@@ -452,9 +454,11 @@ class FileSplitter:
                 processed_count=0,
             )
         )
-        message = self._internal_protocol.create_packet(
+        message = self._internal_protocol.create_addressed_packet(
             msg_type=MessageType.EOF,
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            sender_id=self._config.id,
+            seq=batches,
             payload=payload,
         )
         self._accounts_sender().send(message)
@@ -476,8 +480,13 @@ class FileSplitter:
                 "missing transaction header "
                 f"(client_id={key.client_id}, path={key.rel_path})"
             )
+        header_size = (
+            InternalProtocol.ADDRESSED_HEADER_SIZE
+            if state.file_type == FILE_TYPE_ACCOUNTS
+            else InternalProtocol.HEADER_SIZE
+        )
         return (
-            InternalProtocol.HEADER_SIZE
+            header_size
             + LineBatchSerializer.FIXED_HEADER_SIZE
             + len(key.rel_path.encode("utf-8"))
             + sum(_string_item_size(column) for column in state.header)

@@ -191,7 +191,10 @@ class BankNameJoinerWorker:
 
     def _on_q2_message(self, message: bytes, ack, nack) -> None:
         try:
-            msg_type, client_id, payload = self._protocol.unpack_packet(message)
+            msg_type, client_id, _sender_id, _seq, payload = (
+                self._protocol.unpack_addressed_packet(message)
+            )
+            msg_type = MessageType(msg_type)
             should_emit = False
 
             with self._lock:
@@ -253,7 +256,10 @@ class BankNameJoinerWorker:
 
     def _on_accounts_message(self, message: bytes, ack, nack) -> None:
         try:
-            msg_type, client_id, payload = self._protocol.unpack_packet(message)
+            msg_type, client_id, _sender_id, _seq, payload = (
+                self._protocol.unpack_addressed_packet(message)
+            )
+            msg_type = MessageType(msg_type)
             should_emit = False
 
             if msg_type == MessageType.DATA:

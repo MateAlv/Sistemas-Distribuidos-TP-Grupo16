@@ -111,11 +111,27 @@ class JoinerWorker:
             payload=payload,
         )
 
+    def _output_packet(
+        self, msg_type: MessageType, client_id: int, seq: int, payload: bytes
+    ) -> bytes:
+        if CONFIGURATION == C_Q2:
+            return self.internal_protocol.create_addressed_packet(
+                msg_type=msg_type,
+                client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+                sender_id=ID,
+                seq=seq,
+                payload=payload,
+            )
+        return self._packet(msg_type, client_id, payload)
+
     def _result_outputs(self, client_id: int, payloads: list[bytes]) -> list:
         outputs = []
-        for payload in payloads:
+        for seq, payload in enumerate(payloads):
             outputs.append(
-                (OUTPUT_QUEUE, self._packet(MessageType.DATA, client_id, payload))
+                (
+                    OUTPUT_QUEUE,
+                    self._output_packet(MessageType.DATA, client_id, seq, payload),
+                )
             )
 
         control_payload = self.control_serializer.serialize(
@@ -124,7 +140,12 @@ class JoinerWorker:
             )
         )
         outputs.append(
-            (OUTPUT_QUEUE, self._packet(MessageType.EOF, client_id, control_payload))
+            (
+                OUTPUT_QUEUE,
+                self._output_packet(
+                    MessageType.EOF, client_id, len(payloads), control_payload
+                ),
+            )
         )
         return outputs
 
