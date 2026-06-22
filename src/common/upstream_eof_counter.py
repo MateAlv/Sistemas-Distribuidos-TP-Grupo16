@@ -20,6 +20,18 @@ class UpstreamEofCounter:
         seen.add(sender_id)
         return len(seen) >= self._expected
 
+    def would_flush(self, client_id: int, sender_id: int) -> bool:
+        """Read-only: would on_eof return True for this (client, sender)?
+
+        Lets the decide step predict the flush without mutating; the real count
+        advances in apply_change via on_eof. Pure mirror of on_eof's decision."""
+        if client_id in self._closed:
+            return False
+        seen = self._eofs_by_client.get(client_id, ())
+        if sender_id in seen:
+            return False
+        return len(seen) + 1 >= self._expected
+
     def close(self, client_id: int) -> None:
         self._eofs_by_client.pop(client_id, None)
         self._closed.add(client_id)

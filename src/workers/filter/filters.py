@@ -193,6 +193,8 @@ class FilterWorker:
 
         # Logging-only (non-durable): marks the first chunk seen per client.
         self.first_data_logged_by_client = set()
+        self.deserialized_by_client = {}
+        self._q4_next_seq_by_client_partition = {}
 
         # Outputs whose downstream consumer (a WAL-wired worker) deduplicates by
         # (sender_id, seq): these edges carry addressed packets instead of basic ones.
@@ -357,6 +359,12 @@ class FilterWorker:
                 Q3_CANDIDATES_ROUTING_PREFIX,
                 Q3_BARRIER_AMOUNT,
             )
+        if CONFIGURATION == C_DATE and DATE_ENABLE_Q4 and Q4_FILTER_INPUT_EXCHANGE:
+            self._ensure_sharded_output_bindings(
+                Q4_FILTER_INPUT_EXCHANGE,
+                Q4_FILTER_INPUT_ROUTING_PREFIX,
+                Q4_FILTER_AMOUNT,
+            )
 
     def _q4_filter_routing_key(self, partition: int) -> str:
         return queue_name_for_worker(Q4_FILTER_INPUT_ROUTING_PREFIX, partition)
@@ -381,6 +389,45 @@ class FilterWorker:
         )
         return self._q4_filter_routing_key(partition)
 
+    def _is_q4_filter_exchange_output(self, queue_name: str) -> bool:
+        return (
+            CONFIGURATION == C_DATE
+            and DATE_ENABLE_Q4
+            and bool(Q4_FILTER_INPUT_EXCHANGE)
+            and queue_name in self._q4_filter_output_names()
+        )
+
+    def _q4_filter_partition_from_output(self, queue_name: str) -> int:
+        for partition in range(Q4_FILTER_AMOUNT):
+            if queue_name == self._q4_filter_routing_key(partition):
+                return partition
+        raise ValueError(f"unknown q4 filter output queue: {queue_name!r}")
+
+    def _q4_addressed_packet(
+        self,
+        msg_type: MessageType,
+        client_id: int,
+        partition: int,
+        payload: bytes,
+    ) -> bytes:
+        seq_key = (client_id, partition)
+        seq = self._q4_next_seq_by_client_partition.get(seq_key, 0)
+        self._q4_next_seq_by_client_partition[seq_key] = seq + 1
+        return self.internal_packet_serializer.create_addressed_packet(
+            msg_type=msg_type,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            sender_id=ID,
+            seq=seq,
+            payload=payload,
+        )
+
+    def _data_packet(self, client_id: int, payload: bytes) -> bytes:
+        return self.internal_packet_serializer.create_packet(
+            msg_type=message_protocol.internal.MessageType.DATA,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            payload=payload,
+        )
+
     def _next_sum_seq(self, output_name: str, client_id: int) -> int:
         with self._sum_seq_lock:
             key = (output_name, client_id)
@@ -395,7 +442,15 @@ class FilterWorker:
         client_id: int,
         payload: bytes,
     ) -> bytes:
-        # Addressed (sender_id+seq) for WAL-wired SUM edges, basic for the rest.
+        # q4 filter exchange edges are addressed per (client, partition); SUM edges
+        # per (output, client); every other edge stays basic.
+        if self._is_q4_filter_exchange_output(output_name):
+            return self._q4_addressed_packet(
+                msg_type,
+                client_id,
+                self._q4_filter_partition_from_output(output_name),
+                payload,
+            )
         if output_name in self._addressed_outputs:
             return self.internal_packet_serializer.create_addressed_packet(
                 msg_type=msg_type,
@@ -513,6 +568,18 @@ class FilterWorker:
                     sender_id=ID, expected_total=total, processed_count=0
                 )
             )
+            # _output_packet routes q4 edges as addressed per (client, partition) and
+            # SUM edges as addressed per (output, client); every other edge stays basic.
+            return self._output_packet(
+                output_name,
+                message_protocol.internal.MessageType.EOF,
+                client_id,
+                message,
+            )
+
+        def send_eof(output_name: str, total: int):
+            output_queues[output_name].send(eof_packet(output_name, total))
+            self._log_forwarded_eof(client_id, output_name, total)
             return (dest, self._output_packet(dest, MessageType.EOF, client_id, payload))
 
         if CONFIGURATION == C_Q1:

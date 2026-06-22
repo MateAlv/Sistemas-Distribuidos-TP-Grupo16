@@ -3,53 +3,22 @@
 Wraps the aggregator's per-client state behind the snapshot/restore/apply_change
 contract the durable-state engine expects.
 
-Change types
-------------
-  "data"
-      A Q4PairPaths batch arrived. Carries the raw payload (base64) so
-      apply_change can replay the pair counting + qualification logic.
-      When a pair's running total reaches Q4_QUALIFY_THRESHOLD it moves from
-      _pair_counts_by_client to _qualified_pairs_by_client; the actual
-      account-candidate emissions go to the durable outbox.
-  "eof"
-      One upstream joiner sent its EOF. Carries sender_id; apply_change
-      advances the UpstreamEofCounter. Idempotent: duplicate sender_ids are
-      silently ignored (set membership).
-  "close"
-      The client was fully emitted and cleaned up. Pops all per-client maps,
-      closes the EOF counter entry, and marks the client closed.
-
-Caller protocol (one change dict per handle() call to PersistentStateHandler)
-------------------------------------------------------------------------------
-  DATA message
-    → data_change(client_id, payload)
-
-  EOF from one upstream Q4Joiner shard:
-    → eof_change(client_id, sender_id)
-    If eof_count(client_id) == joiner_amount after applying:
-      Read qualified_pairs_for(client_id) + pair_counts_for(client_id).
-      Emit account-candidate batches to outbox.
-      → close_change(client_id)
-
-State accessors (read before close_change)
-------------------------------------------
-  qualified_pairs_for(client_id) → set[tuple]  4-tuples (src_bank, src_acc, tgt_bank, tgt_acc)
-  pair_counts_for(client_id)     → dict[tuple, int]  not-yet-qualified pairs and their counts
-  processed_count(client_id)     → int
-  eof_count(client_id)           → int  how many joiner shards have sent EOF so far
-
-Note: _forwarded_by_partition_by_client is intentionally omitted — those counts
-are computed fresh during the emit phase and are not needed between arrivals.
+DATA changes replay pair counting and qualification. When a pair reaches
+Q4_QUALIFY_THRESHOLD it is marked qualified and the two account-candidate counts
+are recorded by deduper partition. The actual account-candidate packets are
+created by the worker and stored in the durable outbox.
 """
 
 from __future__ import annotations
 
 import base64
+from collections import defaultdict
 
 from common.message_protocol.internal import (
     Q4AccountId,
     Q4PairPathsSerializer,
     Q4_QUALIFY_THRESHOLD,
+    partition_for_parts,
 )
 from common.upstream_eof_counter import UpstreamEofCounter
 
@@ -58,12 +27,12 @@ _pair_ser = Q4PairPathsSerializer()
 
 
 class Q4AggregatorState:
-    def __init__(self, joiner_amount: int) -> None:
+    def __init__(self, joiner_amount: int, deduper_amount: int) -> None:
         self._eof_counter = UpstreamEofCounter(joiner_amount)
-        # (src_bank, src_acc, tgt_bank, tgt_acc) → running path_count total
+        self._deduper_amount = deduper_amount
         self._pair_counts_by_client: dict[int, dict[tuple, int]] = {}
-        # pairs whose total reached Q4_QUALIFY_THRESHOLD
         self._qualified_pairs_by_client: dict[int, set[tuple]] = {}
+        self._forwarded_by_partition_by_client: dict[int, dict[int, int]] = {}
         self._processed_by_client: dict[int, int] = {}
         self._closed_by_client: set[int] = set()
 
@@ -71,7 +40,6 @@ class Q4AggregatorState:
 
     @staticmethod
     def data_change(client_id: int, payload: bytes) -> dict:
-        # payload is base64 because the WAL frames state_change dicts as JSON.
         return {
             "type": "data",
             "client_id": client_id,
@@ -86,7 +54,11 @@ class Q4AggregatorState:
     def close_change(client_id: int) -> dict:
         return {"type": "close", "client_id": client_id}
 
-    # ---------- state accessors (read before close_change) ----------
+    @staticmethod
+    def compound_change(*changes: dict) -> dict:
+        return {"type": "compound", "changes": list(changes)}
+
+    # ---------- state accessors ----------
 
     def pair_counts_for(self, client_id: int) -> dict[tuple, int]:
         return self._pair_counts_by_client.get(client_id, {})
@@ -100,13 +72,41 @@ class Q4AggregatorState:
     def eof_count(self, client_id: int) -> int:
         return self._eof_counter.count(client_id)
 
+    def eof_would_complete(self, client_id: int, sender_id: int) -> bool:
+        return self._eof_counter.would_flush(client_id, sender_id)
+
+    def forwarded_by_partition(self, client_id: int) -> dict[int, int]:
+        return self._forwarded_by_partition_by_client.get(client_id, {})
+
+    def forwarded_total(self, client_id: int) -> int:
+        return sum(self._forwarded_by_partition_by_client.get(client_id, {}).values())
+
     def is_closed(self, client_id: int) -> bool:
         return client_id in self._closed_by_client
+
+    def predict_data_outputs(self, client_id: int, payload: bytes) -> dict[int, list]:
+        """Return account candidates this batch would emit, without mutation."""
+        if client_id in self._closed_by_client:
+            return {}
+        batch = _pair_ser.deserialize_batch(payload)
+        counts = dict(self._pair_counts_by_client.get(client_id, {}))
+        qualified = set(self._qualified_pairs_by_client.get(client_id, set()))
+        by_partition: dict[int, list] = defaultdict(list)
+        _apply_batch(
+            batch,
+            counts,
+            qualified,
+            lambda key: _append_pair_accounts(
+                by_partition,
+                key,
+                self._deduper_amount,
+            ),
+        )
+        return dict(by_partition)
 
     # ---------- WorkerState protocol ----------
 
     def snapshot(self) -> dict:
-        # Tuple keys survive pickle without conversion.
         return {
             "pair_counts_by_client": {
                 cid: dict(counts)
@@ -115,6 +115,10 @@ class Q4AggregatorState:
             "qualified_pairs_by_client": {
                 cid: set(pairs)
                 for cid, pairs in self._qualified_pairs_by_client.items()
+            },
+            "forwarded_by_partition_by_client": {
+                cid: dict(counts)
+                for cid, counts in self._forwarded_by_partition_by_client.items()
             },
             "processed_by_client": dict(self._processed_by_client),
             "eof_counter": self._eof_counter.snapshot(),
@@ -125,6 +129,7 @@ class Q4AggregatorState:
         if not data:
             self._pair_counts_by_client = {}
             self._qualified_pairs_by_client = {}
+            self._forwarded_by_partition_by_client = {}
             self._processed_by_client = {}
             self._closed_by_client = set()
             return
@@ -136,18 +141,25 @@ class Q4AggregatorState:
             cid: set(pairs)
             for cid, pairs in data["qualified_pairs_by_client"].items()
         }
+        self._forwarded_by_partition_by_client = {
+            cid: dict(counts)
+            for cid, counts in data.get("forwarded_by_partition_by_client", {}).items()
+        }
         self._processed_by_client = dict(data["processed_by_client"])
         self._eof_counter.restore(data["eof_counter"])
         self._closed_by_client = set(data["closed_by_client"])
 
     def apply_change(self, change: dict) -> None:
-        # Single mutation path — runs both live and during WAL replay.
         kind = change["type"]
+        if kind == "compound":
+            for sub in change["changes"]:
+                self.apply_change(sub)
+            return
         client_id = change["client_id"]
         if kind == "data":
             self._apply_data(client_id, change)
         elif kind == "eof":
-            self._apply_eof(client_id, change)
+            self._eof_counter.on_eof(client_id, change["sender_id"])
         elif kind == "close":
             self._apply_close(client_id)
         else:
@@ -162,37 +174,69 @@ class Q4AggregatorState:
         batch = _pair_ser.deserialize_batch(payload)
         counts = self._pair_counts_by_client.setdefault(client_id, {})
         qualified = self._qualified_pairs_by_client.setdefault(client_id, set())
-        for pair_paths in batch:
-            if pair_paths.source == pair_paths.target:
-                continue
-            key = _pair_key(pair_paths.source, pair_paths.target)
-            if key in qualified:
-                continue
-            total = min(
-                Q4_QUALIFY_THRESHOLD,
-                counts.get(key, 0) + int(pair_paths.path_count),
-            )
-            if total >= Q4_QUALIFY_THRESHOLD:
-                counts.pop(key, None)
-                qualified.add(key)
-            else:
-                counts[key] = total
+        forwarded = self._forwarded_by_partition_by_client.setdefault(client_id, {})
+
+        def on_qualified(key) -> None:
+            for account in (_source_from_key(key), _target_from_key(key)):
+                partition = _account_partition(account, self._deduper_amount)
+                forwarded[partition] = forwarded.get(partition, 0) + 1
+
+        _apply_batch(batch, counts, qualified, on_qualified)
         self._processed_by_client[client_id] = (
             self._processed_by_client.get(client_id, 0) + len(batch)
         )
 
-    def _apply_eof(self, client_id: int, change: dict) -> None:
-        # UpstreamEofCounter ignores duplicates — idempotent on WAL replay.
-        self._eof_counter.on_eof(client_id, change["sender_id"])
-
     def _apply_close(self, client_id: int) -> None:
-        # Idempotent: popping a missing key is a no-op.
         self._pair_counts_by_client.pop(client_id, None)
         self._qualified_pairs_by_client.pop(client_id, None)
+        self._forwarded_by_partition_by_client.pop(client_id, None)
         self._processed_by_client.pop(client_id, None)
         self._eof_counter.close(client_id)
         self._closed_by_client.add(client_id)
 
 
+def _apply_batch(batch, counts: dict, qualified: set, on_qualified) -> None:
+    for pair_paths in batch:
+        if pair_paths.source == pair_paths.target:
+            continue
+        key = _pair_key(pair_paths.source, pair_paths.target)
+        if key in qualified:
+            continue
+        total = min(
+            Q4_QUALIFY_THRESHOLD,
+            counts.get(key, 0) + int(pair_paths.path_count),
+        )
+        if total >= Q4_QUALIFY_THRESHOLD:
+            counts.pop(key, None)
+            qualified.add(key)
+            on_qualified(key)
+        else:
+            counts[key] = total
+
+
+def _append_pair_accounts(
+    by_partition: dict[int, list],
+    key: tuple,
+    deduper_amount: int,
+) -> None:
+    for account in (_source_from_key(key), _target_from_key(key)):
+        by_partition[_account_partition(account, deduper_amount)].append(account)
+
+
 def _pair_key(source: Q4AccountId, target: Q4AccountId) -> tuple:
     return (source.bank_id, source.account, target.bank_id, target.account)
+
+
+def _source_from_key(key) -> Q4AccountId:
+    return Q4AccountId(bank_id=key[0], account=key[1])
+
+
+def _target_from_key(key) -> Q4AccountId:
+    return Q4AccountId(bank_id=key[2], account=key[3])
+
+
+def _account_partition(account: Q4AccountId, deduper_amount: int) -> int:
+    return partition_for_parts(
+        (account.bank_id, account.account),
+        deduper_amount,
+    )

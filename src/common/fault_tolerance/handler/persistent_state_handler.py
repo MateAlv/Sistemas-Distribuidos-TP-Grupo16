@@ -17,10 +17,13 @@ in an un-rotated WAL never double-applies.
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Callable
 
 from common.fault_tolerance.handler.action import Action
 from common.fault_tolerance.handler.sender_sequencer import (
+    EdgeSpec,
     LogicalOutput,
     SenderSequencer,
 )
@@ -51,17 +54,19 @@ class PersistentStateHandler:
         worker_state: WorkerState,
         snapshot_every: int,
         *,
+        output_edges: dict[str, EdgeSpec] | None = None,
         last_state: LastState | None = None,
         wal: Wal | None = None,
     ) -> None:
         self.node_id = node_id
         self.snapshot_every = snapshot_every
         self.worker_state = worker_state
+        self.output_edges = output_edges
         self.last_state = last_state if last_state is not None else LastState(state_dir)
         self.wal = wal if wal is not None else Wal(state_dir)
         self.inbox = Inbox()
         self.outbox = Outbox()
-        self.sequencer = SenderSequencer(node_id)
+        self.sequencer = SenderSequencer(node_id, output_edges)
         self.applied_since_snapshot = 0
 
     def recover(self) -> None:
@@ -71,7 +76,9 @@ class PersistentStateHandler:
             self.worker_state.restore(snapshot.worker_state)
             self.inbox = Inbox.from_dict(snapshot.inbox)
             self.outbox = Outbox.from_dict(snapshot.outbox)
-            self.sequencer = SenderSequencer.from_dict(self.node_id, snapshot.sequencer)
+            self.sequencer = SenderSequencer.from_dict(
+                self.node_id, snapshot.sequencer, self.output_edges
+            )
             from_record = snapshot.wal_checkpoint_record
 
         applied = 0
@@ -103,7 +110,7 @@ class PersistentStateHandler:
             self.wal.append(
                 InputApplied(msg_id, client_id, sender_id, seq, state_change, outputs, kind)
             )
-            self.sequencer.advance(client_id, len(outputs))
+            self.sequencer.observe(outputs)
             self.worker_state.apply_change(state_change)
             self.inbox.mark_applied(client_id, sender_id, seq, kind)
             self.outbox.add(client_id, msg_id, outputs)
@@ -133,6 +140,8 @@ class PersistentStateHandler:
     def snapshot_now(self) -> None:
         """Snapshot + rotate unconditionally. Used to persist state mutated
         outside the WAL (e.g. the EOF coordinator) before acking its message."""
+        started = time.monotonic()
+        applied = self.applied_since_snapshot
         snapshot = Snapshot(
             wal_checkpoint_record=REPLAY_ALL,
             worker_state=self.worker_state.snapshot(),
@@ -143,6 +152,11 @@ class PersistentStateHandler:
         self.last_state.commit(snapshot)
         self.wal.rotate()
         self.applied_since_snapshot = 0
+        logging.info(
+            "SNAPSHOT_TAKEN | node=%s | applied_since_last=%s | every=%s | dur_ms=%.1f",
+            self.node_id, applied, self.snapshot_every,
+            (time.monotonic() - started) * 1000.0,
+        )
 
     def _apply_record(self, record: WalRecord) -> bool:
         """Replay one record into memory, skipping anything already reflected in

@@ -2,39 +2,40 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass, field
 
-from common.bank_ids import notebook_bank_id
-from common.batch_buffer import BatchBuffer
 from common.eof_coordinator import (
     BroadcastAction,
     EofCoordinator,
     FlushAction,
     SendAnswerAction,
 )
+from common.fault_tolerance.handler import Action, EdgeSpec, PersistentStateHandler
+from common.fault_tolerance.inbox import InboxStatus, MsgKind
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal import (
     InternalProtocol,
-    Q4CountedEdge,
     Q4CountedEdgeSerializer,
-    Q4TransactionEdge,
+    Q4AccountId,
     Q4_EDGE_INCOMING,
     Q4_EDGE_OUTGOING,
-    Q4AccountId,
     TransactionSerializer,
-    partition_for_parts,
 )
 from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import (
     ControlMessageSerializer,
 )
-from common.middleware import LazyQueue
+from common.middleware import LazyQueue, ShardedPublisher
 from common.middleware.middleware_rabbitmq import (
     ensure_exchange_queue_bindings,
     MessageMiddlewareExchangeRabbitMQ,
     MessageMiddlewareQueueRabbitMQ,
 )
 from common.routing import queue_name_for_worker
+
+try:
+    from q4_filter_state import Q4FilterState
+except ImportError:
+    from workers.scatter_gather.q4_filter.q4_filter_state import Q4FilterState
 
 
 ID = int(os.environ["ID"])
@@ -49,21 +50,14 @@ Q4_FILTER_PREFIX = os.environ.get("Q4_FILTER_PREFIX", "q4_filter")
 Q4_SUM_EXCHANGE = os.environ["Q4_SUM_EXCHANGE"]
 Q4_SUM_AMOUNT = int(os.environ["Q4_SUM_AMOUNT"])
 Q4_SUM_ROUTING_PREFIX = os.environ.get("Q4_SUM_ROUTING_PREFIX", "q4_sum")
-Q4_FILTER_BATCH_BYTES = int(
-    os.environ.get("Q4_FILTER_BATCH_BYTES", str(1024 * 1024))
-)
 Q4_FILTER_BATCH_MAX_EDGES = int(
     os.environ.get("Q4_FILTER_BATCH_MAX_EDGES", "5000")
 )
+STATE_DIR = os.environ.get("STATE_DIR", "")
+SNAPSHOT_INTERVAL = int(os.environ.get("SNAPSHOT_INTERVAL", "1000"))
 Q4_FILTER_CONTROL_QUEUE_PREFIX = f"{Q4_FILTER_PREFIX}_control"
 Q4_FILTER_RESPONSE_QUEUE_PREFIX = f"{Q4_FILTER_PREFIX}_response"
-
-
-@dataclass
-class _SourceState:
-    targets: set[Q4AccountId] = field(default_factory=set)
-    qualified: bool = False
-    pending: list[Q4TransactionEdge] = field(default_factory=list)
+Q4_SUM_EDGE = "q4_sum"
 
 
 class Q4FilterWorker:
@@ -76,30 +70,34 @@ class Q4FilterWorker:
             mode="flush_order",
             leader_id=LEADER_ID,
         )
+        self._state = Q4FilterState(self._coordinator, Q4_SUM_AMOUNT)
+        self._handler = PersistentStateHandler(
+            state_dir=STATE_DIR,
+            node_id=f"q4_filter_{ID}",
+            worker_state=self._state,
+            snapshot_every=SNAPSHOT_INTERVAL,
+            output_edges={
+                Q4_SUM_EDGE: EdgeSpec(sender_id=ID, shard_count=Q4_SUM_AMOUNT)
+            },
+        )
 
         self._proto = InternalProtocol()
         self._tx_serializer = TransactionSerializer()
         self._counted_edge_serializer = Q4CountedEdgeSerializer()
         self._control_serializer = ControlMessageSerializer()
-        self._batcher = BatchBuffer(
-            Q4_FILTER_BATCH_BYTES,
-            Q4_FILTER_BATCH_MAX_EDGES,
-        )
-
         self._lock = threading.Lock()
-        self._states_by_client: dict[int, dict[Q4AccountId, _SourceState]] = {}
-        self._processed_by_client: dict[int, int] = {}
-        self._forwarded_by_partition_by_client: dict[int, dict[int, int]] = {}
-        self._closed_by_client: set[int] = set()
+        self._tls = threading.local()
 
         self._input = self._new_input()
-        self._edge_store_output = self._new_edge_store_output()
         self.control_consumer = None
         self.response_consumer = None
         self._control_thread = None
         self._response_thread = None
         self._closed = False
         self._stopped = False
+
+        self._handler.recover()
+        self._republish_pending()
 
     # ---------- connection helpers ----------
 
@@ -116,9 +114,6 @@ class Q4FilterWorker:
             MOM_HOST, os.environ.get("INPUT_QUEUE", "q4_filter_input")
         )
 
-    def _new_edge_store_output(self):
-        return MessageMiddlewareExchangeRabbitMQ(MOM_HOST, Q4_SUM_EXCHANGE, [])
-
     def _ensure_output_bindings(self) -> None:
         ensure_exchange_queue_bindings(
             MOM_HOST,
@@ -131,13 +126,31 @@ class Q4FilterWorker:
             },
         )
 
-    def _new_control_senders(self) -> dict:
-        return {
-            self._coordinator.control_queue_for(i): LazyQueue(
-                MOM_HOST, self._coordinator.control_queue_for(i)
-            )
-            for i in range(Q4_FILTER_AMOUNT)
-        }
+    def _tl_sender(self, destination: str):
+        if not hasattr(self._tls, "senders"):
+            self._tls.senders = {}
+        if destination not in self._tls.senders:
+            if destination == Q4_SUM_EDGE:
+                self._tls.senders[destination] = ShardedPublisher(
+                    MOM_HOST,
+                    Q4_SUM_EXCHANGE,
+                    Q4_SUM_ROUTING_PREFIX,
+                    Q4_SUM_AMOUNT,
+                )
+            else:
+                self._tls.senders[destination] = LazyQueue(MOM_HOST, destination)
+        return self._tls.senders[destination]
+
+    def _republish_pending(self) -> None:
+        for entry in self._handler.outbox_to_republish():
+            try:
+                self._publish([entry])
+            except Exception:
+                logging.exception(
+                    "q4_filter_republish_error | id=%s | destination=%s",
+                    ID,
+                    entry.destination,
+                )
 
     # ---------- packet helpers ----------
 
@@ -148,324 +161,447 @@ class Q4FilterWorker:
             payload=payload,
         )
 
-    def _routing_key(self, partition: int) -> str:
-        return f"{Q4_SUM_ROUTING_PREFIX}_{partition}"
-
-    def _edge_store_partition(self, account_id: Q4AccountId) -> int:
-        return partition_for_parts(
-            (account_id.bank_id, account_id.account),
-            Q4_SUM_AMOUNT,
-        )
-
-    def _edge_from_transaction(self, tx) -> Q4TransactionEdge:
-        return Q4TransactionEdge(
-            source=Q4AccountId(
-                bank_id=notebook_bank_id(tx.from_bank),
-                account=(tx.from_account or "").strip(),
-            ),
-            target=Q4AccountId(
-                bank_id=notebook_bank_id(tx.to_bank),
-                account=(tx.to_account or "").strip(),
-            ),
-        )
-
-    # ---------- edge emit helpers ----------
-
-    def _emit_counted_edge(self, client_id: int, edge: Q4CountedEdge, output=None) -> None:
-        output = output or self._edge_store_output
-        partition = self._edge_store_partition(edge.intermediate)
-        payload = self._counted_edge_serializer.serialize(edge)
-        batch_payload = self._batcher.append((client_id, partition), payload)
-        counts = self._forwarded_by_partition_by_client.setdefault(client_id, {})
-        counts[partition] = counts.get(partition, 0) + 1
-        if batch_payload is not None:
-            self._send_batch(client_id, partition, batch_payload, output)
-
-    def _emit_qualified_edge(self, client_id: int, edge: Q4TransactionEdge, output=None) -> int:
-        self._emit_counted_edge(
-            client_id,
-            Q4CountedEdge(role=Q4_EDGE_INCOMING, intermediate=edge.target, endpoint=edge.source, count=1),
-            output,
-        )
-        self._emit_counted_edge(
-            client_id,
-            Q4CountedEdge(role=Q4_EDGE_OUTGOING, intermediate=edge.source, endpoint=edge.target, count=1),
-            output,
-        )
-        return 2
-
-    def _send_batch(self, client_id: int, partition: int, batch_payload: bytes, output=None) -> None:
-        output = output or self._edge_store_output
-        output.send(
-            self._packet(MessageType.DATA, client_id, batch_payload),
-            routing_key=self._routing_key(partition),
-        )
-
-    def _flush_client_buffers(self, client_id: int, output=None) -> None:
-        for (_, partition), batch_payload in self._batcher.flush(lambda k: k[0] == client_id):
-            self._send_batch(client_id, partition, batch_payload, output)
-
-    def _forward_eof_to_edge_store(
-        self, client_id: int, counts_by_partition: dict[int, int], output=None
-    ) -> None:
-        output = output or self._edge_store_output
-        for partition in range(Q4_SUM_AMOUNT):
-            expected_total = int(counts_by_partition.get(partition, 0))
-            payload = self._control_serializer.serialize(
-                ControlMessage(sender_id=ID, expected_total=expected_total, processed_count=0)
+    def _control_payload(
+        self,
+        sender_id: int,
+        expected_total: int,
+        processed_count: int,
+    ) -> bytes:
+        return self._control_serializer.serialize(
+            ControlMessage(
+                sender_id=sender_id,
+                expected_total=expected_total,
+                processed_count=processed_count,
             )
-            output.send(
-                self._packet(MessageType.EOF, client_id, payload),
-                routing_key=self._routing_key(partition),
+        )
+
+    def _build_data_outputs(self, client_id: int, payload: bytes) -> list:
+        outputs = []
+        by_partition = self._state.predict_data_outputs(client_id, payload)
+        for partition in sorted(by_partition):
+            for chunk in _chunks(by_partition[partition], Q4_FILTER_BATCH_MAX_EDGES):
+                batch_payload = self._counted_edge_serializer.serialize_batch(chunk)
+                outputs.append(
+                    (
+                        Q4_SUM_EDGE,
+                        self._packet(MessageType.DATA, client_id, batch_payload),
+                        partition,
+                    )
+                )
+        return outputs
+
+    def _build_eof_outputs(self, client_id: int) -> list:
+        outputs = []
+        counts = self._state.forwarded_by_partition(client_id)
+        for partition in range(Q4_SUM_AMOUNT):
+            expected_total = int(counts.get(partition, 0))
+            outputs.append(
+                (
+                    Q4_SUM_EDGE,
+                    self._packet(
+                        MessageType.EOF,
+                        client_id,
+                        self._control_payload(ID, expected_total, 0),
+                    ),
+                    partition,
+                )
             )
             logging.info(
                 "q4_filter_forward_eof | id=%s | client_id=%s | "
                 "edge_store_partition=%s | expected_total=%s",
-                ID, client_id, partition, expected_total,
+                ID,
+                client_id,
+                partition,
+                expected_total,
             )
+        return outputs
 
-    def _do_broadcast(self, action: BroadcastAction, control_senders: dict) -> None:
+    def _publish(self, entries) -> None:
+        for entry in entries:
+            sender = self._tl_sender(entry.destination)
+            if entry.shard is None:
+                sender.send(entry.body)
+            else:
+                sender.send_to_shard(entry.body, entry.shard)
+
+    def _publish_then_commit(self, instruction) -> None:
+        if instruction.action is Action.PUBLISH_THEN_COMMIT:
+            self._publish(instruction.outputs)
+            with self._lock:
+                self._handler.commit_done(*instruction.ctx)
+
+    def _do_broadcast(self, action: BroadcastAction) -> None:
         if action.sleep_before > 0:
             time.sleep(action.sleep_before)
         for qname in action.queue_names:
-            control_senders[qname].send(action.message)
-
-    # ---------- source gate ----------
-
-    def _accept_edge_locked(self, client_id: int, edge: Q4TransactionEdge, output=None) -> int:
-        states = self._states_by_client.setdefault(client_id, {})
-        state = states.setdefault(edge.source, _SourceState())
-        if state.qualified:
-            return self._emit_qualified_edge(client_id, edge, output)
-        state.pending.append(edge)
-        if len(state.targets) < 6:
-            state.targets.add(edge.target)
-        if len(state.targets) < 6:
-            return 0
-        state.qualified = True
-        state.targets.clear()
-        forwarded = 0
-        for e in state.pending:
-            forwarded += self._emit_qualified_edge(client_id, e, output)
-        state.pending = []
-        return forwarded
+            self._tl_sender(qname).send(action.message)
 
     # ---------- data path ----------
 
-    def _handle_data_packet(self, client_id: int, payload: bytes) -> None:
-        transactions = self._tx_serializer.deserialize_batch(payload)
-        if not transactions:
-            return
+    def _process_data_message(self, raw, ack, nack) -> None:
+        try:
+            msg_type, client_id, sender_id, seq, payload = (
+                self._proto.unpack_addressed_packet(raw)
+            )
+            msg_id = f"d:{sender_id}:{client_id}:{seq}"
 
-        edges = [self._edge_from_transaction(tx) for tx in transactions]
-        with self._lock:
-            if client_id in self._closed_by_client:
-                logging.info(
-                    "q4_filter_message_for_closed_client | id=%s | client_id=%s", ID, client_id
+            if msg_type == MessageType.DATA:
+                def bfn(data):
+                    return (
+                        Q4FilterState.data_change(client_id, data),
+                        self._build_data_outputs(client_id, data),
+                    )
+
+                with self._lock:
+                    instruction = self._handler.handle(
+                        msg_id, client_id, sender_id, seq, payload, bfn
+                    )
+                self._publish_then_commit(instruction)
+                ack()
+
+                processed = self._state.processed_count(client_id)
+                if should_log_progress(processed):
+                    logging.info(
+                        "q4_filter_data_batch | id=%s | client_id=%s | "
+                        "processed_total=%s | forwarded_total=%s",
+                        ID,
+                        client_id,
+                        processed,
+                        self._state.forwarded_total(client_id),
+                    )
+                return
+
+            if msg_type == MessageType.EOF:
+                self._handle_upstream_eof(
+                    msg_id, client_id, sender_id, seq, payload, ack
                 )
                 return
-            for edge in edges:
-                self._accept_edge_locked(client_id, edge)
-            self._processed_by_client[client_id] = (
-                self._processed_by_client.get(client_id, 0) + len(edges)
-            )
-            processed_total = self._processed_by_client[client_id]
-            forwarded_total = sum(self._forwarded_by_partition_by_client.get(client_id, {}).values())
 
-        if should_log_progress(processed_total):
-            logging.info(
-                "q4_filter_data_batch | id=%s | client_id=%s | "
-                "batch_size=%s | processed_total=%s | forwarded_total=%s",
-                ID, client_id, len(edges), processed_total, forwarded_total,
-            )
+            raise ValueError(f"unexpected q4 source prefilter message: {msg_type}")
+        except Exception:
+            logging.exception("q4_filter_error | id=%s", ID)
+            nack(requeue=True)
 
-    def _handle_upstream_eof(self, client_id: int, payload: bytes, response_queue) -> None:
+    def _handle_upstream_eof(
+        self,
+        msg_id: str,
+        client_id: int,
+        sender_id: int,
+        seq: int,
+        payload: bytes,
+        ack,
+    ) -> None:
         ctrl = self._control_serializer.deserialize(payload)
         with self._lock:
-            if client_id in self._closed_by_client:
+            status = self._handler.inbox.classify(client_id, sender_id, seq)
+            if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
+                ack()
                 return
-            count = self._processed_by_client.get(client_id, 0)
-            forwarded = sum(self._forwarded_by_partition_by_client.get(client_id, {}).values())
-            action = self._coordinator.on_upstream_eof(
-                client_id, ctrl.expected_total, count, forwarded
+
+            count = self._state.processed_count(client_id)
+            forwarded = self._state.forwarded_total(client_id)
+
+            def bfn(_data):
+                coordinator_snapshot = self._coordinator.snapshot()
+                action = self._coordinator.on_upstream_eof(
+                    client_id, ctrl.expected_total, count, forwarded
+                )
+                self._coordinator.restore(coordinator_snapshot)
+                eof_change = Q4FilterState.coordinator_upstream_eof_change(
+                    client_id, ctrl.expected_total, count, forwarded
+                )
+                if isinstance(action, SendAnswerAction):
+                    return eof_change, [(action.queue_name, action.message)]
+                if isinstance(action, FlushAction):
+                    return (
+                        Q4FilterState.compound_change(
+                            eof_change, Q4FilterState.close_change(client_id)
+                        ),
+                        self._build_eof_outputs(client_id),
+                    )
+                return eof_change, []
+
+            instruction = self._handler.handle(
+                msg_id, client_id, sender_id, seq, payload, bfn
             )
-        if action is None:
-            return
+
+        self._publish_then_commit(instruction)
+        ack()
         logging.info(
             "q4_filter_upstream_eof | id=%s | client_id=%s | "
             "expected_total=%s | processed_snapshot=%s | forwarded_snapshot=%s",
-            ID, client_id, ctrl.expected_total, count, forwarded,
+            ID,
+            client_id,
+            ctrl.expected_total,
+            count,
+            forwarded,
         )
-        if isinstance(action, SendAnswerAction):
-            response_queue.send(action.message)
-        elif isinstance(action, FlushAction):
-            # N=1 shortcut: flush directly from data thread
-            with self._lock:
-                if client_id in self._closed_by_client:
-                    return
-                counts_by_partition = dict(
-                    self._forwarded_by_partition_by_client.get(client_id, {})
-                )
-                self._states_by_client.pop(client_id, None)
-                self._processed_by_client.pop(client_id, None)
-                self._forwarded_by_partition_by_client.pop(client_id, None)
-                self._closed_by_client.add(client_id)
-            self._flush_client_buffers(client_id)
-            self._forward_eof_to_edge_store(client_id, counts_by_partition)
-
-    def _on_message(self, raw, ack, nack, response_queue) -> None:
-        try:
-            msg_type, client_id, payload = self._proto.unpack_packet(raw)
-            if msg_type == MessageType.DATA:
-                self._handle_data_packet(client_id, payload)
-            elif msg_type == MessageType.EOF:
-                self._handle_upstream_eof(client_id, payload, response_queue)
-            else:
-                raise ValueError(f"unexpected q4 source prefilter message: {msg_type}")
-            ack()
-        except Exception:
-            logging.exception("q4_filter_error | id=%s", ID)
-            nack()
 
     # ---------- control path ----------
 
-    def _handle_control(self, message, ack, nack, response_sender, output) -> None:
+    def _handle_control(self, message, ack, nack) -> None:
         try:
             msg_type, client_id, ctrl = self._coordinator.parse_message(message)
         except Exception:
             logging.exception("q4_filter_control_parse_error | id=%s", ID)
-            nack()
+            nack(requeue=True)
             return
 
-        counts_by_partition = None
-        with self._lock:
-            count = self._processed_by_client.get(client_id, 0)
-            forwarded = sum(self._forwarded_by_partition_by_client.get(client_id, {}).values())
-            action = self._coordinator.process_control_message(
-                msg_type, client_id, ctrl, count, forwarded
+        if msg_type == MessageType.FLUSH_ORDER:
+            self._handle_flush_order(message, client_id, ctrl, ack, nack)
+            return
+
+        if msg_type == MessageType.PROCESSED_REQUEST:
+            try:
+                with self._lock:
+                    count = self._state.processed_count(client_id)
+                    forwarded = self._state.forwarded_total(client_id)
+                    action = self._coordinator.process_control_message(
+                        msg_type, client_id, ctrl, count, forwarded
+                    )
+                if isinstance(action, SendAnswerAction):
+                    self._tl_sender(action.queue_name).send(action.message)
+                ack()
+            except Exception:
+                logging.exception("q4_filter_control_error | id=%s", ID)
+                nack(requeue=True)
+            return
+
+        logging.warning(
+            "q4_filter_unexpected_control_type | id=%s | msg_type=%s | client_id=%s",
+            ID,
+            msg_type,
+            client_id,
+        )
+        ack()
+
+    def _handle_flush_order(self, message, client_id: int, ctrl: ControlMessage, ack, nack) -> None:
+        if ID == LEADER_ID:
+            logging.info(
+                "q4_filter_flush_order_ignored_by_leader | id=%s | client_id=%s",
+                ID,
+                client_id,
             )
-            if isinstance(action, FlushAction):
-                if client_id in self._closed_by_client:
+            ack()
+            return
+
+        sender_id = ctrl.sender_id
+        seq = client_id
+        msg_id = f"fo:{client_id}:{ctrl.sender_id}"
+
+        try:
+            with self._lock:
+                status = self._handler.inbox.classify(
+                    client_id, sender_id, seq, MsgKind.CTRL_FLUSH_ORDER
+                )
+                if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
                     ack()
                     return
-                counts_by_partition = dict(
-                    self._forwarded_by_partition_by_client.get(client_id, {})
-                )
-                self._states_by_client.pop(client_id, None)
-                self._processed_by_client.pop(client_id, None)
-                self._forwarded_by_partition_by_client.pop(client_id, None)
-                self._closed_by_client.add(client_id)
-                self._coordinator.cleanup_client(client_id)
 
-        if action is None:
+                def bfn(_data):
+                    flush_ack = self._coordinator.build_flush_ack(client_id, 0)
+                    return (
+                        Q4FilterState.compound_change(
+                            Q4FilterState.coordinator_cleanup_change(client_id),
+                            Q4FilterState.close_change(client_id),
+                        ),
+                        self._build_eof_outputs(client_id)
+                        + [(self._coordinator.response_queue_for(LEADER_ID), flush_ack)],
+                    )
+
+                instruction = self._handler.handle(
+                    msg_id,
+                    client_id,
+                    sender_id,
+                    seq,
+                    message,
+                    bfn,
+                    kind=MsgKind.CTRL_FLUSH_ORDER,
+                )
+
+            self._publish_then_commit(instruction)
             ack()
-            return
-        if isinstance(action, SendAnswerAction):
-            response_sender.send(action.message)
-            ack()
-        elif isinstance(action, FlushAction):
-            self._flush_client_buffers(client_id, output)
-            self._forward_eof_to_edge_store(client_id, counts_by_partition, output)
-            response_sender.send(self._coordinator.build_flush_ack(client_id, 0))
-            ack()
-        else:
-            logging.warning(
-                "q4_filter_unexpected_control_action | id=%s | action=%s", ID, action
+        except Exception:
+            logging.exception(
+                "q4_filter_flush_order_error | id=%s | client_id=%s",
+                ID,
+                client_id,
             )
-            ack()
+            nack(requeue=True)
 
     def _start_control_consumer(self) -> None:
-        # Assign before the _stopped check so handle_sigterm can always reach this consumer.
         control_consumer = MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, self._coordinator.my_control_queue()
         )
         self.control_consumer = control_consumer
-        response_sender = MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST, self._coordinator.response_queue_for(LEADER_ID)
-        )
-        output = self._new_edge_store_output()
         try:
             if not self._stopped:
-                control_consumer.start_consuming(
-                    lambda msg, ack, nack: self._handle_control(
-                        msg, ack, nack, response_sender, output
-                    )
-                )
+                control_consumer.start_consuming(self._handle_control)
         finally:
-            response_sender.close()
-            output.close()
             control_consumer.close()
 
     # ---------- response path (leader only) ----------
 
-    def _handle_response(self, message, ack, nack, control_senders, output) -> None:
+    def _handle_response(self, message, ack, nack) -> None:
         try:
             msg_type, client_id, ctrl = self._coordinator.parse_message(message)
         except Exception:
             logging.exception("q4_filter_response_parse_error | id=%s", ID)
-            nack()
+            nack(requeue=True)
             return
 
-        counts_by_partition = None
-        with self._lock:
-            action = self._coordinator.process_control_message(msg_type, client_id, ctrl)
-            if isinstance(action, FlushAction) and action.is_leader:
-                if client_id in self._closed_by_client:
+        if msg_type == MessageType.PROCESSED_ANSWER:
+            self._handle_processed_answer(message, client_id, ctrl, ack, nack)
+            return
+
+        if msg_type == MessageType.FLUSH_ACK:
+            self._handle_flush_ack(message, client_id, ctrl, ack, nack)
+            return
+
+        logging.warning(
+            "q4_filter_unexpected_response_type | id=%s | msg_type=%s",
+            ID,
+            msg_type,
+        )
+        ack()
+
+    def _handle_processed_answer(
+        self,
+        message,
+        client_id: int,
+        ctrl: ControlMessage,
+        ack,
+        nack,
+    ) -> None:
+        sender_id = ctrl.sender_id
+        seq = client_id
+        msg_id = f"pa:{client_id}:{ctrl.sender_id}"
+
+        try:
+            with self._lock:
+                def bfn(_data):
+                    coordinator_snapshot = self._coordinator.snapshot()
+                    action = self._coordinator.process_control_message(
+                        MessageType.PROCESSED_ANSWER,
+                        client_id,
+                        ctrl,
+                    )
+                    self._coordinator.restore(coordinator_snapshot)
+                    answer_change = Q4FilterState.coordinator_msg_change(
+                        MessageType.PROCESSED_ANSWER,
+                        client_id,
+                        ctrl.sender_id,
+                        ctrl.expected_total,
+                        ctrl.processed_count,
+                    )
+                    if isinstance(action, BroadcastAction):
+                        return answer_change, [
+                            (qname, action.message) for qname in action.queue_names
+                        ]
+                    if action is not None:
+                        logging.warning(
+                            "q4_filter_unexpected_response_action | id=%s | action=%s",
+                            ID,
+                            action,
+                        )
+                    return answer_change, []
+
+                instruction = self._handler.handle(
+                    msg_id,
+                    client_id,
+                    sender_id,
+                    seq,
+                    message,
+                    bfn,
+                    kind=MsgKind.CTRL_PROCESSED_ANSWER,
+                )
+
+            self._publish_then_commit(instruction)
+            ack()
+        except Exception:
+            logging.exception("q4_filter_response_error | id=%s", ID)
+            nack(requeue=True)
+
+    def _handle_flush_ack(self, message, client_id: int, ctrl: ControlMessage, ack, nack) -> None:
+        sender_id = ctrl.sender_id
+        seq = client_id
+        msg_id = f"fa:{client_id}:{ctrl.sender_id}"
+
+        try:
+            with self._lock:
+                status = self._handler.inbox.classify(
+                    client_id, sender_id, seq, MsgKind.CTRL_FLUSH_ACK
+                )
+                if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
                     ack()
                     return
-                counts_by_partition = dict(
-                    self._forwarded_by_partition_by_client.get(client_id, {})
-                )
-                self._states_by_client.pop(client_id, None)
-                self._processed_by_client.pop(client_id, None)
-                self._forwarded_by_partition_by_client.pop(client_id, None)
-                self._closed_by_client.add(client_id)
 
-        if action is None:
+                already = self._coordinator.has_flush_ack(client_id, ctrl.sender_id)
+                new_ack_count = self._coordinator.flush_ack_count(client_id) + (
+                    0 if already else 1
+                )
+
+                def bfn(_data):
+                    ack_change = Q4FilterState.coordinator_msg_change(
+                        MessageType.FLUSH_ACK,
+                        client_id,
+                        ctrl.sender_id,
+                        ctrl.expected_total,
+                        ctrl.processed_count,
+                    )
+                    if new_ack_count >= Q4_FILTER_AMOUNT - 1:
+                        return (
+                            Q4FilterState.compound_change(
+                                ack_change, Q4FilterState.close_change(client_id)
+                            ),
+                            self._build_eof_outputs(client_id),
+                        )
+                    return ack_change, []
+
+                instruction = self._handler.handle(
+                    msg_id,
+                    client_id,
+                    sender_id,
+                    seq,
+                    message,
+                    bfn,
+                    kind=MsgKind.CTRL_FLUSH_ACK,
+                )
+
+            self._publish_then_commit(instruction)
             ack()
-            return
-        if isinstance(action, BroadcastAction):
-            self._do_broadcast(action, control_senders)
-            ack()
-        elif isinstance(action, FlushAction) and action.is_leader:
-            self._flush_client_buffers(client_id, output)
-            self._forward_eof_to_edge_store(client_id, counts_by_partition, output)
-            ack()
-        else:
-            logging.warning(
-                "q4_filter_unexpected_response_action | id=%s | action=%s", ID, action
+        except Exception:
+            logging.exception(
+                "q4_filter_flush_ack_error | id=%s | client_id=%s",
+                ID,
+                client_id,
             )
-            ack()
+            nack(requeue=True)
 
     def _start_response_consumer(self) -> None:
-        # Assign before the _stopped check so handle_sigterm can always reach this consumer.
         response_consumer = MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, self._coordinator.my_response_queue()
         )
         self.response_consumer = response_consumer
-        control_senders = self._new_control_senders()
-        output = self._new_edge_store_output()
         try:
             if not self._stopped:
-                response_consumer.start_consuming(
-                    lambda msg, ack, nack: self._handle_response(
-                        msg, ack, nack, control_senders, output
-                    )
-                )
+                response_consumer.start_consuming(self._handle_response)
         finally:
-            for q in control_senders.values():
-                q.close()
-            output.close()
             response_consumer.close()
 
     # ---------- lifecycle ----------
 
     def start(self) -> None:
         self._ensure_output_bindings()
+        self._republish_pending()
         logging.info(
             "q4_filter_start | id=%s | amount=%s | input_exchange=%s | "
             "edge_store_exchange=%s | sum_amount=%s | leader=%s",
-            ID, Q4_FILTER_AMOUNT, INPUT_EXCHANGE, Q4_SUM_EXCHANGE, Q4_SUM_AMOUNT,
+            ID,
+            Q4_FILTER_AMOUNT,
+            INPUT_EXCHANGE,
+            Q4_SUM_EXCHANGE,
+            Q4_SUM_AMOUNT,
             ID == LEADER_ID,
         )
         self._control_thread = threading.Thread(target=self._start_control_consumer)
@@ -474,16 +610,10 @@ class Q4FilterWorker:
             self._response_thread = threading.Thread(target=self._start_response_consumer)
             self._response_thread.start()
 
-        data_response = MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST, self._coordinator.response_queue_for(LEADER_ID)
-        )
         try:
             if not self._stopped:
-                self._input.start_consuming(
-                    lambda msg, ack, nack: self._on_message(msg, ack, nack, data_response)
-                )
+                self._input.start_consuming(self._process_data_message)
         finally:
-            data_response.close()
             self.handle_sigterm()
             if self._control_thread is not None:
                 self._control_thread.join(timeout=5)
@@ -506,10 +636,21 @@ class Q4FilterWorker:
         if self._closed:
             return
         self._closed = True
-        for resource in (self._input, self._edge_store_output):
+        for resource in (self._input,):
             if resource is None:
                 continue
             try:
                 resource.close()
             except Exception as e:
                 logging.warning("q4_filter_close_error | id=%s | error=%s", ID, e)
+        if hasattr(self._tls, "senders"):
+            for sender in self._tls.senders.values():
+                try:
+                    sender.close()
+                except Exception as e:
+                    logging.warning("q4_filter_sender_close_error | id=%s | error=%s", ID, e)
+
+
+def _chunks(items: list, size: int):
+    for i in range(0, len(items), size):
+        yield items[i : i + size]

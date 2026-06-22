@@ -804,13 +804,18 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
     for name in rabbitmq_service_names:
         add_env_once(services[name], RABBITMQ_DURABLE_ENV)
 
+    snapshot_interval = int(
+        settings.get("snapshot_interval", DEFAULT_SNAPSHOT_INTERVAL)
+    )
     worker_service_names = [
         name
         for name in services
         if name not in {"rabbitmq", "gateway", "rates_service"}
     ]
     for name in worker_service_names:
-        add_worker_state_volume(name, services[name], named_volumes)
+        add_worker_state_volume(
+            name, services[name], named_volumes, snapshot_interval
+        )
 
     heartbeat_node_names = [
         *worker_service_names
@@ -952,7 +957,6 @@ def file_ingestor_service(
         f"MOM_HOST={MOM_HOST}",
         "PYTHONUNBUFFERED=1",
         "STATE_DIR=/worker_state",
-        "SNAPSHOT_INTERVAL=1000",
     ]
     if filter_usd_amount > 0:
         environment.extend([
@@ -1233,7 +1237,6 @@ def aggregator_service(
             f"SUM_AMOUNT={sum_amount}",
             f"SUM_PREFIX={sum_prefix}",
             "STATE_DIR=/worker_state",
-            "SNAPSHOT_INTERVAL=1000",
         ],
         volumes=[f"{state_volume}:/worker_state"],
     )
@@ -1641,11 +1644,12 @@ def add_worker_state_volume(
     service_name: str,
     service: dict,
     named_volumes: dict[str, None],
+    snapshot_interval: int = DEFAULT_SNAPSHOT_INTERVAL,
 ) -> None:
     volume_name = worker_state_volume_name(service_name)
     named_volumes[volume_name] = None
     add_env_once(service, f"STATE_DIR={WORKER_STATE_DIR}")
-    add_env_once(service, f"SNAPSHOT_INTERVAL={DEFAULT_SNAPSHOT_INTERVAL}")
+    add_env_once(service, f"SNAPSHOT_INTERVAL={snapshot_interval}")
     add_volume_once(service, f"{volume_name}:{WORKER_STATE_DIR}")
 
 
