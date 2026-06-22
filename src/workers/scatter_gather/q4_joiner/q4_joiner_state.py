@@ -85,6 +85,10 @@ class Q4JoinerState:
     def close_change(client_id: int) -> dict:
         return {"type": "close", "client_id": client_id}
 
+    @staticmethod
+    def compound_change(*changes: dict) -> dict:
+        return {"type": "compound", "changes": list(changes)}
+
     # ---------- state accessors (read before close_change) ----------
 
     def incoming_for(self, client_id: int) -> dict[tuple, dict]:
@@ -100,6 +104,9 @@ class Q4JoinerState:
 
     def eof_count(self, client_id: int) -> int:
         return self._eof_counter.count(client_id)
+
+    def eof_would_complete(self, client_id: int, sender_id: int) -> bool:
+        return self._eof_counter.would_flush(client_id, sender_id)
 
     def is_closed(self, client_id: int) -> bool:
         return client_id in self._closed_by_client
@@ -132,6 +139,10 @@ class Q4JoinerState:
     def apply_change(self, change: dict) -> None:
         # Single mutation path — runs both live and during WAL replay.
         kind = change["type"]
+        if kind == "compound":
+            for sub in change["changes"]:
+                self.apply_change(sub)
+            return
         client_id = change["client_id"]
         if kind == "data":
             self._apply_data(client_id, change)
