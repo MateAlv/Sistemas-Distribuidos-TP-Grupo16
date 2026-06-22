@@ -1,4 +1,3 @@
-import hashlib
 import logging
 import os
 import threading
@@ -238,21 +237,15 @@ class FilterQ5UsdWorker:
 
     def _process_data_message(self, message, ack, nack):
         try:
-            msg_type, client_id, payload = self._proto.unpack_packet(message)
+            msg_type, client_id, sender_id, seq, payload = (
+                self._proto.unpack_addressed_packet(message)
+            )
 
             if msg_type == MessageType.DATA:
-                # TEMPORARY: upstream filter (C_Q5 config) still sends plain packets
-                # [msg_type|client_id|payload] via create_packet, not addressed packets.
-                # Once filter migrates to PersistentStateHandler it will use
-                # create_addressed_packet and we can read sender_id/seq directly.
-                # Until then: synthesize a stable dedup key from sha256(message).
-                # Protects against RabbitMQ redelivery of the same bytes on crash.
-                # Does NOT protect against two distinct batches with identical content
-                # (astronomically unlikely in practice for financial transaction data).
-                h = hashlib.sha256(message).digest()
-                sender_id = int.from_bytes(h[:4], "big")
-                seq = int.from_bytes(h[4:8], "big")
-                msg_id = f"d:{sender_id}:{seq}"
+                # Upstream filter (C_Q5) sends addressed packets, so dedup uses the
+                # real (sender_id, seq): protects against RabbitMQ redelivery of the
+                # same batch on crash without synthesizing a key.
+                msg_id = f"d:{sender_id}:{client_id}:{seq}"
 
                 with self._lock:
                     if self._state.is_closed(client_id):
