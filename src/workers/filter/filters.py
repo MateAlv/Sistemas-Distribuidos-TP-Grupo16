@@ -211,6 +211,9 @@ class FilterWorker:
         # queue) must be addressed too — otherwise q4 hits a struct error and nacks.
         if CONFIGURATION == C_DATE and DATE_ENABLE_Q4:
             self._addressed_outputs.update(self._q4_filter_output_names())
+        # q3_barrier (candidates stream) is WAL-wired and reads addressed packets too.
+        if CONFIGURATION == C_DATE and DATE_ENABLE_Q3:
+            self._addressed_outputs.add(Q3_CANDIDATES_QUEUE)
         # Monotonic seq per (output, client). In-memory: resets to 0 on restart.
         # Safe while only the downstream crashes (it replays its WAL and ignores
         # already-DONE seqs); a filter crash is the filter's own (future) FT gap.

@@ -114,7 +114,9 @@ class JoinerWorker:
     def _output_packet(
         self, msg_type: MessageType, client_id: int, seq: int, payload: bytes
     ) -> bytes:
-        if CONFIGURATION == C_Q2:
+        # C_Q2 -> q2_bank_name_joiner (WAL-wired); C_Q3 -> q3_barrier (WAL-wired):
+        # both dedup by (sender_id, seq), so address those edges. C_Q5 stays basic.
+        if CONFIGURATION in (C_Q2, C_Q3):
             return self.internal_protocol.create_addressed_packet(
                 msg_type=msg_type,
                 client_id_bytes=client_id.to_bytes(16, byteorder="big"),
