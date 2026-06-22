@@ -344,6 +344,7 @@ class Q4JoinerWorker:
 
     def start(self) -> None:
         self._ensure_output_bindings()
+        self._republish_pending()
         logging.info(
             "q4_joiner_start | id=%s | input_exchange=%s | input_key=%s | "
             "sum_amount=%s | pair_reducer_exchange=%s | "

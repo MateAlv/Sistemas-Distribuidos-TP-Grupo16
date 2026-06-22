@@ -469,6 +469,38 @@ def test_date_filter_predeclares_sum_q3_and_candidates_bindings(monkeypatch):
     ]
 
 
+def test_date_filter_predeclares_q4_source_prefilter_bindings(monkeypatch):
+    monkeypatch.setenv("Q4_FILTER_INPUT_EXCHANGE", "q4_prefilter")
+    monkeypatch.setenv("Q4_FILTER_INPUT_ROUTING_PREFIX", "q4_source")
+    monkeypatch.setenv("Q4_FILTER_AMOUNT", "2")
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="DATE",
+        usd_enable_q2="0",
+        date_enable_q3="0",
+        date_enable_q4="1",
+    )
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.FilterWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "rabbitmq",
+            "q4_prefilter",
+            {
+                "q4_source_0": "q4_source_0",
+                "q4_source_1": "q4_source_1",
+            },
+        )
+    ]
+
+
 def test_date_filter_uses_notebook_q4_timestamp_bounds(monkeypatch):
     monkeypatch.setenv("FILTER_OUTPUT_BATCH_MAX_TX", "1")
     module = _import_filter_module(
@@ -564,9 +596,12 @@ def test_date_filter_routes_q4_to_source_prefilter_exchange_with_global_eof(
     for key, output in worker.output_queues.items():
         accounts = []
         for packet in output.sent:
-            msg_type, _, payload = InternalProtocol.unpack_packet(packet)
+            msg_type, _, sender_id, _seq, payload = (
+                InternalProtocol.unpack_addressed_packet(packet)
+            )
             if msg_type != MessageType.DATA:
                 continue
+            assert sender_id == 0
             accounts.extend(
                 tx.from_account
                 for tx in TransactionSerializer.deserialize_batch(payload)
@@ -590,13 +625,23 @@ def test_date_filter_routes_q4_to_source_prefilter_exchange_with_global_eof(
     worker._process_data_message(eof_message)
 
     for output in worker.output_queues.values():
+        addressed = [
+            InternalProtocol.unpack_addressed_packet(packet)
+            for packet in output.sent
+        ]
+        assert [seq for _msg_type, _client, _sender, seq, _payload in addressed] == (
+            list(range(len(addressed)))
+        )
         eof_packets = [
             packet
             for packet in output.sent
-            if InternalProtocol.unpack_packet(packet)[0] == MessageType.EOF
+            if InternalProtocol.unpack_addressed_packet(packet)[0] == MessageType.EOF
         ]
         assert len(eof_packets) == 1
-        _, _, payload = InternalProtocol.unpack_packet(eof_packets[0])
+        _, _, sender_id, _seq, payload = InternalProtocol.unpack_addressed_packet(
+            eof_packets[0]
+        )
+        assert sender_id == 0
         control = module.message_protocol.internal.ControlMessageSerializer.deserialize(
             payload
         )

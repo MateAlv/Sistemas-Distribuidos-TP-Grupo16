@@ -187,6 +187,7 @@ class FilterWorker:
         self.flushed_acks_by_client = {}
         self.first_data_logged_by_client = set()
         self.deserialized_by_client = {}
+        self._q4_next_seq_by_client_partition = {}
 
     # ─── connection factories ────────────────────────────────────────────────
 
@@ -335,6 +336,12 @@ class FilterWorker:
                 Q3_CANDIDATES_ROUTING_PREFIX,
                 Q3_BARRIER_AMOUNT,
             )
+        if CONFIGURATION == C_DATE and DATE_ENABLE_Q4 and Q4_FILTER_INPUT_EXCHANGE:
+            self._ensure_sharded_output_bindings(
+                Q4_FILTER_INPUT_EXCHANGE,
+                Q4_FILTER_INPUT_ROUTING_PREFIX,
+                Q4_FILTER_AMOUNT,
+            )
 
     def _cleanup_client(self, client_id):
         if self._batcher is not None:
@@ -381,12 +388,56 @@ class FilterWorker:
         )
         return self._q4_filter_routing_key(partition)
 
+    def _is_q4_filter_exchange_output(self, queue_name: str) -> bool:
+        return (
+            CONFIGURATION == C_DATE
+            and DATE_ENABLE_Q4
+            and bool(Q4_FILTER_INPUT_EXCHANGE)
+            and queue_name in self._q4_filter_output_names()
+        )
+
+    def _q4_filter_partition_from_output(self, queue_name: str) -> int:
+        for partition in range(Q4_FILTER_AMOUNT):
+            if queue_name == self._q4_filter_routing_key(partition):
+                return partition
+        raise ValueError(f"unknown q4 filter output queue: {queue_name!r}")
+
+    def _q4_addressed_packet(
+        self,
+        msg_type: MessageType,
+        client_id: int,
+        partition: int,
+        payload: bytes,
+    ) -> bytes:
+        seq_key = (client_id, partition)
+        seq = self._q4_next_seq_by_client_partition.get(seq_key, 0)
+        self._q4_next_seq_by_client_partition[seq_key] = seq + 1
+        return self.internal_packet_serializer.create_addressed_packet(
+            msg_type=msg_type,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            sender_id=ID,
+            seq=seq,
+            payload=payload,
+        )
+
     def _data_packet(self, client_id: int, payload: bytes) -> bytes:
         return self.internal_packet_serializer.create_packet(
             msg_type=message_protocol.internal.MessageType.DATA,
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
             payload=payload,
         )
+
+    def _output_data_packet(
+        self, queue_name: str, client_id: int, payload: bytes
+    ) -> bytes:
+        if self._is_q4_filter_exchange_output(queue_name):
+            return self._q4_addressed_packet(
+                MessageType.DATA,
+                client_id,
+                self._q4_filter_partition_from_output(queue_name),
+                payload,
+            )
+        return self._data_packet(client_id, payload)
 
     def _publish_to_queue(
         self, queue_name: str, client_id: int, transaction: Transaction,
@@ -397,18 +448,22 @@ class FilterWorker:
             batch_payload = self._batcher.append(queue_name, client_id, transaction)
             if batch_payload is not None:
                 output_queues[queue_name].send(
-                    self._data_packet(client_id, batch_payload)
+                    self._output_data_packet(queue_name, client_id, batch_payload)
                 )
             return
         payload = self.transaction_serializer.serialize(transaction)
-        output_queues[queue_name].send(self._data_packet(client_id, payload))
+        output_queues[queue_name].send(
+            self._output_data_packet(queue_name, client_id, payload)
+        )
 
     def _flush_batcher_for_client(self, client_id: int, output_queues=None) -> None:
         if self._batcher is None:
             return
         output_queues = output_queues or self.output_queues
         for queue_name, payload in self._batcher.drain_client(client_id).items():
-            output_queues[queue_name].send(self._data_packet(client_id, payload))
+            output_queues[queue_name].send(
+                self._output_data_packet(queue_name, client_id, payload)
+            )
             logging.info(
                 "filter_batcher_flush | filter=%s | id=%s | client_id=%s | "
                 "queue=%s | bytes=%s",
@@ -491,7 +546,7 @@ class FilterWorker:
         def count(queue: str) -> int:
             return int(forwarded_by_output.get(queue, 0))
 
-        def eof_packet(total: int):
+        def eof_packet(total: int, q4_partition: int | None = None):
             message = self.control_serializer.serialize(
                 message_protocol.internal.ControlMessage(
                     sender_id=ID,
@@ -499,6 +554,13 @@ class FilterWorker:
                     processed_count=0
                 )
             )
+            if q4_partition is not None:
+                return self._q4_addressed_packet(
+                    MessageType.EOF,
+                    client_id,
+                    q4_partition,
+                    message,
+                )
             return self.internal_packet_serializer.create_packet(
                 msg_type=message_protocol.internal.MessageType.EOF,
                 client_id_bytes=client_id.to_bytes(16, byteorder='big'),
@@ -539,7 +601,10 @@ class FilterWorker:
                 if Q4_FILTER_INPUT_EXCHANGE:
                     expected_total = count(Q4_FILTER_OUTPUT)
                     for output_name in self._q4_filter_output_names():
-                        output_queues[output_name].send(eof_packet(expected_total))
+                        partition = self._q4_filter_partition_from_output(output_name)
+                        output_queues[output_name].send(
+                            eof_packet(expected_total, partition)
+                        )
                         self._log_forwarded_eof(client_id, output_name, expected_total)
                 else:
                     expected_total = count(SCATTER_GATHER_MAPPER_QUEUE)

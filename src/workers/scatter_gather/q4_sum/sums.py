@@ -3,7 +3,12 @@ import os
 import threading
 from collections import defaultdict
 
-from common.fault_tolerance.handler import EdgeSpec, PersistentStateHandler, WorkerRunner
+from common.fault_tolerance.handler import (
+    Action,
+    EdgeSpec,
+    PersistentStateHandler,
+    WorkerRunner,
+)
 from common.fault_tolerance.inbox import InboxStatus
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal import (
@@ -288,9 +293,10 @@ class Q4SumWorker:
                     msg_id, client_id, sender_id, seq, payload, bfn
                 )
 
-            self._publish(instruction.outputs)
-            with self._lock:
-                self._handler.commit_done(*instruction.ctx)
+            if instruction.action is Action.PUBLISH_THEN_COMMIT:
+                self._publish(instruction.outputs)
+                with self._lock:
+                    self._handler.commit_done(*instruction.ctx)
             ack()
             logging.info(
                 "q4_sum_eof_received | id=%s | client_id=%s | upstream_id=%s | "

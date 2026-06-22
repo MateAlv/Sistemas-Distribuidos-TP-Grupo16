@@ -613,6 +613,58 @@ def test_leader_broadcasts_flush_order_and_flush_ack_closes(monkeypatch, tmp_pat
     assert sum(eof_counts.values()) == 12
 
 
+def test_recovery_republishes_leader_processed_answer_broadcast_before_commit(
+    monkeypatch,
+    tmp_path,
+):
+    module = _load_module(monkeypatch, tmp_path, amount=2, worker_id=0, sum_partitions=2)
+    worker = _worker(module)
+    calls = AckNack()
+    client_id = 44
+    worker._process_data_message(
+        _data_packet(
+            module,
+            client_id,
+            [_tx(to_bank=f"00{i + 2}", to_account=f"M{i}") for i in range(6)],
+            sender_id=5,
+            seq=0,
+        ),
+        calls.ack,
+        calls.nack,
+    )
+    worker._process_data_message(
+        _eof_packet(worker, module, client_id, upstream_id=5, expected_total=6, seq=1),
+        calls.ack,
+        calls.nack,
+    )
+
+    self_report = _queue_messages("q4_filter_response_0")[0]
+    worker._handle_response(self_report, calls.ack, calls.nack)
+
+    def crash_publish(_entries):
+        raise RuntimeError("crash after PROCESSED_ANSWER INPUT_APPLIED")
+
+    monkeypatch.setattr(worker, "_publish", crash_publish)
+    worker._handle_response(
+        _control_packet(
+            worker,
+            MessageType.PROCESSED_ANSWER,
+            client_id,
+            sender_id=1,
+            expected_total=0,
+            processed_count=0,
+        ),
+        calls.ack,
+        calls.nack,
+    )
+
+    assert calls.nacks == 1
+    recovered = _worker(module)
+    assert len(_queue_messages("q4_filter_control_0")) == 1
+    assert len(_queue_messages("q4_filter_control_1")) == 1
+    assert not recovered._state.is_closed(client_id)
+
+
 def test_recovery_republishes_flush_order_outputs_before_commit(monkeypatch, tmp_path):
     module = _load_module(monkeypatch, tmp_path, amount=2, worker_id=1, sum_partitions=2)
     worker = _worker(module)

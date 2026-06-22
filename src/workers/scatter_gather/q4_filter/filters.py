@@ -302,9 +302,11 @@ class Q4FilterWorker:
             forwarded = self._state.forwarded_total(client_id)
 
             def bfn(_data):
+                coordinator_snapshot = self._coordinator.snapshot()
                 action = self._coordinator.on_upstream_eof(
                     client_id, ctrl.expected_total, count, forwarded
                 )
+                self._coordinator.restore(coordinator_snapshot)
                 eof_change = Q4FilterState.coordinator_upstream_eof_change(
                     client_id, ctrl.expected_total, count, forwarded
                 )
@@ -449,23 +451,7 @@ class Q4FilterWorker:
             return
 
         if msg_type == MessageType.PROCESSED_ANSWER:
-            try:
-                with self._lock:
-                    action = self._coordinator.process_control_message(
-                        msg_type, client_id, ctrl
-                    )
-                if isinstance(action, BroadcastAction):
-                    self._do_broadcast(action)
-                elif action is not None:
-                    logging.warning(
-                        "q4_filter_unexpected_response_action | id=%s | action=%s",
-                        ID,
-                        action,
-                    )
-                ack()
-            except Exception:
-                logging.exception("q4_filter_response_error | id=%s", ID)
-                nack(requeue=True)
+            self._handle_processed_answer(message, client_id, ctrl, ack, nack)
             return
 
         if msg_type == MessageType.FLUSH_ACK:
@@ -478,6 +464,63 @@ class Q4FilterWorker:
             msg_type,
         )
         ack()
+
+    def _handle_processed_answer(
+        self,
+        message,
+        client_id: int,
+        ctrl: ControlMessage,
+        ack,
+        nack,
+    ) -> None:
+        sender_id = ctrl.sender_id
+        seq = client_id
+        msg_id = f"pa:{client_id}:{ctrl.sender_id}"
+
+        try:
+            with self._lock:
+                def bfn(_data):
+                    coordinator_snapshot = self._coordinator.snapshot()
+                    action = self._coordinator.process_control_message(
+                        MessageType.PROCESSED_ANSWER,
+                        client_id,
+                        ctrl,
+                    )
+                    self._coordinator.restore(coordinator_snapshot)
+                    answer_change = Q4FilterState.coordinator_msg_change(
+                        MessageType.PROCESSED_ANSWER,
+                        client_id,
+                        ctrl.sender_id,
+                        ctrl.expected_total,
+                        ctrl.processed_count,
+                    )
+                    if isinstance(action, BroadcastAction):
+                        return answer_change, [
+                            (qname, action.message) for qname in action.queue_names
+                        ]
+                    if action is not None:
+                        logging.warning(
+                            "q4_filter_unexpected_response_action | id=%s | action=%s",
+                            ID,
+                            action,
+                        )
+                    return answer_change, []
+
+                instruction = self._handler.handle(
+                    msg_id,
+                    client_id,
+                    sender_id,
+                    seq,
+                    message,
+                    bfn,
+                    kind=MsgKind.CTRL_PROCESSED_ANSWER,
+                )
+
+            self._publish_then_commit(instruction)
+            ack()
+        except Exception:
+            logging.exception("q4_filter_response_error | id=%s", ID)
+            nack(requeue=True)
 
     def _handle_flush_ack(self, message, client_id: int, ctrl: ControlMessage, ack, nack) -> None:
         sender_id = ctrl.sender_id
@@ -550,6 +593,7 @@ class Q4FilterWorker:
 
     def start(self) -> None:
         self._ensure_output_bindings()
+        self._republish_pending()
         logging.info(
             "q4_filter_start | id=%s | amount=%s | input_exchange=%s | "
             "edge_store_exchange=%s | sum_amount=%s | leader=%s",
