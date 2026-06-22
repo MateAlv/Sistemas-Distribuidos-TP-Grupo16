@@ -426,13 +426,6 @@ class FilterWorker:
             payload=payload,
         )
 
-    def _data_packet(self, client_id: int, payload: bytes) -> bytes:
-        return self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.internal.MessageType.DATA,
-            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-            payload=payload,
-        )
-
     def _next_sum_seq(self, output_name: str, client_id: int) -> int:
         with self._sum_seq_lock:
             key = (output_name, client_id)
