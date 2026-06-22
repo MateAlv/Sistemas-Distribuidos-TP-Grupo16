@@ -21,8 +21,7 @@ from common.message_protocol.internal import (
 )
 from common.middleware import (
     MessageMiddlewareQueueRabbitMQ,
-    ShardedPublisher,
-    body_digest_key,
+    SequencedShardedPublisher,
 )
 from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
@@ -74,7 +73,7 @@ class FileSplitter:
     def __init__(self, config: FileSplitterConfig) -> None:
         self._config = config
         self._consumer: MessageMiddlewareExchangeRabbitMQ | None = None
-        self._line_batch_output: ShardedPublisher | None = None
+        self._line_batch_output: SequencedShardedPublisher | None = None
         self._accounts_output: MessageMiddlewareQueueRabbitMQ | None = None
         self._line_batch_serializer = LineBatchSerializer()
         self._control_serializer = ControlMessageSerializer()
@@ -388,18 +387,18 @@ class FileSplitter:
             lines=tuple(state.batch_lines),
         )
         payload = self._line_batch_serializer.serialize(batch)
-        message = self._internal_protocol.create_packet(
-            msg_type=MessageType.DATA,
-            client_id_bytes=key.client_id.to_bytes(16, byteorder="big"),
-            payload=payload,
-        )
         if state.file_type == FILE_TYPE_ACCOUNTS:
+            message = self._internal_protocol.create_packet(
+                msg_type=MessageType.DATA,
+                client_id_bytes=key.client_id.to_bytes(16, byteorder="big"),
+                payload=payload,
+            )
             self._accounts_sender().send(message)
             self._accounts_batches_by_client[key.client_id] = (
                 self._accounts_batches_by_client.get(key.client_id, 0) + 1
             )
         else:
-            self._line_batch_sender().send(message)
+            self._line_batch_sender().send(MessageType.DATA, key.client_id, payload)
         state.data_lines_emitted += len(batch.lines)
         state.batches_emitted += 1
 
@@ -415,7 +414,7 @@ class FileSplitter:
                 batch.batch_id,
                 batch.first_line_number,
                 len(batch.lines),
-                len(message),
+                len(payload),
                 state.data_lines_emitted,
             )
 
@@ -432,12 +431,7 @@ class FileSplitter:
                 processed_count=0,
             )
         )
-        message = self._internal_protocol.create_packet(
-            msg_type=MessageType.EOF,
-            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-            payload=payload,
-        )
-        self._line_batch_sender().send(message)
+        self._line_batch_sender().send(MessageType.EOF, client_id, payload)
         logging.info(
             "file_splitter_transaction_eof_sent | id=%s | client_id=%s | "
             "output_exchange=%s | expected_total=%s",
@@ -498,14 +492,14 @@ class FileSplitter:
             self._files[key] = state
         return state
 
-    def _line_batch_sender(self) -> ShardedPublisher:
+    def _line_batch_sender(self) -> SequencedShardedPublisher:
         if self._line_batch_output is None:
-            self._line_batch_output = ShardedPublisher(
+            self._line_batch_output = SequencedShardedPublisher(
                 self._config.mom_host,
                 self._config.output_exchange,
                 self._config.output_routing_prefix,
                 self._config.output_shard_count,
-                key_fn=body_digest_key,
+                sender_id=self._config.id,
             )
         return self._line_batch_output
 

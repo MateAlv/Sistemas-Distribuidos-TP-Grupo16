@@ -5,7 +5,6 @@ from common.message_protocol.external.types import (
 )
 from common.message_protocol.internal import (
     ControlMessageSerializer,
-    InternalProtocol,
     LineBatchSerializer,
     MessageType,
 )
@@ -23,14 +22,17 @@ ROW_3 = b"2022/09/01 00:10,5,from-3,6,to-3,33.0,US Dollar,Cash"
 
 
 class RecordingSender:
+    """Stands in for SequencedShardedPublisher: records the (msg_type, client_id,
+    payload) the splitter hands it for the addressed line-batch edge."""
+
     def __init__(self):
         self.messages = []
         self.closed = False
 
-    def send(self, message: bytes) -> None:
+    def send(self, msg_type: int, client_id: int, payload: bytes) -> None:
         if self.closed:
             raise RuntimeError("send on closed sender")
-        self.messages.append(message)
+        self.messages.append((msg_type, client_id, payload))
 
     def close(self) -> None:
         self.closed = True
@@ -295,16 +297,16 @@ def _splitter(max_batch_bytes: int) -> tuple[FileSplitter, RecordingSender]:
     return splitter, sender
 
 
-def _line_batch(message: bytes):
-    msg_type, client_id, payload = InternalProtocol.unpack_packet(message)
+def _line_batch(entry):
+    msg_type, client_id, payload = entry
 
     assert msg_type == MessageType.DATA
     assert client_id == 7
     return LineBatchSerializer.deserialize(payload)
 
 
-def _control(message: bytes):
-    msg_type, client_id, payload = InternalProtocol.unpack_packet(message)
+def _control(entry):
+    msg_type, client_id, payload = entry
 
     assert msg_type == MessageType.EOF
     assert client_id == 7
