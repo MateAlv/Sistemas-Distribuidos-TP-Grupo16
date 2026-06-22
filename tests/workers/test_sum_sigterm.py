@@ -80,8 +80,8 @@ def test_sum_sigterm_stops_all_consumers_and_closes(pika_env, monkeypatch):
     assert input_consumer.closed              # close() (main)
     assert control.closed                     # control thread finally
     assert response.closed                    # response thread finally
-    assert all(q.closed for q in worker._main_control_senders.values())
-    assert all(ex.closed for ex in worker._output_exchanges)
+    # Output/control senders are now thread-local, created lazily on first send;
+    # with no message flow there is nothing to close.
 
 
 def test_sum_handle_sigterm_is_idempotent(pika_env, monkeypatch):

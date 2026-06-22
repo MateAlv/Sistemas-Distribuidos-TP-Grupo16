@@ -78,14 +78,19 @@ class FilterQ5UsdState:
         self._coordinator = coordinator
         self._processed_by_client: dict[int, int] = {}
         self._forwarded_by_client: dict[int, int] = {}
+        self._agg_seq_by_client: dict[int, int] = {}
+        self._closed_by_client: set[int] = set()
 
     @staticmethod
-    def data_change(client_id: int, processed_count: int, forwarded_count: int) -> dict:
+    def data_change(
+        client_id: int, processed_count: int, forwarded_count: int, seq_advance: int = 0
+    ) -> dict:
         return {
             "type": "data",
             "client_id": client_id,
             "processed_count": processed_count,
             "forwarded_count": forwarded_count,
+            "seq_advance": seq_advance,
         }
 
     @staticmethod
@@ -130,11 +135,23 @@ class FilterQ5UsdState:
         # Non-leader cleanup after FlushAction(is_leader=False).
         return {"type": "coordinator_cleanup", "client_id": client_id}
 
+    @staticmethod
+    def compound_change(*changes: dict) -> dict:
+        # Bundle multiple changes so PersistentStateHandler sees one change per handle().
+        return {"type": "compound", "changes": list(changes)}
+
+    def is_closed(self, client_id: int) -> bool:
+        return client_id in self._closed_by_client
+
     def processed_count(self, client_id: int) -> int:
         return self._processed_by_client.get(client_id, 0)
 
     def forwarded_count(self, client_id: int) -> int:
         return self._forwarded_by_client.get(client_id, 0)
+
+    def agg_seq(self, client_id: int) -> int:
+        """Current durable outgoing seq for addressed packets to aggregators."""
+        return self._agg_seq_by_client.get(client_id, 0)
 
     # ---------- WorkerState protocol ----------
 
@@ -142,6 +159,8 @@ class FilterQ5UsdState:
         return {
             "processed_by_client": dict(self._processed_by_client),
             "forwarded_by_client": dict(self._forwarded_by_client),
+            "agg_seq_by_client": dict(self._agg_seq_by_client),
+            "closed_by_client": list(self._closed_by_client),
             "eof_coordinator": self._coordinator.snapshot(),
         }
 
@@ -149,14 +168,22 @@ class FilterQ5UsdState:
         if not data:
             self._processed_by_client = {}
             self._forwarded_by_client = {}
+            self._agg_seq_by_client = {}
+            self._closed_by_client = set()
             return
-        self._processed_by_client = dict(data["processed_by_client"])
-        self._forwarded_by_client = dict(data["forwarded_by_client"])
+        self._processed_by_client = {int(k): v for k, v in data["processed_by_client"].items()}
+        self._forwarded_by_client = {int(k): v for k, v in data["forwarded_by_client"].items()}
+        self._agg_seq_by_client = {int(k): v for k, v in data.get("agg_seq_by_client", {}).items()}
+        self._closed_by_client = set(data.get("closed_by_client", []))
         self._coordinator.restore(data["eof_coordinator"])
 
     def apply_change(self, change: dict) -> None:
         # Single mutation path — runs both live and during WAL replay.
         kind = change["type"]
+        if kind == "compound":
+            for sub in change["changes"]:
+                self.apply_change(sub)
+            return
         client_id = change["client_id"]
         if kind == "data":
             self._apply_data(client_id, change)
@@ -182,6 +209,8 @@ class FilterQ5UsdState:
             raise ValueError(f"unknown change type: {kind}")
 
     def _apply_data(self, client_id: int, change: dict) -> None:
+        if client_id in self._closed_by_client:
+            return
         self._processed_by_client[client_id] = (
             self._processed_by_client.get(client_id, 0) + change["processed_count"]
         )
@@ -189,8 +218,14 @@ class FilterQ5UsdState:
             self._forwarded_by_client[client_id] = (
                 self._forwarded_by_client.get(client_id, 0) + change["forwarded_count"]
             )
+        if change.get("seq_advance"):
+            self._agg_seq_by_client[client_id] = (
+                self._agg_seq_by_client.get(client_id, 0) + change["seq_advance"]
+            ) & 0xFFFFFFFF
 
     def _apply_close(self, client_id: int) -> None:
         # Idempotent: popping a missing key is a no-op.
+        self._closed_by_client.add(client_id)
         self._processed_by_client.pop(client_id, None)
         self._forwarded_by_client.pop(client_id, None)
+        self._agg_seq_by_client.pop(client_id, None)

@@ -1,10 +1,11 @@
 import logging
 import os
 import threading
-import time
 
 from common import middleware
 from common.constants import C_Q2, C_Q3, C_Q5
+from common.fault_tolerance.handler.action import Action
+from common.fault_tolerance.handler.persistent_state_handler import PersistentStateHandler
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal.common import MessageType
 from common.message_protocol.internal.common.control_message import ControlMessage
@@ -15,8 +16,10 @@ from common.routing import queue_name_for_worker
 
 try:
     from processors import create_joiner_processor
+    from joiner_state import JoinerState
 except ImportError:
     from workers.joiner.processors import create_joiner_processor
+    from workers.joiner.joiner_state import JoinerState
 
 
 ID = int(os.environ["ID"])
@@ -25,7 +28,8 @@ CONFIGURATION = os.environ["CONFIGURATION"]
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
 OUTPUT_QUEUE = os.environ["OUTPUT_QUEUE"]
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
-MAX_CLIENTS = 500
+STATE_DIR = os.environ.get("STATE_DIR", "/tmp/joiner_state")
+SNAPSHOT_INTERVAL = int(os.environ.get("SNAPSHOT_INTERVAL", "1000"))
 
 # Q3 output routes by client_id to the barrier shard that also receives that
 # client's candidates.
@@ -52,17 +56,53 @@ class JoinerWorker:
 
         self.lock = threading.Lock()
         self.closed = False
-        self.processors_by_client = {}
-        self.data_count_by_client = {}
-        self.eof_count_by_client = {}
-        self.closed_by_client = {}  # client_id -> close_timestamp
-        self._max_closed_clients = MAX_CLIENTS  # Limpiar cuando exceda este límite
-
-    def _processor_for_client(self, client_id: int):
-        return self.processors_by_client.setdefault(
-            client_id,
-            create_joiner_processor(CONFIGURATION),
+        self._state = JoinerState(lambda: create_joiner_processor(CONFIGURATION))
+        self._handler = PersistentStateHandler(
+            state_dir=STATE_DIR,
+            node_id=f"joiner_{CONFIGURATION.lower()}_{ID}",
+            worker_state=self._state,
+            snapshot_every=SNAPSHOT_INTERVAL,
         )
+        self._handler.recover()
+        self._republish_pending()
+
+    @property
+    def processors_by_client(self):
+        return self._state._processors_by_client
+
+    @property
+    def data_count_by_client(self):
+        return self._state._data_count_by_client
+
+    @property
+    def eof_count_by_client(self):
+        return self._state._eof_count_by_client
+
+    @property
+    def closed_by_client(self):
+        return self._state._closed_by_client
+
+    def _republish_pending(self) -> None:
+        for entry in self._handler.outbox_to_republish():
+            try:
+                self.output_resource.send(entry.body)
+            except Exception:
+                logging.exception(
+                    "joiner_republish_error | configuration=%s | id=%s | destination=%s",
+                    CONFIGURATION,
+                    ID,
+                    entry.destination,
+                )
+                raise
+
+    def _publish_commit(self, instruction) -> bool:
+        if instruction.action is Action.ACK:
+            return False
+        for entry in instruction.outputs:
+            self.output_resource.send(entry.body)
+        with self.lock:
+            self._handler.commit_done(*instruction.ctx)
+        return True
 
     def _packet(self, msg_type: MessageType, client_id: int, payload: bytes) -> bytes:
         return self.internal_protocol.create_packet(
@@ -71,21 +111,27 @@ class JoinerWorker:
             payload=payload,
         )
 
-    def _emit_results(self, client_id: int) -> None:
-        with self.lock:
-            processor = self.processors_by_client.pop(client_id, None)
-            self.data_count_by_client.pop(client_id, None)
-            self.eof_count_by_client.pop(client_id, None)
-            self.closed_by_client[client_id] = time.monotonic()
-            
-            # Limpiar entries antiguas si excedemos el límite
-            if len(self.closed_by_client) > self._max_closed_clients:
-                self._cleanup_closed_clients()
+    def _output_packet(
+        self, msg_type: MessageType, client_id: int, seq: int, payload: bytes
+    ) -> bytes:
+        if CONFIGURATION == C_Q2:
+            return self.internal_protocol.create_addressed_packet(
+                msg_type=msg_type,
+                client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+                sender_id=ID,
+                seq=seq,
+                payload=payload,
+            )
+        return self._packet(msg_type, client_id, payload)
 
-        payloads = processor.results() if processor is not None else []
-        for payload in payloads:
-            self.output_resource.send(
-                self._packet(MessageType.DATA, client_id, payload)
+    def _result_outputs(self, client_id: int, payloads: list[bytes]) -> list:
+        outputs = []
+        for seq, payload in enumerate(payloads):
+            outputs.append(
+                (
+                    OUTPUT_QUEUE,
+                    self._output_packet(MessageType.DATA, client_id, seq, payload),
+                )
             )
 
         control_payload = self.control_serializer.serialize(
@@ -93,24 +139,20 @@ class JoinerWorker:
                 sender_id=ID, expected_total=len(payloads), processed_count=0
             )
         )
-        self.output_resource.send(
-            self._packet(MessageType.EOF, client_id, control_payload)
+        outputs.append(
+            (
+                OUTPUT_QUEUE,
+                self._output_packet(
+                    MessageType.EOF, client_id, len(payloads), control_payload
+                ),
+            )
         )
+        return outputs
+
+    def _log_emit(self, client_id: int, results_count: int) -> None:
         logging.info(
             "joiner_emit | configuration=%s | id=%s | client_id=%s | results=%s",
-            CONFIGURATION, ID, client_id, len(payloads),
-        )
-
-    def _cleanup_closed_clients(self) -> None:
-        """Limpia clientes cerrados más antiguos cuando excede el límite (debe llamarse dentro del lock)."""
-        # Ordenar por timestamp y mantener solo los más recientes
-        sorted_clients = sorted(self.closed_by_client.items(), key=lambda x: x[1])
-        to_remove = len(sorted_clients) - self._max_closed_clients // 2
-        for client_id, _ in sorted_clients[:to_remove]:
-            self.closed_by_client.pop(client_id, None)
-        logging.debug(
-            "joiner_cleanup | configuration=%s | id=%s | removed=%s | remaining=%s",
-            CONFIGURATION, ID, to_remove, len(self.closed_by_client),
+            CONFIGURATION, ID, client_id, results_count,
         )
 
     def _build_output(self, configuration: str):
@@ -138,23 +180,23 @@ class JoinerWorker:
         )
 
     def _process_message(self, message: bytes) -> None:
-        msg_type, client_id, payload = self.internal_protocol.unpack_packet(message)
+        msg_type, client_id, sender_id, seq, payload = (
+            self.internal_protocol.unpack_addressed_packet(message)
+        )
+        msg_type = MessageType(msg_type)
+        msg_id = f"d:{sender_id}:{client_id}:{seq}"
 
         with self.lock:
-            if client_id in self.closed_by_client:
-                logging.info(
-                    "joiner_message_for_closed_client | configuration=%s | "
-                    "id=%s | client_id=%s | msg_type=%s",
-                    CONFIGURATION, ID, client_id, msg_type,
-                )
-                return
-
             if msg_type == MessageType.DATA:
-                self._processor_for_client(client_id).accept(payload)
-                self.data_count_by_client[client_id] = (
-                    self.data_count_by_client.get(client_id, 0) + 1
+                def bfn(pl):
+                    return JoinerState.data_change(client_id, pl), []
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, sender_id, seq, payload, bfn
                 )
-                data_count = self.data_count_by_client[client_id]
+                data_count = self._state.data_count(client_id)
+                should_emit = False
+                emit_count = 0
                 if should_log_progress(data_count):
                     logging.info(
                         "joiner_data | configuration=%s | id=%s | client_id=%s | "
@@ -165,12 +207,26 @@ class JoinerWorker:
                         data_count,
                         len(payload),
                     )
-                return
 
-            if msg_type == MessageType.EOF:
-                count = self.eof_count_by_client.get(client_id, 0) + 1
-                self.eof_count_by_client[client_id] = count
-                should_emit = count == AGGREGATION_AMOUNT
+            elif msg_type == MessageType.EOF:
+                def bfn(_pl):
+                    if self._state.is_closed(client_id):
+                        return JoinerState.eof_change(client_id), []
+                    count_after_eof = self._state.eof_count(client_id) + 1
+                    if count_after_eof == AGGREGATION_AMOUNT:
+                        payloads = self._state.results_for(client_id)
+                        return (
+                            JoinerState.close_change(client_id),
+                            self._result_outputs(client_id, payloads),
+                        )
+                    return JoinerState.eof_change(client_id), []
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, sender_id, seq, payload, bfn
+                )
+                count = self._state.eof_count(client_id)
+                should_emit = bool(instruction.outputs)
+                emit_count = max(len(instruction.outputs) - 1, 0)
                 logging.info(
                     "joiner_eof_received | configuration=%s | id=%s | "
                     "client_id=%s | eof_count=%s | expected_eofs=%s | "
@@ -185,9 +241,9 @@ class JoinerWorker:
             else:
                 raise ValueError(f"unsupported message type: {msg_type}")
 
-        # Emitir fuera del lock para no bloquear otros mensajes
-        if msg_type == MessageType.EOF and should_emit:
-            self._emit_results(client_id)
+        committed = self._publish_commit(instruction)
+        if msg_type == MessageType.EOF and committed and should_emit:
+            self._log_emit(client_id, emit_count)
 
     def process_messages(self, message, ack, nack):
         try:
@@ -198,7 +254,7 @@ class JoinerWorker:
                 "joiner_callback_error | configuration=%s | id=%s | error=%s",
                 CONFIGURATION, ID, e,
             )
-            nack()
+            nack(requeue=True)
 
     def start(self):
         self._ensure_output_bindings()

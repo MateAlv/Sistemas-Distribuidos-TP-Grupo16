@@ -6,6 +6,7 @@ import time
 from common import middleware
 from common.constants import C_Q2, C_Q3, C_Q5
 from common.eof_coordinator import EofCoordinator, BroadcastAction, FlushAction, SendAnswerAction
+from common.fault_tolerance.handler.action import Action
 from common.fault_tolerance.handler.persistent_state_handler import PersistentStateHandler
 from common.fault_tolerance.inbox import MsgKind
 from common.logging_utils import should_log_progress
@@ -108,12 +109,33 @@ class AggregatorWorker:
                     ID, entry.destination,
                 )
 
+    def _publish_commit_ack(self, instruction, ack) -> bool:
+        """Publish the stamped outputs, commit the input, ack. Returns whether work
+        was actually done.
+
+        A duplicate or replayed message the inbox already finished comes back as
+        Action.ACK with ctx=None — just ack it; never call commit_done(*None).
+        This is the crash-recovery path: RabbitMQ redelivers an unacked message,
+        the inbox classifies it DONE, and we ack without reprocessing.
+        """
+        if instruction.action is Action.ACK:
+            ack()
+            return False
+        for entry in instruction.outputs:
+            self._tl_sender(entry.destination).send(entry.body)
+        with self._lock:
+            self._handler.commit_done(*instruction.ctx)
+        ack()
+        return True
+
     # ---------- packet helpers ----------
 
-    def _packet(self, msg_type, client_id, payload):
-        return self._internal_protocol.create_packet(
+    def _packet(self, msg_type, client_id, seq, payload):
+        return self._internal_protocol.create_addressed_packet(
             msg_type=msg_type,
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            sender_id=ID,
+            seq=seq,
             payload=payload,
         )
 
@@ -125,11 +147,11 @@ class AggregatorWorker:
     def _build_result_outputs(self, client_id: int, results: list, data_count: int) -> list:
         """Build [(destination, bytes)] for emitting aggregated results downstream."""
         outputs = [
-            (OUTPUT_QUEUE, self._packet(MessageType.DATA, client_id, p))
-            for p in results
+            (OUTPUT_QUEUE, self._packet(MessageType.DATA, client_id, seq, payload))
+            for seq, payload in enumerate(results)
         ]
         outputs.append((OUTPUT_QUEUE, self._packet(
-            MessageType.EOF, client_id, self._eof_payload(len(results))
+            MessageType.EOF, client_id, len(results), self._eof_payload(len(results))
         )))
         logging.info(
             "aggregation_emit | configuration=%s | id=%s | client_id=%s | "
@@ -155,18 +177,16 @@ class AggregatorWorker:
                     instruction = self._handler.handle(
                         msg_id, client_id, sender_id, seq, payload, bfn
                     )
-                # DATA has no outputs; commit immediately.
-                with self._lock:
-                    self._handler.commit_done(*instruction.ctx)
-                ack()
-
-                count = self._state.data_count(client_id)
-                if should_log_progress(count):
-                    logging.info(
-                        "aggregation_data | configuration=%s | id=%s | "
-                        "client_id=%s | data_count=%s",
-                        CONFIGURATION, ID, client_id, count,
-                    )
+                # DATA has no outputs; _publish_commit_ack commits + acks (or just
+                # acks a duplicate the inbox already finished).
+                if self._publish_commit_ack(instruction, ack):
+                    count = self._state.data_count(client_id)
+                    if should_log_progress(count):
+                        logging.info(
+                            "aggregation_data | configuration=%s | id=%s | "
+                            "client_id=%s | data_count=%s",
+                            CONFIGURATION, ID, client_id, count,
+                        )
 
             elif msg_type == MessageType.EOF:
                 ctrl = self._control_serializer.deserialize(payload)
@@ -205,11 +225,7 @@ class AggregatorWorker:
                         msg_id, client_id, sender_id, seq, payload, bfn
                     )
 
-                for entry in instruction.outputs:
-                    self._tl_sender(entry.destination).send(entry.body)
-                with self._lock:
-                    self._handler.commit_done(*instruction.ctx)
-                ack()
+                self._publish_commit_ack(instruction, ack)
                 logging.info(
                     "aggregation_upstream_eof | configuration=%s | id=%s | "
                     "client_id=%s | data_count=%s | expected_total=%s",
@@ -223,7 +239,7 @@ class AggregatorWorker:
             logging.exception(
                 "aggregation_data_error | configuration=%s | id=%s", CONFIGURATION, ID
             )
-            nack()
+            nack(requeue=True)
 
     # ---------- control path ----------
 
@@ -235,7 +251,7 @@ class AggregatorWorker:
                 "aggregation_control_parse_error | configuration=%s | id=%s",
                 CONFIGURATION, ID,
             )
-            nack()
+            nack(requeue=False)
             return
 
         if msg_type != MessageType.FLUSH_ORDER:
@@ -287,18 +303,14 @@ class AggregatorWorker:
                     kind=MsgKind.CTRL_FLUSH_ORDER,
                 )
 
-            for entry in instruction.outputs:
-                self._tl_sender(entry.destination).send(entry.body)
-            with self._lock:
-                self._handler.commit_done(*instruction.ctx)
-            ack()
+            self._publish_commit_ack(instruction, ack)
 
         except Exception:
             logging.exception(
                 "aggregation_control_error | configuration=%s | id=%s | client_id=%s",
                 CONFIGURATION, ID, client_id,
             )
-            nack()
+            nack(requeue=True)
 
     def _start_control_consumer(self):
         control_consumer = MessageMiddlewareQueueRabbitMQ(
@@ -323,7 +335,7 @@ class AggregatorWorker:
                 "aggregation_response_parse_error | configuration=%s | id=%s",
                 CONFIGURATION, ID,
             )
-            nack()
+            nack(requeue=False)
             return
 
         if msg_type == MessageType.PROCESSED_ANSWER:
@@ -390,18 +402,14 @@ class AggregatorWorker:
                         kind=MsgKind.CTRL_FLUSH_ACK,
                     )
 
-                for entry in instruction.outputs:
-                    self._tl_sender(entry.destination).send(entry.body)
-                with self._lock:
-                    self._handler.commit_done(*instruction.ctx)
-                ack()
+                self._publish_commit_ack(instruction, ack)
 
             except Exception:
                 logging.exception(
                     "aggregation_flush_ack_error | configuration=%s | id=%s | client_id=%s",
                     CONFIGURATION, ID, client_id,
                 )
-                nack()
+                nack(requeue=True)
 
         else:
             logging.warning(

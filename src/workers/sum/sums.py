@@ -5,19 +5,22 @@ import time
 
 from common import middleware
 from common.constants import C_Q2, C_Q3
-from common.domain.transaction import Transaction
 from common.eof_coordinator import EofCoordinator, BroadcastAction, FlushAction, SendAnswerAction
+from common.fault_tolerance.handler.action import Action
+from common.fault_tolerance.handler.persistent_state_handler import PersistentStateHandler
+from common.fault_tolerance.inbox import MsgKind
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal import InternalProtocol
-from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 from common.middleware import LazyQueue, MessageMiddlewareQueueRabbitMQ
 from common.routing import queue_name_for_worker, shard_for_key
 
 try:
+    from sum_state import SumState
     from processors import create_sum_processor
 except ImportError:
+    from workers.sum.sum_state import SumState
     from workers.sum.processors import create_sum_processor
 
 
@@ -37,9 +40,23 @@ SUM_CONTROL_QUEUE_PREFIX = f"{SUM_PREFIX}_control"
 SUM_RESPONSE_QUEUE_PREFIX = f"{SUM_PREFIX}_response"
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
+STATE_DIR = os.environ.get("STATE_DIR", "/tmp/sum_state")
+SNAPSHOT_INTERVAL = int(os.environ.get("SNAPSHOT_INTERVAL", "1000"))
 
 
 class SumWorker:
+    """Reduce upstream transactions into per-(partition) partials and forward them
+    to the aggregator shards. Durable via PersistentStateHandler: DATA accumulation
+    and the EOF/flush protocol are WAL-tracked so a crash replays exactly.
+
+    Coordinator mode is "broadcast": the worker that receives a client's upstream
+    EOF becomes the dynamic leader, broadcasts EOF_RECEIVED, collects per-replica
+    PROCESSED_ANSWERs, then FLUSH_ORDER / FLUSH_ACK. Each client is co-located on
+    one shard (filter routes by client_id), so every queue this worker reads is
+    per-replica and RabbitMQ redelivery always returns to the same replica, which
+    is what makes the per-replica inbox dedup valid.
+    """
+
     def __init__(self):
         if CONFIGURATION not in (C_Q2, C_Q3):
             raise ValueError(f"Invalid sum configuration: {CONFIGURATION}")
@@ -52,28 +69,36 @@ class SumWorker:
             mode="broadcast",
         )
 
+        self._state = SumState(
+            coordinator=self._coordinator,
+            processor_factory=lambda: create_sum_processor(CONFIGURATION),
+        )
+        self._handler = PersistentStateHandler(
+            state_dir=STATE_DIR,
+            node_id=f"sum_{ID}",
+            worker_state=self._state,
+            snapshot_every=SNAPSHOT_INTERVAL,
+        )
+
         self._internal_protocol = InternalProtocol()
-        self._transaction_serializer = TransactionSerializer()
         self._control_serializer = ControlMessageSerializer()
 
         self._lock = threading.Lock()
-        self._processed_by_client: dict[int, int] = {}
-        self._processors_by_client: dict = {}
+
+        # Thread-local lazy senders (pika connections are not thread-safe).
+        self._tls = threading.local()
+        # Aggregator routing keys identify exchange destinations vs. named queues.
+        self._agg_routing_keys = {
+            f"{AGGREGATION_PREFIX}_{i}" for i in range(AGGREGATION_AMOUNT)
+        }
         self._partials_forwarded = 0
-        # In-memory monotonic seq counter per client for addressed packets sent to
-        # the aggregator exchange.  Resets to 0 on restart; the aggregator's inbox
-        # treats any seq it has already marked DONE as a duplicate and ignores it,
-        # so a post-restart sequence collision is safe.
+        # Monotonic seq per client for addressed packets sent to the aggregator.
+        # In-memory: resets to 0 on restart. Safe because partials are emitted only
+        # at flush time (recorded by close_change), so a restarted worker never
+        # re-emits for an already-closed client, and the outbox preserves the exact
+        # bytes (with their seqs) for any flush interrupted mid-way.
         self._agg_seq_by_client: dict[int, int] = {}
 
-        # Named control queue senders for the main thread (EOF_RECEIVED broadcast).
-        # Pika connections are not thread-safe; each thread creates its own senders.
-        self._main_control_senders: dict = self._new_control_senders()
-        self._output_exchanges = self._new_output_exchanges()
-
-        # Set by the spawned threads before blocking on start_consuming.
-        # Protected by _stopped_lock to avoid the race where handle_sigterm fires before
-        # the thread assigns these fields.
         self._stopped_lock = threading.Lock()
         self._input_queue: MessageMiddlewareQueueRabbitMQ | None = None
         self._control_consumer: MessageMiddlewareQueueRabbitMQ | None = None
@@ -83,35 +108,43 @@ class SumWorker:
         self._closed = False
         self._stopped = False
 
-    # ---------- connection factories ----------
+        self._handler.recover()
+        self._republish_pending()
 
-    def _new_output_exchanges(self):
-        return [
-            middleware.MessageMiddlewareExchangeRabbitMQ(
-                MOM_HOST,
-                AGGREGATION_PREFIX,
-                [f"{AGGREGATION_PREFIX}_{i}"],
-            )
-            for i in range(AGGREGATION_AMOUNT)
-        ]
+    # ---------- connection helpers ----------
 
-    def _new_control_senders(self) -> dict:
-        return {
-            self._coordinator.control_queue_for(i): LazyQueue(
-                MOM_HOST, self._coordinator.control_queue_for(i)
-            )
-            for i in range(SUM_AMOUNT)
-        }
+    def _tl_sender(self, destination: str):
+        """Return the thread-local sender for a destination.
 
-    def _new_response_senders(self) -> dict:
-        return {
-            self._coordinator.response_queue_for(i): LazyQueue(
-                MOM_HOST, self._coordinator.response_queue_for(i)
-            )
-            for i in range(SUM_AMOUNT)
-        }
+        Aggregator destinations are exchange routing keys (published to the
+        AGGREGATION_PREFIX exchange); everything else is a named control/response
+        queue served by a LazyQueue.
+        """
+        if not hasattr(self._tls, "senders"):
+            self._tls.senders = {}
+        sender = self._tls.senders.get(destination)
+        if sender is None:
+            if destination in self._agg_routing_keys:
+                sender = middleware.MessageMiddlewareExchangeRabbitMQ(
+                    MOM_HOST, AGGREGATION_PREFIX, [destination]
+                )
+            else:
+                sender = LazyQueue(MOM_HOST, destination)
+            self._tls.senders[destination] = sender
+        return sender
 
-    # ---------- helpers ----------
+    def _republish_pending(self) -> None:
+        """Re-send outputs stamped but not committed before the last crash."""
+        for entry in self._handler.outbox_to_republish():
+            try:
+                self._tl_sender(entry.destination).send(entry.body)
+            except Exception:
+                logging.exception(
+                    "sum_republish_error | configuration=%s | id=%s | destination=%s",
+                    CONFIGURATION, ID, entry.destination,
+                )
+
+    # ---------- packet helpers ----------
 
     def _aggregation_index(self, partition_key: str) -> int:
         return shard_for_key(partition_key, AGGREGATION_AMOUNT)
@@ -120,13 +153,6 @@ class SumWorker:
         if INPUT_ROUTING_PREFIX is None:
             raise RuntimeError("INPUT_ROUTING_PREFIX is required for sharded input")
         return queue_name_for_worker(INPUT_ROUTING_PREFIX, ID)
-
-    def _packet(self, msg_type: MessageType, client_id: int, payload: bytes) -> bytes:
-        return self._internal_protocol.create_packet(
-            msg_type=msg_type,
-            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-            payload=payload,
-        )
 
     def _next_agg_seq(self, client_id: int) -> int:
         seq = self._agg_seq_by_client.get(client_id, 0)
@@ -146,240 +172,279 @@ class SumWorker:
 
     def _eof_payload(self, expected_total: int) -> bytes:
         return self._control_serializer.serialize(
-            ControlMessage(
-                sender_id=ID,
-                expected_total=expected_total,
-                processed_count=0,
-            )
+            ControlMessage(sender_id=ID, expected_total=expected_total, processed_count=0)
         )
 
-    def _do_broadcast(self, action: BroadcastAction, control_senders: dict) -> None:
-        if action.sleep_before > 0:
-            time.sleep(action.sleep_before)
-        for qname in action.queue_names:
-            control_senders[qname].send(action.message)
-
-    def _processor_for_client(self, client_id: int):
-        return self._processors_by_client.setdefault(
-            client_id,
-            create_sum_processor(CONFIGURATION),
-        )
-
-    def _partials_for_client(self, client_id: int):
-        processor = self._processors_by_client.get(client_id)
-        if processor is None:
-            return []
-        return processor.partials()
-
-    def _forward_partial(
-        self,
-        client_id: int,
-        partition_key: str,
-        payload: bytes,
-        exchanges,
-    ) -> None:
-        index = self._aggregation_index(partition_key)
-        seq = self._next_agg_seq(client_id)
-        exchanges[index].send(self._addressed_packet(MessageType.DATA, client_id, seq, payload))
-        self._partials_forwarded += 1
-        if should_log_progress(self._partials_forwarded):
-            logging.info(
-                "sum_forward_partial | configuration=%s | id=%s | client_id=%s | "
-                "partition_key=%s | aggregation_index=%s",
-                CONFIGURATION, ID, client_id, partition_key, index,
-            )
-
-    def _forward_partials(self, client_id: int, partials, exchanges) -> int:
-        forwarded = 0
+    def _partials_outputs(self, client_id: int, partials) -> list:
+        """[(agg_routing_key, addressed DATA bytes)] for each partial, sharded by
+        partition key. seqs are assigned here (inside business_fn, NEW path only)."""
+        outputs = []
         for partition_key, payload in partials:
-            self._forward_partial(client_id, partition_key, payload, exchanges)
-            forwarded += 1
-        return forwarded
-
-    def _forward_eof_to_aggregators(
-        self, client_id: int, expected_total: int, exchanges
-    ) -> None:
-        payload = self._eof_payload(expected_total)
-        for index, exchange in enumerate(exchanges):
+            index = self._aggregation_index(partition_key)
             seq = self._next_agg_seq(client_id)
-            exchange.send(self._addressed_packet(MessageType.EOF, client_id, seq, payload))
-            logging.info(
-                "sum_forward_eof_to_aggregator | configuration=%s | id=%s | "
-                "client_id=%s | aggregation_index=%s | expected_total=%s",
-                CONFIGURATION, ID, client_id, index, expected_total,
+            routing_key = f"{AGGREGATION_PREFIX}_{index}"
+            outputs.append(
+                (routing_key, self._addressed_packet(MessageType.DATA, client_id, seq, payload))
             )
+        return outputs
+
+    def _eof_outputs(self, client_id: int, total_forwarded: int) -> list:
+        """[(agg_routing_key, addressed EOF bytes)] for every aggregator shard.
+        Each shard receives the global total_forwarded as its expected_total."""
+        outputs = []
+        payload = self._eof_payload(total_forwarded)
+        for index in range(AGGREGATION_AMOUNT):
+            seq = self._next_agg_seq(client_id)
+            routing_key = f"{AGGREGATION_PREFIX}_{index}"
+            outputs.append(
+                (routing_key, self._addressed_packet(MessageType.EOF, client_id, seq, payload))
+            )
+        return outputs
+
+    def _publish_commit_ack(self, instruction, ack) -> bool:
+        """Publish the stamped outputs, commit the input, ack. Returns whether work
+        was actually done.
+
+        A duplicate or replayed message the inbox already finished comes back as
+        Action.ACK with ctx=None — just ack it; never call commit_done(*None).
+        This is the crash-recovery path: RabbitMQ redelivers an unacked message,
+        the inbox classifies it DONE, and we ack without reprocessing.
+        """
+        if instruction.action is Action.ACK:
+            ack()
+            return False
+        for entry in instruction.outputs:
+            self._tl_sender(entry.destination).send(entry.body)
+        with self._lock:
+            self._handler.commit_done(*instruction.ctx)
+        ack()
+        return True
 
     # ---------- data path ----------
 
-    def _handle_data_packet(self, client_id: int, payload: bytes) -> None:
-        transactions = self._transaction_serializer.deserialize_batch(payload)
-        if not transactions:
-            return
-
-        with self._lock:
-            for transaction in transactions:
-                self._processor_for_client(client_id).process(transaction)
-            self._processed_by_client[client_id] = (
-                self._processed_by_client.get(client_id, 0) + len(transactions)
-            )
-            processed_total = self._processed_by_client[client_id]
-
-        if should_log_progress(processed_total):
-            logging.info(
-                "sum_data_batch | configuration=%s | id=%s | client_id=%s | "
-                "batch_size=%s | processed_total=%s",
-                CONFIGURATION, ID, client_id, len(transactions), processed_total,
-            )
-
-    def _handle_upstream_eof(self, client_id: int, payload: bytes) -> None:
-        ctrl = self._control_serializer.deserialize(payload)
-        expected_total = ctrl.expected_total
-
-        with self._lock:
-            count = self._processed_by_client.get(client_id, 0)
-            action = self._coordinator.on_upstream_eof(
-                client_id, expected_total, count, count
-            )
-
-        logging.info(
-            "sum_upstream_eof | configuration=%s | id=%s | client_id=%s | "
-            "expected_total=%s | local_count=%s",
-            CONFIGURATION, ID, client_id, expected_total, count,
-        )
-
-        if isinstance(action, BroadcastAction):
-            self._do_broadcast(action, self._main_control_senders)
-
-        elif isinstance(action, FlushAction):
-            # N==1: flush own partials and send downstream EOF
-            with self._lock:
-                partials = self._partials_for_client(client_id)
-                self._processors_by_client.pop(client_id, None)
-                self._processed_by_client.pop(client_id, None)
-            fwd_final = self._forward_partials(client_id, partials, self._output_exchanges)
-            self._forward_eof_to_aggregators(client_id, fwd_final, self._output_exchanges)
-
     def _process_message(self, message: bytes, ack, nack) -> None:
         try:
-            msg_type, client_id, payload = self._internal_protocol.unpack_packet(message)
+            msg_type, client_id, sender_id, seq, payload = (
+                self._internal_protocol.unpack_addressed_packet(message)
+            )
+
             if msg_type == MessageType.DATA:
-                self._handle_data_packet(client_id, payload)
+                self._handle_data(client_id, sender_id, seq, payload, ack)
             elif msg_type == MessageType.EOF:
-                self._handle_upstream_eof(client_id, payload)
+                self._handle_upstream_eof(client_id, sender_id, seq, payload, ack)
             else:
                 raise ValueError(f"Unexpected sum data message type: {msg_type}")
-            ack()
         except Exception:
             logging.exception("sum_data_error | configuration=%s | id=%s", CONFIGURATION, ID)
-            nack()
+            nack(requeue=True)
+
+    def _handle_data(self, client_id, sender_id, seq, payload, ack) -> None:
+        msg_id = f"d:{sender_id}:{client_id}:{seq}"
+
+        def bfn(_pl):
+            return SumState.data_change(client_id, _pl), []
+
+        # DATA has no outputs; _publish_commit_ack commits + acks (or just acks
+        # a duplicate that the inbox already finished).
+        with self._lock:
+            instruction = self._handler.handle(msg_id, client_id, sender_id, seq, payload, bfn)
+        committed = self._publish_commit_ack(instruction, ack)
+
+        if committed:
+            processed = self._state.processed_count(client_id)
+            if should_log_progress(processed):
+                logging.info(
+                    "sum_data | configuration=%s | id=%s | client_id=%s | processed_total=%s",
+                    CONFIGURATION, ID, client_id, processed,
+                )
+
+    def _handle_upstream_eof(self, client_id, sender_id, seq, payload, ack) -> None:
+        ctrl = self._control_serializer.deserialize(payload)
+        expected_total = ctrl.expected_total
+        msg_id = f"d:{sender_id}:{client_id}:{seq}"
+
+        with self._lock:
+            if self._state.is_closed(client_id):
+                ack()
+                return
+            count = self._state.processed_count(client_id)
+
+            def bfn(_pl):
+                # Broadcast mode: the dynamic leader sets _leader_expected here.
+                # on_upstream_eof is idempotent (N=1 returns Flush without mutating;
+                # N>1 dedups via _seen_eof / dict assignment), so the replay call
+                # from apply_change is safe.
+                action = self._coordinator.on_upstream_eof(
+                    client_id, expected_total, count, count
+                )
+                eof_change = SumState.coordinator_upstream_eof_change(
+                    client_id, expected_total, count, count
+                )
+                if isinstance(action, BroadcastAction):
+                    # N>1: fan out EOF_RECEIVED to every replica's control queue.
+                    return eof_change, [(qn, action.message) for qn in action.queue_names]
+                if isinstance(action, FlushAction):
+                    # N=1: no coordination — flush own partials directly.
+                    partials = self._state.partials_for(client_id)
+                    outputs = (
+                        self._partials_outputs(client_id, partials)
+                        + self._eof_outputs(client_id, len(partials))
+                    )
+                    compound = SumState.compound_change(
+                        eof_change, SumState.close_change(client_id)
+                    )
+                    return compound, outputs
+                # None: duplicate upstream EOF.
+                return eof_change, []
+
+            instruction = self._handler.handle(
+                msg_id, client_id, sender_id, seq, payload, bfn
+            )
+
+        self._publish_commit_ack(instruction, ack)
+        logging.info(
+            "sum_upstream_eof | configuration=%s | id=%s | client_id=%s | "
+            "local_count=%s | expected_total=%s",
+            CONFIGURATION, ID, client_id, count, expected_total,
+        )
 
     # ---------- control path ----------
 
-    def _handle_control(
-        self,
-        message: bytes,
-        ack,
-        nack,
-        response_senders: dict,
-        output_exchanges,
-    ) -> None:
+    def _handle_control(self, message: bytes, ack, nack) -> None:
         try:
             msg_type, client_id, ctrl = self._coordinator.parse_message(message)
         except Exception:
             logging.exception(
                 "sum_control_parse_error | configuration=%s | id=%s", CONFIGURATION, ID
             )
-            nack()
+            nack(requeue=False)
             return
 
-        with self._lock:
-            count = self._processed_by_client.get(client_id, 0)
-            action = self._coordinator.process_control_message(
-                msg_type, client_id, ctrl, count, count
-            )
-
-        if action is None:
-            ack()
-            return
-
-        if isinstance(action, SendAnswerAction):
-            try:
-                response_senders[action.queue_name].send(action.message)
-                ack()
-            except Exception:
-                logging.exception(
-                    "sum_send_answer_error | configuration=%s | id=%s | client_id=%s",
-                    CONFIGURATION, ID, client_id,
-                )
-                with self._lock:
-                    self._coordinator.clear_pending_eof(client_id)
-                nack()
-
-        elif isinstance(action, FlushAction):
-            # Non-leader: snapshot partials, forward, send FLUSH_ACK, then cleanup
-            with self._lock:
-                partials = self._partials_for_client(client_id)
-            fwd_final = self._forward_partials(client_id, partials, output_exchanges)
-            ack_msg = self._coordinator.build_flush_ack(client_id, fwd_final)
-            try:
-                response_senders[action.ack_queue].send(ack_msg)
-            except Exception:
-                logging.exception(
-                    "sum_flush_ack_error | configuration=%s | id=%s | client_id=%s",
-                    CONFIGURATION, ID, client_id,
-                )
-                nack()
-                return
-            with self._lock:
-                self._processors_by_client.pop(client_id, None)
-                self._processed_by_client.pop(client_id, None)
-                self._coordinator.cleanup_client(client_id)
-            logging.info(
-                "sum_flush_ack_sent | configuration=%s | id=%s | client_id=%s | fwd=%s",
-                CONFIGURATION, ID, client_id, fwd_final,
-            )
-            ack()
-
+        if msg_type == MessageType.EOF_RECEIVED:
+            self._handle_eof_received(message, client_id, ctrl, ack, nack)
+        elif msg_type == MessageType.PROCESSED_REQUEST:
+            self._handle_processed_request(client_id, ctrl, ack, nack)
+        elif msg_type == MessageType.FLUSH_ORDER:
+            self._handle_flush_order(client_id, ctrl, ack, nack)
         else:
             logging.warning(
-                "sum_unexpected_control_action | configuration=%s | id=%s | action=%s",
-                CONFIGURATION, ID, action,
+                "sum_unexpected_control_type | configuration=%s | id=%s | msg_type=%s",
+                CONFIGURATION, ID, msg_type,
             )
             ack()
 
-    def _run_control_consumer(self) -> None:
-        consumer = MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST, self._coordinator.my_control_queue()
-        )
-        response_senders = self._new_response_senders()
-        output_exchanges = self._new_output_exchanges()
+    def _handle_eof_received(self, message, client_id, ctrl, ack, nack) -> None:
+        # WAL-tracked so _pending_eof is durable: without it a crash would leave a
+        # later PROCESSED_REQUEST with nothing to re-report (deadlock).
+        # Dedup: one EOF_RECEIVED per (client, dynamic-leader) pair.
+        sender_id = ctrl.sender_id
+        seq = client_id
+        msg_id = f"er:{client_id}:{ctrl.sender_id}"
+        try:
+            with self._lock:
+                count = self._state.processed_count(client_id)
 
+                def bfn(_pl):
+                    action = self._coordinator.process_control_message(
+                        MessageType.EOF_RECEIVED, client_id, ctrl, count, count
+                    )
+                    change = SumState.coordinator_msg_change(
+                        MessageType.EOF_RECEIVED, client_id, ctrl.sender_id,
+                        ctrl.expected_total, ctrl.processed_count, count, count,
+                    )
+                    if isinstance(action, SendAnswerAction):
+                        return change, [(action.queue_name, action.message)]
+                    return change, []
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, sender_id, seq, message, bfn,
+                    kind=MsgKind.CTRL_EOF_RECEIVED,
+                )
+            self._publish_commit_ack(instruction, ack)
+        except Exception:
+            logging.exception(
+                "sum_eof_received_error | configuration=%s | id=%s | client_id=%s",
+                CONFIGURATION, ID, client_id,
+            )
+            nack(requeue=True)
+
+    def _handle_processed_request(self, client_id, ctrl, ack, nack) -> None:
+        # Pure re-report (no state mutation): direct coordinator call. The reported
+        # count comes from durable WAL state, so it is correct after recovery too.
+        try:
+            with self._lock:
+                count = self._state.processed_count(client_id)
+                action = self._coordinator.process_control_message(
+                    MessageType.PROCESSED_REQUEST, client_id, ctrl, count, count
+                )
+            if isinstance(action, SendAnswerAction):
+                self._tl_sender(action.queue_name).send(action.message)
+            ack()
+        except Exception:
+            logging.exception(
+                "sum_processed_request_error | configuration=%s | id=%s | client_id=%s",
+                CONFIGURATION, ID, client_id,
+            )
+            nack(requeue=True)
+
+    def _handle_flush_order(self, client_id, ctrl, ack, nack) -> None:
+        # The dynamic leader (it set _leader_expected) ignores its own FLUSH_ORDER;
+        # it flushes via the FLUSH_ACK path on the response thread instead.
+        if self._coordinator.leader_expected(client_id) is not None:
+            ack()
+            return
+
+        # Non-leader: emit partials + FLUSH_ACK, then clean up and close.
+        # _on_flush_order is a pure read, so we determine the leader's response queue
+        # straight from ctrl.sender_id and skip the coordinator call here.
+        leader_id = ctrl.sender_id
+        seq = client_id
+        msg_id = f"fo:{client_id}:{ctrl.sender_id}"
+        try:
+            with self._lock:
+                if self._state.is_closed(client_id):
+                    ack()
+                    return
+
+                def bfn(_pl):
+                    partials = self._state.partials_for(client_id)
+                    forwarded = len(partials)
+                    outputs = self._partials_outputs(client_id, partials)
+                    flush_ack_msg = self._coordinator.build_flush_ack(client_id, forwarded)
+                    flush_ack_dest = self._coordinator.response_queue_for(leader_id)
+                    compound = SumState.compound_change(
+                        SumState.coordinator_cleanup_change(client_id),
+                        SumState.close_change(client_id),
+                    )
+                    return compound, outputs + [(flush_ack_dest, flush_ack_msg)]
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, leader_id, seq, b"", bfn,
+                    kind=MsgKind.CTRL_FLUSH_ORDER,
+                )
+            if self._publish_commit_ack(instruction, ack):
+                logging.info(
+                    "sum_flush_ack_sent | configuration=%s | id=%s | client_id=%s",
+                    CONFIGURATION, ID, client_id,
+                )
+        except Exception:
+            logging.exception(
+                "sum_flush_order_error | configuration=%s | id=%s | client_id=%s",
+                CONFIGURATION, ID, client_id,
+            )
+            nack(requeue=True)
+
+    def _run_control_consumer(self) -> None:
+        consumer = MessageMiddlewareQueueRabbitMQ(MOM_HOST, self._coordinator.my_control_queue())
         with self._stopped_lock:
             self._control_consumer = consumer
             already_stopped = self._stopped
-
         if already_stopped:
-            try:
-                consumer.close()
-            except Exception:
-                pass
-            for q in response_senders.values():
-                try:
-                    q.close()
-                except Exception:
-                    pass
-            for ex in output_exchanges:
-                try:
-                    ex.close()
-                except Exception:
-                    pass
+            self._safe_close(consumer)
             return
-
         try:
             consumer.start_consuming(
-                lambda msg, ack, nack: self._handle_control(
-                    msg, ack, nack, response_senders, output_exchanges
-                )
+                lambda msg, ack, nack: self._handle_control(msg, ack, nack)
             )
         except Exception as e:
             if not self._closed:
@@ -388,121 +453,120 @@ class SumWorker:
                     CONFIGURATION, ID, e,
                 )
         finally:
-            for q in response_senders.values():
-                try:
-                    q.close()
-                except Exception:
-                    pass
-            for ex in output_exchanges:
-                try:
-                    ex.close()
-                except Exception:
-                    pass
-            try:
-                consumer.close()
-            except Exception:
-                pass
+            self._safe_close(consumer)
 
     # ---------- response path (leader) ----------
 
-    def _handle_response(
-        self,
-        message: bytes,
-        ack,
-        nack,
-        control_senders: dict,
-        output_exchanges,
-    ) -> None:
+    def _handle_response(self, message: bytes, ack, nack) -> None:
         try:
             msg_type, client_id, ctrl = self._coordinator.parse_message(message)
         except Exception:
             logging.exception(
                 "sum_response_parse_error | configuration=%s | id=%s", CONFIGURATION, ID
             )
-            nack()
+            nack(requeue=False)
             return
 
-        own_partials = []
-        with self._lock:
-            action = self._coordinator.process_control_message(msg_type, client_id, ctrl)
-            if isinstance(action, FlushAction) and action.is_leader:
-                own_partials = self._partials_for_client(client_id)
-                self._processors_by_client.pop(client_id, None)
-                self._processed_by_client.pop(client_id, None)
-
-        if action is None:
-            ack()
-            return
-
-        if isinstance(action, BroadcastAction):
-            try:
-                self._do_broadcast(action, control_senders)
-                ack()
-            except Exception:
-                logging.exception(
-                    "sum_broadcast_error | configuration=%s | id=%s | client_id=%s",
-                    CONFIGURATION, ID, client_id,
-                )
-                nack()
-
-        elif isinstance(action, FlushAction) and action.is_leader:
-            own_fwd = self._forward_partials(client_id, own_partials, output_exchanges)
-            total_fwd = action.total_forwarded + own_fwd
-            logging.info(
-                "sum_eof_ready | configuration=%s | id=%s | client_id=%s | "
-                "total_fwd=%s | own_fwd=%s | acks_fwd=%s",
-                CONFIGURATION, ID, client_id, total_fwd, own_fwd, action.total_forwarded,
-            )
-            try:
-                self._forward_eof_to_aggregators(client_id, total_fwd, output_exchanges)
-                ack()
-            except Exception:
-                logging.exception(
-                    "sum_forward_eof_error | configuration=%s | id=%s | client_id=%s",
-                    CONFIGURATION, ID, client_id,
-                )
-                nack()
-
+        if msg_type == MessageType.PROCESSED_ANSWER:
+            self._handle_processed_answer(client_id, ctrl, ack, nack)
+        elif msg_type == MessageType.FLUSH_ACK:
+            self._handle_flush_ack(message, client_id, ctrl, ack, nack)
         else:
             logging.warning(
-                "sum_unexpected_response_action | configuration=%s | id=%s | action=%s",
-                CONFIGURATION, ID, action,
+                "sum_unexpected_response_type | configuration=%s | id=%s | msg_type=%s",
+                CONFIGURATION, ID, msg_type,
             )
             ack()
 
-    def _run_response_consumer(self) -> None:
-        consumer = MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST, self._coordinator.my_response_queue()
-        )
-        control_senders = self._new_control_senders()
-        output_exchanges = self._new_output_exchanges()
+    def _handle_processed_answer(self, client_id, ctrl, ack, nack) -> None:
+        # Direct coordinator call (not WAL-tracked). Same accepted limitation as the
+        # aggregator: if the leader crashes after acking but before snapshotting, the
+        # accumulated responder/processed counts are lost. _leader_expected and
+        # _pending_eof ARE durable, so the broadcast-specific deadlocks are closed;
+        # this residual window is identical to the aggregator's.
+        try:
+            with self._lock:
+                action = self._coordinator.process_control_message(
+                    MessageType.PROCESSED_ANSWER, client_id, ctrl
+                )
+            if isinstance(action, BroadcastAction):
+                if action.sleep_before > 0:
+                    time.sleep(action.sleep_before)
+                for qname in action.queue_names:
+                    self._tl_sender(qname).send(action.message)
+            ack()
+        except Exception:
+            logging.exception(
+                "sum_processed_answer_error | configuration=%s | id=%s | client_id=%s",
+                CONFIGURATION, ID, client_id,
+            )
+            nack(requeue=True)
 
+    def _handle_flush_ack(self, message, client_id, ctrl, ack, nack) -> None:
+        # WAL-tracked so the leader's final flush (partials + downstream EOF) and the
+        # close are durable. business_fn predicts the last-ack outcome via read-only
+        # coordinator accessors; the single mutation happens inside apply_change.
+        sender_id = ctrl.sender_id
+        seq = client_id
+        msg_id = f"fa:{client_id}:{ctrl.sender_id}"
+        try:
+            with self._lock:
+                if self._state.is_closed(client_id):
+                    ack()
+                    return
+
+                already = self._coordinator.has_flush_ack(client_id, ctrl.sender_id)
+                new_ack_count = self._coordinator.flush_ack_count(client_id) + (
+                    0 if already else 1
+                )
+
+                def bfn(_pl):
+                    ack_change = SumState.coordinator_msg_change(
+                        MessageType.FLUSH_ACK, client_id, ctrl.sender_id,
+                        ctrl.expected_total, ctrl.processed_count,
+                    )
+                    if new_ack_count >= SUM_AMOUNT - 1:
+                        # Last FLUSH_ACK: leader emits its own partials + the
+                        # consolidated downstream EOF, then closes.
+                        own_partials = self._state.partials_for(client_id)
+                        own_fwd = len(own_partials)
+                        acks_fwd = self._coordinator.accumulated_forwarded(client_id) + (
+                            0 if already else ctrl.processed_count
+                        )
+                        total_fwd = acks_fwd + own_fwd
+                        outputs = (
+                            self._partials_outputs(client_id, own_partials)
+                            + self._eof_outputs(client_id, total_fwd)
+                        )
+                        compound = SumState.compound_change(
+                            ack_change, SumState.close_change(client_id)
+                        )
+                        return compound, outputs
+                    return ack_change, []
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, sender_id, seq, message, bfn,
+                    kind=MsgKind.CTRL_FLUSH_ACK,
+                )
+            self._publish_commit_ack(instruction, ack)
+        except Exception:
+            logging.exception(
+                "sum_flush_ack_error | configuration=%s | id=%s | client_id=%s",
+                CONFIGURATION, ID, client_id,
+            )
+            nack(requeue=True)
+
+    def _run_response_consumer(self) -> None:
+        consumer = MessageMiddlewareQueueRabbitMQ(MOM_HOST, self._coordinator.my_response_queue())
         with self._stopped_lock:
             self._response_consumer = consumer
             already_stopped = self._stopped
-
         if already_stopped:
-            for q in control_senders.values():
-                try:
-                    q.close()
-                except Exception:
-                    pass
-            for ex in output_exchanges:
-                try:
-                    ex.close()
-                except Exception:
-                    pass
-            try:
-                consumer.close()
-            except Exception:
-                pass
+            self._safe_close(consumer)
             return
-
         try:
             consumer.start_consuming(
-                lambda msg, ack, nack: self._handle_response(
-                    msg, ack, nack, control_senders, output_exchanges
-                )
+                lambda msg, ack, nack: self._handle_response(msg, ack, nack)
             )
         except Exception as e:
             if not self._closed:
@@ -511,31 +575,22 @@ class SumWorker:
                     CONFIGURATION, ID, e,
                 )
         finally:
-            for q in control_senders.values():
-                try:
-                    q.close()
-                except Exception:
-                    pass
-            for ex in output_exchanges:
-                try:
-                    ex.close()
-                except Exception:
-                    pass
-            try:
-                consumer.close()
-            except Exception:
-                pass
+            self._safe_close(consumer)
 
     # ---------- lifecycle ----------
 
+    @staticmethod
+    def _safe_close(resource) -> None:
+        try:
+            resource.close()
+        except Exception:
+            pass
+
     def start(self) -> None:
-        input_kind = "exchange" if CONFIGURATION in (C_Q2, C_Q3) else "queue"
         logging.info(
             "sum_start | configuration=%s | id=%s | mom_host=%s | input=%s | "
-            "input_kind=%s | "
             "sum_amount=%s | aggregation_amount=%s",
-            CONFIGURATION, ID, MOM_HOST, INPUT_QUEUE, input_kind,
-            SUM_AMOUNT, AGGREGATION_AMOUNT,
+            CONFIGURATION, ID, MOM_HOST, INPUT_QUEUE, SUM_AMOUNT, AGGREGATION_AMOUNT,
         )
 
         self._control_thread = threading.Thread(target=self._run_control_consumer)
@@ -552,10 +607,7 @@ class SumWorker:
                 exclusive=False,
             )
         else:
-            self._input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
-                MOM_HOST,
-                INPUT_QUEUE,
-            )
+            self._input_queue = middleware.MessageMiddlewareQueueRabbitMQ(MOM_HOST, INPUT_QUEUE)
         try:
             if not self._stopped:
                 self._input_queue.start_consuming(self._process_message)
@@ -582,19 +634,5 @@ class SumWorker:
         if self._closed:
             return
         self._closed = True
-
-        resources = (
-            [self._input_queue]
-            + list(self._main_control_senders.values())
-            + self._output_exchanges
-        )
-        for resource in resources:
-            if resource is None:
-                continue
-            try:
-                resource.close()
-            except Exception as e:
-                logging.warning(
-                    "sum_close_error | configuration=%s | id=%s | error=%s",
-                    CONFIGURATION, ID, e,
-                )
+        if self._input_queue is not None:
+            self._safe_close(self._input_queue)
