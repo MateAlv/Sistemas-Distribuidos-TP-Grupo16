@@ -430,6 +430,8 @@ class FilterQ5UsdWorker:
                     )
 
                 elif msg_type == MessageType.FLUSH_ORDER:
+                    leader_id = ctrl.sender_id
+
                     def bfn(_pl):
                         # process_control_message for FLUSH_ORDER is read-only:
                         # it only checks _leader_expected to decide leader vs non-leader.
@@ -440,7 +442,7 @@ class FilterQ5UsdWorker:
                             return FilterQ5UsdState.data_change(client_id, 0, 0, 0), []
                         outputs = self._build_eof_outputs(client_id, fwd)
                         flush_ack_msg = self._coordinator.build_flush_ack(client_id, fwd)
-                        flush_ack_dest = self._coordinator.response_queue_for(0)
+                        flush_ack_dest = self._coordinator.response_queue_for(leader_id)
                         compound = FilterQ5UsdState.compound_change(
                             FilterQ5UsdState.coordinator_cleanup_change(client_id),
                             FilterQ5UsdState.data_change(client_id, 0, 0, AGGREGATION_AMOUNT),
