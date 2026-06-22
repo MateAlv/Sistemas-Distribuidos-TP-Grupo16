@@ -85,4 +85,7 @@ class WorkerRunner:
             publisher = self._publishers.get(entry.destination)
             if publisher is None:
                 raise KeyError(f"no publisher for destination {entry.destination!r}")
-            publisher.send(entry.body)
+            if entry.shard is None:
+                publisher.send(entry.body)
+            else:
+                publisher.send_to_shard(entry.body, entry.shard)
