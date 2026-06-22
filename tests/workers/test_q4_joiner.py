@@ -124,7 +124,10 @@ def _pair_data_messages(worker, module):
     deltas = []
     by_partition = {}
     for shard, packet in worker._pair_reducer_output.sent:
-        msg_type, _, payload = worker._proto.unpack_packet(packet)
+        msg_type, _, sender_id, _seq, payload = (
+            worker._proto.unpack_addressed_packet(packet)
+        )
+        assert sender_id == module.ID
         if msg_type != MessageType.DATA:
             continue
         batch = module.Q4PairPathsSerializer.deserialize_batch(payload)
@@ -136,7 +139,10 @@ def _pair_data_messages(worker, module):
 def _eof_counts(worker, module):
     counts = {}
     for shard, packet in worker._pair_reducer_output.sent:
-        msg_type, _, payload = worker._proto.unpack_packet(packet)
+        msg_type, _, sender_id, _seq, payload = (
+            worker._proto.unpack_addressed_packet(packet)
+        )
+        assert sender_id == module.ID
         if msg_type != MessageType.EOF:
             continue
         control = worker._control_serializer.deserialize(payload)
@@ -244,7 +250,10 @@ def test_joiner_waits_for_all_eofs_and_emits_weighted_pair_paths(monkeypatch, tm
         (delta.source, delta.target, delta.path_count) for delta in deltas
     }
     for shard, packet in worker._pair_reducer_output.sent:
-        msg_type, _, payload = worker._proto.unpack_packet(packet)
+        msg_type, _, sender_id, _seq, payload = (
+            worker._proto.unpack_addressed_packet(packet)
+        )
+        assert sender_id == module.ID
         if msg_type != MessageType.DATA:
             continue
         for delta in module.Q4PairPathsSerializer.deserialize_batch(payload):
