@@ -84,18 +84,22 @@ def test_single_worker_eof_snapshots_partials_while_holding_lock(monkeypatch):
     assert client_id not in worker._processed_by_client
     assert len(output_exchange.sent) == 2
 
-    data_type, data_client_id, data_payload = worker._internal_protocol.unpack_packet(
-        output_exchange.sent[0]
+    data_type, data_client_id, data_sender, data_seq, data_payload = (
+        worker._internal_protocol.unpack_addressed_packet(output_exchange.sent[0])
     )
-    eof_type, eof_client_id, eof_payload = worker._internal_protocol.unpack_packet(
-        output_exchange.sent[1]
+    eof_type, eof_client_id, eof_sender, eof_seq, eof_payload = (
+        worker._internal_protocol.unpack_addressed_packet(output_exchange.sent[1])
     )
 
     assert data_type == MessageType.DATA
     assert data_client_id == client_id
+    assert data_sender == 0
+    assert data_seq == 0
     assert data_payload == b"serialized-partial"
     assert eof_type == MessageType.EOF
     assert eof_client_id == client_id
+    assert eof_sender == 0
+    assert eof_seq == 1
     eof_control = worker._control_serializer.deserialize(eof_payload)
     assert eof_control.expected_total == 1
 
@@ -117,10 +121,12 @@ def test_single_worker_eof_without_partials_forwards_zero_expected_total(monkeyp
     worker._handle_upstream_eof(client_id, payload)
 
     assert len(output_exchange.sent) == 1
-    eof_type, eof_client_id, eof_payload = worker._internal_protocol.unpack_packet(
-        output_exchange.sent[0]
+    eof_type, eof_client_id, eof_sender, eof_seq, eof_payload = (
+        worker._internal_protocol.unpack_addressed_packet(output_exchange.sent[0])
     )
     eof_control = worker._control_serializer.deserialize(eof_payload)
     assert eof_type == MessageType.EOF
     assert eof_client_id == client_id
+    assert eof_sender == 0
+    assert eof_seq == 0
     assert eof_control.expected_total == 0
