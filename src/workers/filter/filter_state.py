@@ -112,21 +112,27 @@ class FilterState:
     def data_change(
         client_id: int,
         processed_count: int,
-        appends_by_output: dict[str, list[bytes]],
+        appends_by_dest: dict[str, list[bytes]],
+        forwarded_by_output: dict[str, int],
     ) -> dict:
-        # appends_by_output holds the serialized transactions forwarded to each
-        # output in this batch. apply_change appends them to the durable buffer
-        # (so replay reproduces it) and derives the per-output forwarded counts
-        # from their length. Payloads are base64 because the WAL frames the
-        # change dict as JSON.
+        # Two keyings, intentionally separate:
+        #   appends_by_dest    — serialized txs per *destination* (routing target);
+        #                        the durable buffer batches per destination, since
+        #                        txs for different destinations (e.g. q4 partitions)
+        #                        can't share a batch.
+        #   forwarded_by_output— per *logical output* counts for the EOF accounting
+        #                        (q4's partitions roll up under one logical name).
+        # For every output except sharded-q4, destination == logical name.
+        # Payloads are base64 because the WAL frames the change dict as JSON.
         return {
             "type": "data",
             "client_id": client_id,
             "processed_count": processed_count,
-            "appends_by_output": {
-                output: [base64.b64encode(p).decode("ascii") for p in payloads]
-                for output, payloads in appends_by_output.items()
+            "appends_by_dest": {
+                dest: [base64.b64encode(p).decode("ascii") for p in payloads]
+                for dest, payloads in appends_by_dest.items()
             },
+            "forwarded_by_output": forwarded_by_output,
         }
 
     @staticmethod
@@ -220,14 +226,14 @@ class FilterState:
     # ---------- batcher planners (read-only, for business_fn) ----------
 
     def plan_data(
-        self, client_id: int, appends_by_output: dict[str, list[bytes]]
+        self, client_id: int, appends_by_dest: dict[str, list[bytes]]
     ) -> dict[str, list[bytes]]:
-        """Flushed batches per output that appending these would produce, WITHOUT
-        mutating the buffer. Pairs with apply_change("data"), which performs the
-        real append under the same lock — identical flushes by construction."""
+        """Flushed batches per destination that appending these would produce,
+        WITHOUT mutating the buffer. Pairs with apply_change("data"), which performs
+        the real append under the same lock — identical flushes by construction."""
         return {
-            output: self._buffer.plan_append((output, client_id), payloads)
-            for output, payloads in appends_by_output.items()
+            dest: self._buffer.plan_append((dest, client_id), payloads)
+            for dest, payloads in appends_by_dest.items()
         }
 
     def plan_drain(self, client_id: int) -> dict[str, bytes]:
@@ -332,17 +338,18 @@ class FilterState:
         self._processed_by_client[client_id] = (
             self._processed_by_client.get(client_id, 0) + change["processed_count"]
         )
-        acc = self._forwarded_by_output_by_client.setdefault(client_id, {})
-        for output, b64_payloads in change["appends_by_output"].items():
+        # Append to the durable buffer per destination; the flushes it triggers are
+        # dropped (already stamped into the outbox by business_fn via plan_data).
+        for dest, b64_payloads in change["appends_by_dest"].items():
             payloads = [base64.b64decode(s) for s in b64_payloads]
-            # Append to the durable buffer; the flushes it triggers are dropped
-            # (already stamped into the outbox by business_fn via plan_data).
-            self._buffer.apply_append((output, client_id), payloads)
-            count = len(payloads)
+            self._buffer.apply_append((dest, client_id), payloads)
+        # Per-logical-output forwarded counts (q4 partitions roll up to one name).
+        acc = self._forwarded_by_output_by_client.setdefault(client_id, {})
+        for output, count in change["forwarded_by_output"].items():
+            acc[output] = acc.get(output, 0) + count
             self._forwarded_by_client[client_id] = (
                 self._forwarded_by_client.get(client_id, 0) + count
             )
-            acc[output] = acc.get(output, 0) + count
 
     def _apply_flush_ack(self, client_id: int, change: dict) -> None:
         # Accumulate a non-leader's counts; idempotent if the same sender_id is
