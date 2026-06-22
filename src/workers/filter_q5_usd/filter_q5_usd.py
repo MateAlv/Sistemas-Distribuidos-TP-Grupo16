@@ -389,6 +389,7 @@ class FilterQ5UsdWorker:
     def _handle_control(self, message, ack, nack, response_senders: dict):
         try:
             msg_type, client_id, ctrl = self._coordinator.parse_message(message)
+            msg_type = MessageType(msg_type)
         except Exception:
             logging.exception("filter_q5_usd_control_parse_error | id=%s", ID)
             nack(requeue=False)
@@ -499,6 +500,7 @@ class FilterQ5UsdWorker:
     def _handle_response(self, message, ack, nack):
         try:
             msg_type, client_id, ctrl = self._coordinator.parse_message(message)
+            msg_type = MessageType(msg_type)
         except Exception:
             logging.exception("filter_q5_usd_response_parse_error | id=%s", ID)
             nack(requeue=False)
