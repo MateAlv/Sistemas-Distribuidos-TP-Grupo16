@@ -46,6 +46,17 @@ def body_digest_key(message: bytes) -> bytes:
     return message[_HEADER_SIZE:]
 
 
+def addressed_body_digest_key(message: bytes) -> bytes:
+    """Igual que ``body_digest_key`` pero para paquetes *direccionados*.
+
+    El payload empieza tras el header direccionado (más ancho que el plano por
+    los campos sender_id+seq). Devuelve exactamente los mismos bytes que el
+    SenderSequencer hashea al asignar el seq por (client, edge, shard), de modo
+    que la shard elegida aquí coincide con aquella para la que se reservó el seq.
+    """
+    return message[InternalProtocol.ADDRESSED_HEADER_SIZE:]
+
+
 class ShardedPublisher:
     def __init__(
         self,
@@ -72,6 +83,14 @@ class ShardedPublisher:
 
     def send(self, message: bytes) -> None:
         self._publisher.send(message, routing_key=self._routing_key_for(message))
+
+    def send_to_shard(self, message: bytes, shard: int) -> None:
+        """Route to an explicit shard, bypassing key_fn. Used by workers that
+        pick the destination partition themselves (semantic partitioning)."""
+        if not 0 <= shard < self._shard_count:
+            raise ValueError(f"shard {shard} out of range for {self._shard_count} shards")
+        routing_key = routing_key_for_shard(self._routing_key_prefix, shard)
+        self._publisher.send(message, routing_key=routing_key)
 
     def send_to_all(self, message: bytes) -> None:
         """Enviar el mismo mensaje a TODAS las shards (fan-out por routing key).

@@ -88,12 +88,16 @@ State accessors (read before close_change)
 from __future__ import annotations
 
 import base64
+from collections import defaultdict
 from dataclasses import dataclass, field
 
 from common.bank_ids import notebook_bank_id
 from common.eof_coordinator import EofCoordinator
 from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal import (
+    Q4CountedEdge,
+    Q4_EDGE_INCOMING,
+    Q4_EDGE_OUTGOING,
     Q4AccountId,
     Q4TransactionEdge,
     TransactionSerializer,
@@ -186,6 +190,10 @@ class Q4FilterState:
         # Non-leader cleanup after FlushAction(is_leader=False).
         return {"type": "coordinator_cleanup", "client_id": client_id}
 
+    @staticmethod
+    def compound_change(*changes: dict) -> dict:
+        return {"type": "compound", "changes": list(changes)}
+
     # ---------- state accessors (read before close_change) ----------
 
     def source_states_for(self, client_id: int) -> dict:
@@ -204,6 +212,27 @@ class Q4FilterState:
 
     def is_closed(self, client_id: int) -> bool:
         return client_id in self._closed_by_client
+
+    def predict_data_outputs(self, client_id: int, payload: bytes) -> dict[int, list]:
+        """Read-only decide step: return the counted edges this batch would emit,
+        grouped by Q4Sum partition, WITHOUT mutating state. Runs the same gate as
+        apply_change on per-source working copies, so the outbox the worker builds
+        from this matches the state apply_change(data_change) will reconstruct."""
+        if client_id in self._closed_by_client:
+            return {}
+        transactions = _tx_ser.deserialize_batch(payload)
+        src_states = self._states_by_client.get(client_id, {})
+        work: dict = {}
+        by_partition: dict[int, list] = defaultdict(list)
+        for tx in transactions:
+            edge = self._edge_from_tx(tx)
+            state = work.get(edge.source)
+            if state is None:
+                state = _copy_source_state(src_states.get(edge.source))
+                work[edge.source] = state
+            for counted in self._gate_emit(state, edge):
+                by_partition[self._partition_of(counted)].append(counted)
+        return dict(by_partition)
 
     # ---------- WorkerState protocol ----------
 
@@ -246,6 +275,10 @@ class Q4FilterState:
     def apply_change(self, change: dict) -> None:
         # Single mutation path — runs both live and during WAL replay.
         kind = change["type"]
+        if kind == "compound":
+            for sub in change["changes"]:
+                self.apply_change(sub)
+            return
         client_id = change["client_id"]
         if kind == "data":
             self._apply_data(client_id, change)
@@ -280,60 +313,58 @@ class Q4FilterState:
         src_states = self._states_by_client.setdefault(client_id, {})
         forwarded = self._forwarded_by_partition_by_client.setdefault(client_id, {})
         for tx in transactions:
-            edge = Q4TransactionEdge(
-                source=Q4AccountId(
-                    bank_id=notebook_bank_id(tx.from_bank),
-                    account=(tx.from_account or "").strip(),
-                ),
-                target=Q4AccountId(
-                    bank_id=notebook_bank_id(tx.to_bank),
-                    account=(tx.to_account or "").strip(),
-                ),
-            )
-            self._accept_edge(src_states, forwarded, edge)
+            edge = self._edge_from_tx(tx)
+            state = src_states.get(edge.source)
+            if state is None:
+                state = _SourceState()
+                src_states[edge.source] = state
+            for counted in self._gate_emit(state, edge):
+                partition = self._partition_of(counted)
+                forwarded[partition] = forwarded.get(partition, 0) + 1
         self._processed_by_client[client_id] = (
             self._processed_by_client.get(client_id, 0) + len(transactions)
         )
 
-    def _accept_edge(self, src_states: dict, forwarded: dict, edge: Q4TransactionEdge) -> None:
-        """Mirrors _accept_edge_locked from filters.py — state mutation only, no I/O."""
-        state = src_states.get(edge.source)
-        if state is None:
-            state = _SourceState()
-            src_states[edge.source] = state
+    @staticmethod
+    def _edge_from_tx(tx) -> Q4TransactionEdge:
+        return Q4TransactionEdge(
+            source=Q4AccountId(
+                bank_id=notebook_bank_id(tx.from_bank),
+                account=(tx.from_account or "").strip(),
+            ),
+            target=Q4AccountId(
+                bank_id=notebook_bank_id(tx.to_bank),
+                account=(tx.to_account or "").strip(),
+            ),
+        )
 
+    def _gate_emit(self, state: "_SourceState", edge: Q4TransactionEdge) -> list:
+        """Source-gate step shared by apply (mutates real state) and predict
+        (mutates a working copy). Mutates ``state`` and returns the Q4CountedEdge
+        records emitted for this edge: two per qualified Q4TransactionEdge
+        (INCOMING intermediate=target, OUTGOING intermediate=source). An edge that
+        keeps its source below the qualification threshold emits nothing."""
         if state.qualified:
-            self._count_qualified_edge(forwarded, edge)
-            return
-
+            return _counted_for(edge)
         state.pending.append(edge)
         if len(state.targets) < _QUALIFY_TARGETS:
             state.targets.add(edge.target)
         if len(state.targets) < _QUALIFY_TARGETS:
-            return
-
-        # Source just qualified — emit all pending edges.
+            return []
+        # Source just qualified — flush all pending edges.
         state.qualified = True
         state.targets.clear()
-        for e in state.pending:
-            self._count_qualified_edge(forwarded, e)
+        emitted: list = []
+        for pending_edge in state.pending:
+            emitted.extend(_counted_for(pending_edge))
         state.pending = []
+        return emitted
 
-    def _count_qualified_edge(self, forwarded: dict, edge: Q4TransactionEdge) -> None:
-        """Update forwarded counts for both counted edges emitted by _emit_qualified_edge.
-
-        _emit_qualified_edge sends two Q4CountedEdge records per Q4TransactionEdge:
-          - Q4_EDGE_INCOMING: intermediate = edge.target → routed to partition of target
-          - Q4_EDGE_OUTGOING: intermediate = edge.source → routed to partition of source
-        """
-        p_in = partition_for_parts(
-            (edge.target.bank_id, edge.target.account), self._sum_amount
+    def _partition_of(self, counted: Q4CountedEdge) -> int:
+        return partition_for_parts(
+            (counted.intermediate.bank_id, counted.intermediate.account),
+            self._sum_amount,
         )
-        forwarded[p_in] = forwarded.get(p_in, 0) + 1
-        p_out = partition_for_parts(
-            (edge.source.bank_id, edge.source.account), self._sum_amount
-        )
-        forwarded[p_out] = forwarded.get(p_out, 0) + 1
 
     def _apply_close(self, client_id: int) -> None:
         # Idempotent: popping a missing key is a no-op.
@@ -341,3 +372,25 @@ class Q4FilterState:
         self._forwarded_by_partition_by_client.pop(client_id, None)
         self._processed_by_client.pop(client_id, None)
         self._closed_by_client.add(client_id)
+
+
+def _counted_for(edge: Q4TransactionEdge) -> list:
+    return [
+        Q4CountedEdge(
+            role=Q4_EDGE_INCOMING, intermediate=edge.target, endpoint=edge.source, count=1
+        ),
+        Q4CountedEdge(
+            role=Q4_EDGE_OUTGOING, intermediate=edge.source, endpoint=edge.target, count=1
+        ),
+    ]
+
+
+def _copy_source_state(state: "_SourceState | None") -> "_SourceState":
+    """Shallow working copy for the read-only predictor: targets/qualified copied,
+    pending list copied (Q4TransactionEdge entries are frozen, so sharing refs is
+    safe). Lets predict run the gate without touching real state."""
+    if state is None:
+        return _SourceState()
+    return _SourceState(
+        targets=set(state.targets), qualified=state.qualified, pending=list(state.pending)
+    )
