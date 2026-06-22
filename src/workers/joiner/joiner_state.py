@@ -41,8 +41,10 @@ State accessors (read before close_change)
 from __future__ import annotations
 
 import base64
+from collections import deque
 from collections.abc import Callable
 
+MAX_CLOSED_CLIENTS = 500
 
 ProcessorFactory = Callable[[], object]
 
@@ -55,9 +57,8 @@ class JoinerState:
         self._processors_by_client: dict[int, object] = {}
         self._data_count_by_client: dict[int, int] = {}
         self._eof_count_by_client: dict[int, int] = {}
-        # Set is sufficient here; the live worker stores timestamps for LRU
-        # cleanup, but the adapter only needs closed/not-closed.
         self._closed_by_client: set[int] = set()
+        self._closed_order: deque[int] = deque()
 
     @staticmethod
     def data_change(client_id: int, payload: bytes) -> dict:
@@ -100,6 +101,7 @@ class JoinerState:
             "data_count_by_client": dict(self._data_count_by_client),
             "eof_count_by_client": dict(self._eof_count_by_client),
             "closed_by_client": set(self._closed_by_client),
+            "closed_order": list(self._closed_order),
         }
 
     def restore(self, data: dict) -> None:
@@ -108,11 +110,13 @@ class JoinerState:
             self._data_count_by_client = {}
             self._eof_count_by_client = {}
             self._closed_by_client = set()
+            self._closed_order = deque()
             return
         self._processors_by_client = dict(data["processors_by_client"])
         self._data_count_by_client = dict(data["data_count_by_client"])
         self._eof_count_by_client = dict(data["eof_count_by_client"])
         self._closed_by_client = set(data["closed_by_client"])
+        self._closed_order = deque(data.get("closed_order", data["closed_by_client"]))
 
     def apply_change(self, change: dict) -> None:
         # Single mutation path — runs both live and during WAL replay.
@@ -150,7 +154,12 @@ class JoinerState:
         self._processors_by_client.pop(client_id, None)
         self._data_count_by_client.pop(client_id, None)
         self._eof_count_by_client.pop(client_id, None)
-        self._closed_by_client.add(client_id)
+        if client_id not in self._closed_by_client:
+            self._closed_by_client.add(client_id)
+            self._closed_order.append(client_id)
+            if len(self._closed_by_client) > MAX_CLOSED_CLIENTS:
+                oldest = self._closed_order.popleft()
+                self._closed_by_client.discard(oldest)
 
     def _processor_for(self, client_id: int):
         return self._processors_by_client.setdefault(

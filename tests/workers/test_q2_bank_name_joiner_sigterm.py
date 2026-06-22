@@ -170,6 +170,95 @@ def test_q2_joiner_accounts_parse_uses_notebook_bank_id_coercion(
     ]
 
 
+def test_q2_joiner_consumes_addressed_inputs(pika_env, monkeypatch):
+    module, worker, created = _make_worker(pika_env, monkeypatch)
+    client_id = 77
+    proto = module.InternalProtocol()
+    calls = {"acks": 0, "nacks": 0}
+
+    def ack():
+        calls["acks"] += 1
+
+    def nack():
+        calls["nacks"] += 1
+
+    q2_payload = module.Q2BankMaxPartialSerializer.serialize(
+        module.Q2BankMaxPartial(
+            bank_id="001",
+            from_account="acc-1",
+            amount=10.0,
+        )
+    )
+    q2_data = proto.create_addressed_packet(
+        msg_type=module.MessageType.DATA,
+        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        sender_id=3,
+        seq=0,
+        payload=q2_payload,
+    )
+    q2_eof = proto.create_addressed_packet(
+        msg_type=module.MessageType.EOF,
+        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        sender_id=3,
+        seq=1,
+        payload=module.ControlMessageSerializer().serialize(
+            module.ControlMessage(sender_id=3, expected_total=1, processed_count=0)
+        ),
+    )
+    accounts_payload = module.LineBatchSerializer.serialize(
+        LineBatch(
+            file_type=module.FILE_TYPE_ACCOUNTS,
+            rel_path="accounts.csv",
+            batch_id=0,
+            first_line_number=2,
+            header=("Bank ID", "Bank Name"),
+            lines=(b"001,Raw One",),
+        )
+    )
+    accounts_data = proto.create_addressed_packet(
+        msg_type=module.MessageType.DATA,
+        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        sender_id=5,
+        seq=0,
+        payload=accounts_payload,
+    )
+    accounts_eof = proto.create_addressed_packet(
+        msg_type=module.MessageType.EOF,
+        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        sender_id=5,
+        seq=1,
+        payload=module.ControlMessageSerializer().serialize(
+            module.ControlMessage(sender_id=5, expected_total=1, processed_count=0)
+        ),
+    )
+
+    worker._on_q2_message(q2_data, ack, nack)
+    worker._on_q2_message(q2_eof, ack, nack)
+    worker._on_accounts_message(accounts_data, ack, nack)
+    worker._on_accounts_message(accounts_eof, ack, nack)
+
+    assert calls == {"acks": 4, "nacks": 0}
+    output = created["join_q2_results_queue"][0]
+    data_packet, eof_packet = output.sent
+
+    msg_type, packet_client_id, payload = worker._protocol.unpack_packet(data_packet)
+    assert msg_type == module.MessageType.DATA
+    assert packet_client_id == client_id
+    result = module.Q2BankMaxResultSerializer.deserialize(payload)
+    assert (result.bank_id, result.from_account, result.bank_name, result.amount) == (
+        "1",
+        "acc-1",
+        "Raw One",
+        10.0,
+    )
+
+    msg_type, packet_client_id, payload = worker._protocol.unpack_packet(eof_packet)
+    assert msg_type == module.MessageType.EOF
+    assert packet_client_id == client_id
+    control = worker._control_serializer.deserialize(payload)
+    assert control.expected_total == 1
+
+
 def test_q2_joiner_emits_only_banks_matched_by_notebook_inner_join(
     pika_env, monkeypatch
 ):
