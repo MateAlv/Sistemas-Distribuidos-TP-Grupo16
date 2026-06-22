@@ -305,6 +305,7 @@ class Q4AggregatorWorker:
 
     def start(self) -> None:
         self._ensure_output_bindings()
+        self._republish_pending()
         logging.info(
             "q4_aggregator_start | id=%s | input_exchange=%s | input_key=%s | "
             "joiner_amount=%s | account_deduper_exchange=%s | deduper_amount=%s",
