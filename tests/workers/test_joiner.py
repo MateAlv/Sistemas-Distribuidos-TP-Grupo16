@@ -1,4 +1,5 @@
 import os
+import tempfile
 
 from common.constants import C_Q2, C_Q5
 from common.domain.partial_result import Q2BankMaxPartial
@@ -43,18 +44,22 @@ class DummyQueue:
 
 
 def _send_data(worker, client_id: int, payload: bytes) -> None:
-    packet = worker.internal_protocol.create_packet(
+    packet = worker.internal_protocol.create_addressed_packet(
         msg_type=MessageType.DATA,
         client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        sender_id=0,
+        seq=worker.data_count_by_client.get(client_id, 0),
         payload=payload,
     )
     worker._process_message(packet)
 
 
 def _send_eof(worker, client_id: int) -> None:
-    packet = worker.internal_protocol.create_packet(
+    packet = worker.internal_protocol.create_addressed_packet(
         msg_type=MessageType.EOF,
         client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        sender_id=0,
+        seq=10_000 + worker.eof_count_by_client.get(client_id, 0),
         payload=b"",
     )
     worker._process_message(packet)
@@ -64,6 +69,7 @@ def _make_worker(configuration: str, aggregation_amount: int = 2) -> JoinerWorke
     import workers.joiner.joiners as jm
     jm.CONFIGURATION = configuration
     jm.AGGREGATION_AMOUNT = aggregation_amount
+    jm.STATE_DIR = tempfile.mkdtemp(prefix="joiner-test-")
     worker = JoinerWorker()
     worker.output_resource = DummyQueue()
     worker.output_queue = worker.output_resource
@@ -178,8 +184,9 @@ def test_q2_reduces_global_max_across_shards():
 
     max_by_bank = {}
     for packet in data_packets:
-        m_type, _, payload = worker.internal_protocol.unpack_packet(packet)
+        m_type, _, sender_id, _, payload = worker.internal_protocol.unpack_addressed_packet(packet)
         assert m_type == MessageType.DATA
+        assert sender_id == 0
         r = Q2BankMaxPartialSerializer.deserialize(payload)
         max_by_bank[r.bank_id] = r.amount
 
@@ -187,8 +194,10 @@ def test_q2_reduces_global_max_across_shards():
     assert max_by_bank["BANK_Y"] == 50.0
     assert max_by_bank["BANK_Z"] == 30.0
 
-    m_type, _, payload = worker.internal_protocol.unpack_packet(eof_packet)
+    m_type, _, sender_id, seq, payload = worker.internal_protocol.unpack_addressed_packet(eof_packet)
     assert m_type == MessageType.EOF
+    assert sender_id == 0
+    assert seq == 3
     ctrl = ControlMessageSerializer().deserialize(payload)
     assert ctrl.expected_total == 3
 
@@ -225,7 +234,7 @@ def test_q2_reduces_equal_max_by_earliest_row_across_shards():
     _send_eof(worker, 4)
 
     result = Q2BankMaxPartialSerializer.deserialize(
-        worker.internal_protocol.unpack_packet(out.sent[0])[2]
+        worker.internal_protocol.unpack_addressed_packet(out.sent[0])[4]
     )
     assert result.from_account == "earlier"
     assert result.row_number == 10
