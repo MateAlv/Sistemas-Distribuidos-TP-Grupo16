@@ -1,3 +1,11 @@
+"""N=1 upstream-EOF flush for the WAL-wired sum worker.
+
+With a single sum replica `on_upstream_eof` returns FlushAction directly: the
+worker emits its partials and the downstream EOF to the aggregator shards and
+closes the client. Outputs are addressed packets (sender_id + seq) carried
+through the durable outbox; these tests capture them via a recording exchange.
+"""
+
 import importlib
 import sys
 import types
@@ -9,7 +17,7 @@ class FakeQueue:
     def __init__(self, *args, **kwargs):
         self.sent = []
 
-    def send(self, message):
+    def send(self, message, *args, **kwargs):
         self.sent.append(message)
 
     def close(self):
@@ -22,11 +30,33 @@ class FakeQueue:
         pass
 
 
-class FakeExchange(FakeQueue):
+def _noop_ack():
     pass
 
 
-def import_sum_module(monkeypatch):
+def _noop_nack(requeue=False):
+    pass
+
+
+def _recording_exchange(registry):
+    """Exchange stand-in that records each send under its routing key. The worker
+    builds it as MessageMiddlewareExchangeRabbitMQ(host, exchange, [routing_key])."""
+
+    class RecordingExchange:
+        def __init__(self, *args, **kwargs):
+            routing_keys = args[2] if len(args) >= 3 else kwargs.get("routing_keys", [])
+            self.routing_key = routing_keys[0] if routing_keys else None
+
+        def send(self, message, *args, **kwargs):
+            registry.setdefault(self.routing_key, []).append(message)
+
+        def close(self):
+            pass
+
+    return RecordingExchange
+
+
+def _import_sum_module(monkeypatch, tmp_path, registry):
     monkeypatch.setenv("ID", "0")
     monkeypatch.setenv("MOM_HOST", "rabbitmq")
     monkeypatch.setenv("INPUT_QUEUE", "sum_0")
@@ -37,6 +67,7 @@ def import_sum_module(monkeypatch):
     monkeypatch.setenv("SUM_PREFIX", "sum")
     monkeypatch.setenv("AGGREGATION_AMOUNT", "1")
     monkeypatch.setenv("AGGREGATION_PREFIX", "aggregation")
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
 
     fake_pika = types.SimpleNamespace(
         exceptions=types.SimpleNamespace(
@@ -53,42 +84,48 @@ def import_sum_module(monkeypatch):
     module = importlib.import_module("workers.sum.sums")
     monkeypatch.setattr(module.middleware, "MessageMiddlewareQueueRabbitMQ", FakeQueue)
     monkeypatch.setattr(
-        module.middleware,
-        "MessageMiddlewareExchangeRabbitMQ",
-        FakeExchange,
+        module.middleware, "MessageMiddlewareExchangeRabbitMQ", _recording_exchange(registry)
     )
+    monkeypatch.setattr(module, "MessageMiddlewareQueueRabbitMQ", FakeQueue)
+    monkeypatch.setattr(module, "LazyQueue", FakeQueue)
     return module
 
 
-def test_single_worker_eof_snapshots_partials_while_holding_lock(monkeypatch):
-    module = import_sum_module(monkeypatch)
+def _addressed_eof(worker, client_id: int, seq: int, expected_total: int) -> bytes:
+    payload = worker._control_serializer.serialize(
+        ControlMessage(sender_id=0, expected_total=expected_total, processed_count=0)
+    )
+    return worker._internal_protocol.create_addressed_packet(
+        msg_type=MessageType.EOF,
+        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        sender_id=0,
+        seq=seq,
+        payload=payload,
+    )
+
+
+def test_single_worker_eof_flushes_partials_and_closes(monkeypatch, tmp_path):
+    registry: dict = {}
+    module = _import_sum_module(monkeypatch, tmp_path, registry)
     worker = module.SumWorker()
     client_id = 7
-    output_exchange = FakeExchange()
-    worker._output_exchanges = [output_exchange]
-    worker._processed_by_client[client_id] = 3
 
-    def partials_for_client(client_id_received):
-        assert client_id_received == client_id
-        assert worker._lock.locked()
-        return [("001", b"serialized-partial")]
-
-    monkeypatch.setattr(worker, "_partials_for_client", partials_for_client)
-
-    payload = worker._control_serializer.serialize(
-        ControlMessage(sender_id=0, expected_total=3, processed_count=0)
+    monkeypatch.setattr(
+        worker._state, "partials_for", lambda _cid: [("001", b"serialized-partial")]
     )
 
-    worker._handle_upstream_eof(client_id, payload)
+    worker._process_message(
+        _addressed_eof(worker, client_id, seq=0, expected_total=3), _noop_ack, _noop_nack
+    )
 
-    assert client_id not in worker._processed_by_client
-    assert len(output_exchange.sent) == 2
+    sent = registry["aggregation_0"]
+    assert len(sent) == 2
 
     data_type, data_client_id, data_sender, data_seq, data_payload = (
-        worker._internal_protocol.unpack_addressed_packet(output_exchange.sent[0])
+        worker._internal_protocol.unpack_addressed_packet(sent[0])
     )
     eof_type, eof_client_id, eof_sender, eof_seq, eof_payload = (
-        worker._internal_protocol.unpack_addressed_packet(output_exchange.sent[1])
+        worker._internal_protocol.unpack_addressed_packet(sent[1])
     )
 
     assert data_type == MessageType.DATA
@@ -96,37 +133,35 @@ def test_single_worker_eof_snapshots_partials_while_holding_lock(monkeypatch):
     assert data_sender == 0
     assert data_seq == 0
     assert data_payload == b"serialized-partial"
+
     assert eof_type == MessageType.EOF
-    assert eof_client_id == client_id
-    assert eof_sender == 0
     assert eof_seq == 1
-    eof_control = worker._control_serializer.deserialize(eof_payload)
-    assert eof_control.expected_total == 1
+    assert worker._control_serializer.deserialize(eof_payload).expected_total == 1
+
+    # The flush closed the client (close_change applied through the WAL).
+    assert worker._state.is_closed(client_id)
 
 
-def test_single_worker_eof_without_partials_forwards_zero_expected_total(monkeypatch):
-    module = import_sum_module(monkeypatch)
+def test_single_worker_eof_without_partials_forwards_zero_expected_total(monkeypatch, tmp_path):
+    registry: dict = {}
+    module = _import_sum_module(monkeypatch, tmp_path, registry)
     worker = module.SumWorker()
     client_id = 11
-    output_exchange = FakeExchange()
-    worker._output_exchanges = [output_exchange]
-    worker._processed_by_client[client_id] = 0
 
-    monkeypatch.setattr(worker, "_partials_for_client", lambda _: [])
+    monkeypatch.setattr(worker._state, "partials_for", lambda _cid: [])
 
-    payload = worker._control_serializer.serialize(
-        ControlMessage(sender_id=0, expected_total=0, processed_count=0)
+    worker._process_message(
+        _addressed_eof(worker, client_id, seq=0, expected_total=0), _noop_ack, _noop_nack
     )
 
-    worker._handle_upstream_eof(client_id, payload)
-
-    assert len(output_exchange.sent) == 1
+    sent = registry["aggregation_0"]
+    assert len(sent) == 1
     eof_type, eof_client_id, eof_sender, eof_seq, eof_payload = (
-        worker._internal_protocol.unpack_addressed_packet(output_exchange.sent[0])
+        worker._internal_protocol.unpack_addressed_packet(sent[0])
     )
-    eof_control = worker._control_serializer.deserialize(eof_payload)
     assert eof_type == MessageType.EOF
     assert eof_client_id == client_id
     assert eof_sender == 0
     assert eof_seq == 0
-    assert eof_control.expected_total == 0
+    assert worker._control_serializer.deserialize(eof_payload).expected_total == 0
+    assert worker._state.is_closed(client_id)
