@@ -14,14 +14,12 @@ from common.fault_tolerance.inbox import InboxStatus, MsgKind
 from common.middleware import (
     LazyQueue,
     MessageMiddlewareQueueRabbitMQ,
-    ShardedPublisher,
-    body_digest_key,
 )
 from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
     ensure_exchange_queue_bindings,
 )
-from common.routing import queue_name_for_worker
+from common.routing import queue_name_for_worker, routing_key_for_shard, shard_for_key
 from workers.file_ingestor.file_ingestor_state import FileIngestorState
 from workers.file_ingestor.line_batch_parser import LineBatchParser
 
@@ -67,8 +65,16 @@ class FileIngestor:
         self._line_batch_serializer = LineBatchSerializer()
         self._control_serializer = ControlMessageSerializer()
 
+        # Monotonic seq per (output, shard, client) for addressed downstream packets.
+        # Assigned in business_fn (NOT at send time) so the bytes in the outbox carry
+        # a stable seq: recovery re-publishes the same bytes, the (WAL-wired) filter
+        # dedups them, and the obj4 duplicates stay gone. In-memory: resets on restart
+        # (the filter ignores already-DONE seqs). Guarded by self._lock (all writers
+        # run inside handle()).
+        self._downstream_seq: dict[tuple[str, int, int], int] = {}
+
         self._input_queue: MessageMiddlewareQueueRabbitMQ | MessageMiddlewareExchangeRabbitMQ | None = None
-        self._downstream_outputs: dict[str, ShardedPublisher] | None = None
+        self._downstream_outputs: dict | None = None
         # Named control queue senders for the main thread (EOF_RECEIVED broadcast).
         # Pika connections are not thread-safe; each thread creates its own senders.
         self._main_control_senders: dict = self._new_control_senders()
@@ -115,19 +121,20 @@ class FileIngestor:
             for i in range(self._config.total_instances)
         }
 
-    def _new_downstream_senders(self) -> dict[str, ShardedPublisher]:
-        return {
-            output.name: ShardedPublisher(
-                self._config.mom_host,
-                output.exchange,
-                output.routing_prefix,
-                output.shard_count,
-                key_fn=body_digest_key,
-            )
-            for output in self._config.outputs
-        }
+    def _new_downstream_senders(self) -> dict:
+        """One exchange publisher per (output, shard) routing key. The destination
+        in the outbox is the routing key, so business_fn picks the shard (by payload
+        digest) and the publisher just routes — no re-sharding/seq at send time."""
+        senders = {}
+        for output in self._config.outputs:
+            for shard in range(output.shard_count):
+                routing_key = routing_key_for_shard(output.routing_prefix, shard)
+                senders[routing_key] = MessageMiddlewareExchangeRabbitMQ(
+                    self._config.mom_host, output.exchange, [routing_key]
+                )
+        return senders
 
-    def _downstream_senders(self) -> dict[str, ShardedPublisher]:
+    def _downstream_senders(self) -> dict:
         if self._downstream_outputs is None:
             self._downstream_outputs = self._new_downstream_senders()
         return self._downstream_outputs
@@ -144,6 +151,30 @@ class FileIngestor:
             payload=payload,
         )
 
+    def _next_downstream_seq(self, output_name: str, shard: int, client_id: int) -> int:
+        key = (output_name, shard, client_id)
+        seq = self._downstream_seq.get(key, 0)
+        self._downstream_seq[key] = (seq + 1) & 0xFFFFFFFF
+        return seq
+
+    def _addressed_downstream(self, output, msg_type: MessageType,
+                              client_id: int, payload: bytes) -> tuple[str, bytes]:
+        """(routing_key, addressed packet) for one downstream output. The shard is
+        chosen by the payload digest (so a redelivery lands on the same filter shard
+        and dedups); the seq is per (output, shard, client) so each filter shard sees
+        a dense sequence."""
+        shard = shard_for_key(payload, output.shard_count)
+        routing_key = routing_key_for_shard(output.routing_prefix, shard)
+        seq = self._next_downstream_seq(output.name, shard, client_id)
+        packet = self._internal_protocol.create_addressed_packet(
+            msg_type=msg_type,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            sender_id=self._config.id,
+            seq=seq,
+            payload=payload,
+        )
+        return routing_key, packet
+
     def _eof_payload(self, expected_total: int) -> bytes:
         return self._control_serializer.serialize(
             ControlMessage(
@@ -154,10 +185,14 @@ class FileIngestor:
         )
 
     def _downstream_eof_outputs(self, client_id: int, total_forwarded: int) -> list:
-        """Logical outputs for the single downstream EOF (one per filter output),
-        carrying the cross-replica forwarded total. Routed through the outbox."""
-        message = self._packet(MessageType.EOF, client_id, self._eof_payload(total_forwarded))
-        return [(output.name, message) for output in self._config.outputs]
+        """The single downstream EOF per filter output (addressed), carrying the
+        cross-replica forwarded total. One shard per output (broadcast mode: that
+        filter shard becomes the dynamic leader). Routed through the outbox."""
+        eof_payload = self._eof_payload(total_forwarded)
+        return [
+            self._addressed_downstream(output, MessageType.EOF, client_id, eof_payload)
+            for output in self._config.outputs
+        ]
 
     def _publish_outputs(self, entries, publishers: dict) -> None:
         """Publish stamped outbox entries, resolving each destination name against
@@ -208,12 +243,11 @@ class FileIngestor:
 
         outputs = []
         if transactions:
-            body = self._packet(
-                MessageType.DATA,
-                client_id,
-                self._transaction_serializer.serialize_batch(transactions),
-            )
-            outputs = [(output.name, body) for output in self._config.outputs]
+            body = self._transaction_serializer.serialize_batch(transactions)
+            outputs = [
+                self._addressed_downstream(output, MessageType.DATA, client_id, body)
+                for output in self._config.outputs
+            ]
 
         if should_log_progress(self._state.batches_consumed()):
             logging.info(

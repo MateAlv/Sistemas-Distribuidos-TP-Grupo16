@@ -78,12 +78,20 @@ Fields omitted from state (logging-only, non-deterministic):
 
 from __future__ import annotations
 
+import base64
+
+from common.batch_buffer import BatchBuffer
 from common.eof_coordinator import EofCoordinator
 from common.message_protocol.internal.common import ControlMessage, MessageType
 
 
 class FilterState:
-    def __init__(self, coordinator: EofCoordinator) -> None:
+    def __init__(
+        self,
+        coordinator: EofCoordinator,
+        batch_max_bytes: int,
+        batch_max_items: int,
+    ) -> None:
         # coordinator is shared with the worker and snapshotted alongside the
         # per-client maps so that EOF progress survives a crash.
         self._coordinator = coordinator
@@ -95,21 +103,43 @@ class FilterState:
         # accumulates FLUSH_ACKs from all non-leader peers before forwarding EOF.
         self._all_forwarded_by_output_by_client: dict[int, dict[str, int]] = {}
         self._flushed_acks_by_client: dict[int, set[int]] = {}
+        # Durable output batcher: keyed by (output_name, client_id). Filtered
+        # transactions are appended here; flushed batches are the DATA outputs.
+        # apply_change is the sole mutator; business_fn predicts via plan_*.
+        self._buffer = BatchBuffer(batch_max_bytes, batch_max_items)
 
     @staticmethod
     def data_change(
         client_id: int,
         processed_count: int,
+        appends_by_dest: dict[str, list[bytes]],
         forwarded_by_output: dict[str, int],
     ) -> dict:
-        # forwarded_by_output is the incremental per-output count for this batch
-        # (not cumulative); apply_change accumulates it into the running total.
+        # Two keyings, intentionally separate:
+        #   appends_by_dest    — serialized txs per *destination* (routing target);
+        #                        the durable buffer batches per destination, since
+        #                        txs for different destinations (e.g. q4 partitions)
+        #                        can't share a batch.
+        #   forwarded_by_output— per *logical output* counts for the EOF accounting
+        #                        (q4's partitions roll up under one logical name).
+        # For every output except sharded-q4, destination == logical name.
+        # Payloads are base64 because the WAL frames the change dict as JSON.
         return {
             "type": "data",
             "client_id": client_id,
             "processed_count": processed_count,
+            "appends_by_dest": {
+                dest: [base64.b64encode(p).decode("ascii") for p in payloads]
+                for dest, payloads in appends_by_dest.items()
+            },
             "forwarded_by_output": forwarded_by_output,
         }
+
+    @staticmethod
+    def compound_change(*changes: dict) -> dict:
+        # Bundle multiple change dicts so PersistentStateHandler sees a single
+        # change per message (its one-change-per-handle() invariant).
+        return {"type": "compound", "changes": list(changes)}
 
     @staticmethod
     def flush_ack_change(
@@ -193,6 +223,27 @@ class FilterState:
     def is_closed(self, client_id: int) -> bool:
         return client_id in self._closed_by_client
 
+    # ---------- batcher planners (read-only, for business_fn) ----------
+
+    def plan_data(
+        self, client_id: int, appends_by_dest: dict[str, list[bytes]]
+    ) -> dict[str, list[bytes]]:
+        """Flushed batches per destination that appending these would produce,
+        WITHOUT mutating the buffer. Pairs with apply_change("data"), which performs
+        the real append under the same lock — identical flushes by construction."""
+        return {
+            dest: self._buffer.plan_append((dest, client_id), payloads)
+            for dest, payloads in appends_by_dest.items()
+        }
+
+    def plan_drain(self, client_id: int) -> dict[str, bytes]:
+        """The leftover batch per output for a client (one each), WITHOUT mutating.
+        Pairs with the close change, which discards the buffer in apply_change."""
+        return {
+            key[0]: batch
+            for key, batch in self._buffer.plan_drain(lambda k: k[1] == client_id)
+        }
+
     # ---------- WorkerState protocol ----------
 
     def snapshot(self) -> dict:
@@ -212,6 +263,7 @@ class FilterState:
                 cid: set(senders)
                 for cid, senders in self._flushed_acks_by_client.items()
             },
+            "buffer": self._buffer.snapshot(),
             "eof_coordinator": self._coordinator.snapshot(),
         }
 
@@ -239,11 +291,16 @@ class FilterState:
             cid: set(senders)
             for cid, senders in data["flushed_acks_by_client"].items()
         }
+        self._buffer.restore(data["buffer"])
         self._coordinator.restore(data["eof_coordinator"])
 
     def apply_change(self, change: dict) -> None:
         # Single mutation path — runs both live and during WAL replay.
         kind = change["type"]
+        if kind == "compound":           # check before reading client_id
+            for sub in change["changes"]:
+                self.apply_change(sub)
+            return
         client_id = change["client_id"]
         if kind == "data":
             self._apply_data(client_id, change)
@@ -281,14 +338,18 @@ class FilterState:
         self._processed_by_client[client_id] = (
             self._processed_by_client.get(client_id, 0) + change["processed_count"]
         )
-        by_output = change["forwarded_by_output"]
-        forwarded_total = sum(by_output.values())
-        self._forwarded_by_client[client_id] = (
-            self._forwarded_by_client.get(client_id, 0) + forwarded_total
-        )
+        # Append to the durable buffer per destination; the flushes it triggers are
+        # dropped (already stamped into the outbox by business_fn via plan_data).
+        for dest, b64_payloads in change["appends_by_dest"].items():
+            payloads = [base64.b64decode(s) for s in b64_payloads]
+            self._buffer.apply_append((dest, client_id), payloads)
+        # Per-logical-output forwarded counts (q4 partitions roll up to one name).
         acc = self._forwarded_by_output_by_client.setdefault(client_id, {})
-        for output, count in by_output.items():
+        for output, count in change["forwarded_by_output"].items():
             acc[output] = acc.get(output, 0) + count
+            self._forwarded_by_client[client_id] = (
+                self._forwarded_by_client.get(client_id, 0) + count
+            )
 
     def _apply_flush_ack(self, client_id: int, change: dict) -> None:
         # Accumulate a non-leader's counts; idempotent if the same sender_id is
@@ -309,4 +370,7 @@ class FilterState:
         self._forwarded_by_output_by_client.pop(client_id, None)
         self._all_forwarded_by_output_by_client.pop(client_id, None)
         self._flushed_acks_by_client.pop(client_id, None)
+        # Drop the client's leftover buffer (its final batch was already drained
+        # to the outbox by business_fn via plan_drain before this close).
+        self._buffer.discard(lambda k: k[1] == client_id)
         self._closed_by_client.add(client_id)
