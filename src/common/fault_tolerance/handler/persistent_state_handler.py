@@ -128,6 +128,11 @@ class PersistentStateHandler:
     def maybe_snapshot(self) -> None:
         if self.applied_since_snapshot < self.snapshot_every:
             return
+        self.snapshot_now()
+
+    def snapshot_now(self) -> None:
+        """Snapshot + rotate unconditionally. Used to persist state mutated
+        outside the WAL (e.g. the EOF coordinator) before acking its message."""
         snapshot = Snapshot(
             wal_checkpoint_record=REPLAY_ALL,
             worker_state=self.worker_state.snapshot(),
