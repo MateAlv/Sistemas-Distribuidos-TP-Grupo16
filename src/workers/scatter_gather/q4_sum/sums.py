@@ -30,7 +30,10 @@ from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
 )
 from common.routing import queue_name_for_worker
-from workers.scatter_gather.q4_sum.q4_sum_state import Q4SumState
+try:
+    from q4_sum_state import Q4SumState
+except ImportError:
+    from workers.scatter_gather.q4_sum.q4_sum_state import Q4SumState
 
 
 ID = int(os.environ["ID"])
