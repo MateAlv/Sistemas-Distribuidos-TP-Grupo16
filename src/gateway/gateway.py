@@ -95,7 +95,9 @@ class Gateway:
         self._ensure_file_splitter_bindings()
 
         self._start_result_consumer(self._q1_queue_name, self._q1_csv_lines, "")
-        self._start_result_consumer(self._q2_queue_name, self._q2_csv_lines, "Q2|")
+        self._start_result_consumer(
+            self._q2_queue_name, self._q2_csv_lines, "Q2|", addressed=True
+        )
         self._start_result_consumer(self._q3_queue_name, self._q3_csv_lines, "Q3|")
         self._start_result_consumer(self._q4_queue_name, self._q4_csv_lines, "Q4|")
         self._start_result_consumer(self._q5_queue_name, self._q5_csv_lines, "Q5|")
@@ -105,14 +107,16 @@ class Gateway:
         finally:
             self._shutdown_workers()
 
-    def _start_result_consumer(self, queue_name, payload_to_csv_lines, prefix: str) -> None:
+    def _start_result_consumer(
+        self, queue_name, payload_to_csv_lines, prefix: str, addressed: bool = False
+    ) -> None:
         if not queue_name:
             return
         consumer = MessageMiddlewareQueueRabbitMQ(self._config.mom_host, queue_name)
         self._consumers.append(consumer)
         thread = threading.Thread(
             target=self._run_result_consumer,
-            args=(consumer, payload_to_csv_lines, prefix),
+            args=(consumer, payload_to_csv_lines, prefix, addressed),
             daemon=True,
         )
         self._consumer_threads.append(thread)
@@ -442,12 +446,19 @@ class Gateway:
                         logging.info("gateway_client_closed | client_id=%s", session.client_id)
                         return  
 
-    def _run_result_consumer(self, consumer, payload_to_csv_lines, prefix: str) -> None:
+    def _run_result_consumer(
+        self, consumer, payload_to_csv_lines, prefix: str, addressed: bool = False
+    ) -> None:
         internal_serializer = InternalProtocol()
 
         def callback(message, ack, nack):
             try:
-                msg_type, client_id, payload = internal_serializer.unpack_packet(message)
+                if addressed:
+                    msg_type, client_id, _sender_id, _seq, payload = (
+                        internal_serializer.unpack_addressed_packet(message)
+                    )
+                else:
+                    msg_type, client_id, payload = internal_serializer.unpack_packet(message)
 
                 with self._client_queues_lock:
                     client_queue = self._client_queues.get(client_id)

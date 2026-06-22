@@ -3,12 +3,12 @@ import os
 import signal
 
 try:
-    from bank_name_joiner import BankNameJoinerConfig, BankNameJoinerWorker
-except ImportError:
     from workers.q2_bank_name_joiner.bank_name_joiner import (
         BankNameJoinerConfig,
         BankNameJoinerWorker,
     )
+except ImportError:
+    from bank_name_joiner import BankNameJoinerConfig, BankNameJoinerWorker
 
 from common.heartbeat import HeartbeatSender
 
@@ -18,6 +18,8 @@ DEFAULT_MOM_HOST = "rabbitmq"
 DEFAULT_Q2_INPUT_QUEUE = "q2_enrich_queue"
 DEFAULT_ACCOUNTS_INPUT_QUEUE = "accounts_line_batch_queue"
 DEFAULT_OUTPUT_QUEUE = "join_q2_results_queue"
+DEFAULT_STATE_DIR = "/tmp/q2_bank_name_joiner_state"
+DEFAULT_SNAPSHOT_INTERVAL = 1000
 DEFAULT_LOGGING_LEVEL = "INFO"
 
 
@@ -59,6 +61,8 @@ def load_config() -> BankNameJoinerConfig:
             "ACCOUNTS_INPUT_QUEUE", DEFAULT_ACCOUNTS_INPUT_QUEUE
         ),
         output_queue=os.getenv("OUTPUT_QUEUE", DEFAULT_OUTPUT_QUEUE),
+        state_dir=os.getenv("STATE_DIR", DEFAULT_STATE_DIR),
+        snapshot_interval=get_int("SNAPSHOT_INTERVAL", DEFAULT_SNAPSHOT_INTERVAL),
     )
 
 
