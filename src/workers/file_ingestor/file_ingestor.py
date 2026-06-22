@@ -3,14 +3,14 @@ import threading
 import time
 from dataclasses import dataclass
 
-from common.eof_coordinator import EofCoordinator, BroadcastAction, FlushAction, SendAnswerAction
+from common.eof_coordinator import EofCoordinator, BroadcastAction, SendAnswerAction
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal import InternalProtocol, LineBatchSerializer
 from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 from common.fault_tolerance.handler import PersistentStateHandler, WorkerRunner
-from common.fault_tolerance.inbox import MsgKind
+from common.fault_tolerance.inbox import InboxStatus, MsgKind
 from common.middleware import (
     LazyQueue,
     MessageMiddlewareQueueRabbitMQ,
@@ -237,32 +237,35 @@ class FileIngestor:
             msg_id = f"d:{sender_id}:{client_id}:{seq}"
 
             with self._lock:
-                if self._state.is_closed(client_id):
+                status = self._handler.inbox.classify(client_id, sender_id, seq)
+                if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
                     ack()
                     return
                 count = self._state.processed_count(client_id)
 
                 def bfn(_pl):
-                    action = self._coordinator.on_upstream_eof(
-                        client_id, expected_total, count, count
-                    )
                     eof_change = FileIngestorState.coordinator_upstream_eof_change(
                         client_id, expected_total, count, count
                     )
-                    if isinstance(action, BroadcastAction):
-                        return eof_change, [
-                            (qname, action.message) for qname in action.queue_names
+                    if self._config.total_instances > 1:
+                        queue_names = [
+                            self._coordinator.control_queue_for(i)
+                            for i in range(self._config.total_instances)
                         ]
-                    if isinstance(action, FlushAction):
-                        # N==1: flush directly, no inter-replica coordination.
-                        outputs = self._downstream_eof_outputs(
-                            client_id, action.total_forwarded
+                        message = self._packet(
+                            MessageType.EOF_RECEIVED,
+                            client_id,
+                            self._eof_payload(expected_total),
                         )
-                        compound = FileIngestorState.compound_change(
-                            eof_change, FileIngestorState.close_change(client_id)
-                        )
-                        return compound, outputs
-                    return eof_change, []
+                        return eof_change, [
+                            (qname, message) for qname in queue_names
+                        ]
+                    # N==1: flush directly, no inter-replica coordination.
+                    outputs = self._downstream_eof_outputs(client_id, count)
+                    compound = FileIngestorState.compound_change(
+                        eof_change, FileIngestorState.close_change(client_id)
+                    )
+                    return compound, outputs
 
                 instruction = self._handler.handle(
                     msg_id, client_id, sender_id, seq, payload, bfn
@@ -338,7 +341,10 @@ class FileIngestor:
         msg_id = f"fo:{client_id}:{leader_id}"
         try:
             with self._lock:
-                if self._state.is_closed(client_id):
+                status = self._handler.inbox.classify(
+                    client_id, leader_id, client_id, MsgKind.CTRL_FLUSH_ORDER
+                )
+                if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
                     ack()
                     return
                 if self._coordinator.leader_expected(client_id) is not None:
@@ -466,10 +472,16 @@ class FileIngestor:
         msg_id = f"fa:{client_id}:{sender_id}"
         try:
             with self._lock:
-                if self._state.is_closed(client_id):
+                status = self._handler.inbox.classify(
+                    client_id, sender_id, client_id, MsgKind.CTRL_FLUSH_ACK
+                )
+                if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
                     ack()
                     return
-                if self._coordinator.leader_expected(client_id) is None:
+                if (
+                    status is not InboxStatus.APPLIED
+                    and self._coordinator.leader_expected(client_id) is None
+                ):
                     ack()  # not the leader for this client; ignore
                     return
 
