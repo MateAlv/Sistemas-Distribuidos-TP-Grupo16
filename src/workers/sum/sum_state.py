@@ -92,6 +92,7 @@ class SumState:
         self._processor_factory = processor_factory
         self._processed_by_client: dict[int, int] = {}
         self._processors_by_client: dict = {}
+        self._closed_by_client: set[int] = set()
 
     @staticmethod
     def data_change(client_id: int, payload: bytes) -> dict:
@@ -144,6 +145,15 @@ class SumState:
         # Non-leader cleanup after FlushAction(is_leader=False).
         return {"type": "coordinator_cleanup", "client_id": client_id}
 
+    @staticmethod
+    def compound_change(*changes: dict) -> dict:
+        # Bundle multiple change dicts into one so PersistentStateHandler sees a
+        # single change per message (its one-change-per-handle() invariant).
+        return {"type": "compound", "changes": list(changes)}
+
+    def is_closed(self, client_id: int) -> bool:
+        return client_id in self._closed_by_client
+
     def partials_for(self, client_id: int) -> list[tuple[str, bytes]]:
         """Accumulated partials to forward at flush time; read before close_change."""
         processor = self._processors_by_client.get(client_id)
@@ -159,6 +169,7 @@ class SumState:
         return {
             "processed_by_client": dict(self._processed_by_client),
             "processors_by_client": dict(self._processors_by_client),
+            "closed_by_client": set(self._closed_by_client),
             "eof_coordinator": self._coordinator.snapshot(),
         }
 
@@ -166,14 +177,20 @@ class SumState:
         if not data:
             self._processed_by_client = {}
             self._processors_by_client = {}
+            self._closed_by_client = set()
             return
         self._processed_by_client = dict(data["processed_by_client"])
         self._processors_by_client = dict(data["processors_by_client"])
+        self._closed_by_client = set(data["closed_by_client"])
         self._coordinator.restore(data["eof_coordinator"])
 
     def apply_change(self, change: dict) -> None:
         # Single mutation path — runs both live and during WAL replay.
         kind = change["type"]
+        if kind == "compound":           # check before reading client_id
+            for sub in change["changes"]:
+                self.apply_change(sub)
+            return
         client_id = change["client_id"]
         if kind == "data":
             self._apply_data(client_id, change)
@@ -199,6 +216,9 @@ class SumState:
             raise ValueError(f"unknown change type: {kind}")
 
     def _apply_data(self, client_id: int, change: dict) -> None:
+        # A closed client ignores late stragglers (idempotent on replay).
+        if client_id in self._closed_by_client:
+            return
         # Unlike AggregatorState (whose processor.accept() takes raw bytes),
         # SumProcessor.process() takes Transaction objects — deserialization
         # must happen here before passing to the processor.
@@ -213,6 +233,7 @@ class SumState:
 
     def _apply_close(self, client_id: int) -> None:
         # Idempotent: re-closing an already-closed client is a no-op.
+        self._closed_by_client.add(client_id)
         self._processors_by_client.pop(client_id, None)
         self._processed_by_client.pop(client_id, None)
 
