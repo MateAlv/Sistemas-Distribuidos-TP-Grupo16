@@ -566,6 +566,10 @@ class EofCoordinator:
     def has_flush_ack(self, client_id: int, sender_id: int) -> bool:
         return sender_id in self._flush_acks.get(client_id, set())
 
+    def forwarded_from_acks(self, client_id: int) -> int:
+        """Sum of forwarded counts from all FLUSH_ACKs received so far."""
+        return self._forwarded_from_acks.get(client_id, 0)
+
     def accumulated_forwarded(self, client_id: int) -> int:
         """Sum of forwarded counts from all FLUSH_ACKs received so far."""
         return self._forwarded_from_acks.get(client_id, 0)
