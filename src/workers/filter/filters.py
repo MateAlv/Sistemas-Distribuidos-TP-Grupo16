@@ -206,6 +206,11 @@ class FilterWorker:
             SUM_Q2_OUTPUT, SUM_Q3_QUEUE, FILTER_Q5_USD_QUEUE,
             FILTER_Q1_QUEUE, FILTER_DATE_QUEUE,
         }
+        # The q4 entry (scatter_gather q4_filter) is WAL-wired and reads addressed
+        # packets, so the q4 edges (per-partition routing keys, or the plain mapper
+        # queue) must be addressed too — otherwise q4 hits a struct error and nacks.
+        if CONFIGURATION == C_DATE and DATE_ENABLE_Q4:
+            self._addressed_outputs.update(self._q4_filter_output_names())
         # Monotonic seq per (output, client). In-memory: resets to 0 on restart.
         # Safe while only the downstream crashes (it replays its WAL and ignores
         # already-DONE seqs); a filter crash is the filter's own (future) FT gap.
@@ -568,18 +573,8 @@ class FilterWorker:
                     sender_id=ID, expected_total=total, processed_count=0
                 )
             )
-            # _output_packet routes q4 edges as addressed per (client, partition) and
-            # SUM edges as addressed per (output, client); every other edge stays basic.
-            return self._output_packet(
-                output_name,
-                message_protocol.internal.MessageType.EOF,
-                client_id,
-                message,
-            )
-
-        def send_eof(output_name: str, total: int):
-            output_queues[output_name].send(eof_packet(output_name, total))
-            self._log_forwarded_eof(client_id, output_name, total)
+            # _output_packet wraps addressed edges (SUM / filter / q5 / q4) with a
+            # seq after the data seqs; every other edge stays basic.
             return (dest, self._output_packet(dest, MessageType.EOF, client_id, payload))
 
         if CONFIGURATION == C_Q1:
