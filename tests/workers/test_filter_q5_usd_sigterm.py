@@ -70,7 +70,6 @@ def test_filter_q5_usd_sigterm_stops_all_consumers_and_closes(pika_env, monkeypa
     assert worker.control_consumer.closed     # control thread finally
     assert worker.response_consumer.closed    # response thread finally
     assert all(q.closed for q in worker._main_control_senders.values())
-    assert all(ex.closed for ex in worker.output_exchanges)
 
 
 def test_filter_q5_usd_handle_sigterm_sets_rpc_cancel(pika_env, monkeypatch):

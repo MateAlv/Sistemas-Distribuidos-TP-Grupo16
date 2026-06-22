@@ -189,6 +189,16 @@ class FilterWorker:
         self.deserialized_by_client = {}
         self._q4_next_seq_by_client_partition = {}
 
+        # Outputs whose downstream consumer (a WAL-wired SUM worker) deduplicates by
+        # (sender_id, seq): these edges carry addressed packets instead of basic ones.
+        # Every other output stays basic so its consumer is unaffected.
+        self._addressed_outputs = {SUM_Q2_OUTPUT, SUM_Q3_QUEUE}
+        # Monotonic seq per (output, client). In-memory: resets to 0 on restart.
+        # Safe while only SUM crashes (it replays its WAL and ignores already-DONE
+        # seqs); a filter crash is the filter's own (future) FT gap.
+        self._sum_seq_lock = threading.Lock()
+        self._sum_seq_by_output_client: dict[tuple[str, int], int] = {}
+
     # ─── connection factories ────────────────────────────────────────────────
 
     def _new_control_senders(self) -> dict:
@@ -427,17 +437,42 @@ class FilterWorker:
             payload=payload,
         )
 
-    def _output_data_packet(
-        self, queue_name: str, client_id: int, payload: bytes
+    def _next_sum_seq(self, output_name: str, client_id: int) -> int:
+        with self._sum_seq_lock:
+            key = (output_name, client_id)
+            seq = self._sum_seq_by_output_client.get(key, 0)
+            self._sum_seq_by_output_client[key] = (seq + 1) & 0xFFFFFFFF
+            return seq
+
+    def _output_packet(
+        self,
+        output_name: str,
+        msg_type,
+        client_id: int,
+        payload: bytes,
     ) -> bytes:
-        if self._is_q4_filter_exchange_output(queue_name):
+        # q4 filter exchange edges are addressed per (client, partition); SUM edges
+        # per (output, client); every other edge stays basic.
+        if self._is_q4_filter_exchange_output(output_name):
             return self._q4_addressed_packet(
-                MessageType.DATA,
+                msg_type,
                 client_id,
-                self._q4_filter_partition_from_output(queue_name),
+                self._q4_filter_partition_from_output(output_name),
                 payload,
             )
-        return self._data_packet(client_id, payload)
+        if output_name in self._addressed_outputs:
+            return self.internal_packet_serializer.create_addressed_packet(
+                msg_type=msg_type,
+                client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+                sender_id=ID,
+                seq=self._next_sum_seq(output_name, client_id),
+                payload=payload,
+            )
+        return self.internal_packet_serializer.create_packet(
+            msg_type=msg_type,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            payload=payload,
+        )
 
     def _publish_to_queue(
         self, queue_name: str, client_id: int, transaction: Transaction,
@@ -448,12 +483,22 @@ class FilterWorker:
             batch_payload = self._batcher.append(queue_name, client_id, transaction)
             if batch_payload is not None:
                 output_queues[queue_name].send(
-                    self._output_data_packet(queue_name, client_id, batch_payload)
+                    self._output_packet(
+                        queue_name,
+                        message_protocol.internal.MessageType.DATA,
+                        client_id,
+                        batch_payload,
+                    )
                 )
             return
         payload = self.transaction_serializer.serialize(transaction)
         output_queues[queue_name].send(
-            self._output_data_packet(queue_name, client_id, payload)
+            self._output_packet(
+                queue_name,
+                message_protocol.internal.MessageType.DATA,
+                client_id,
+                payload,
+            )
         )
 
     def _flush_batcher_for_client(self, client_id: int, output_queues=None) -> None:
@@ -462,7 +507,12 @@ class FilterWorker:
         output_queues = output_queues or self.output_queues
         for queue_name, payload in self._batcher.drain_client(client_id).items():
             output_queues[queue_name].send(
-                self._output_data_packet(queue_name, client_id, payload)
+                self._output_packet(
+                    queue_name,
+                    message_protocol.internal.MessageType.DATA,
+                    client_id,
+                    payload,
+                )
             )
             logging.info(
                 "filter_batcher_flush | filter=%s | id=%s | client_id=%s | "
@@ -546,7 +596,7 @@ class FilterWorker:
         def count(queue: str) -> int:
             return int(forwarded_by_output.get(queue, 0))
 
-        def eof_packet(total: int, q4_partition: int | None = None):
+        def eof_packet(output_name: str, total: int):
             message = self.control_serializer.serialize(
                 message_protocol.internal.ControlMessage(
                     sender_id=ID,
@@ -554,66 +604,42 @@ class FilterWorker:
                     processed_count=0
                 )
             )
-            if q4_partition is not None:
-                return self._q4_addressed_packet(
-                    MessageType.EOF,
-                    client_id,
-                    q4_partition,
-                    message,
-                )
-            return self.internal_packet_serializer.create_packet(
-                msg_type=message_protocol.internal.MessageType.EOF,
-                client_id_bytes=client_id.to_bytes(16, byteorder='big'),
-                payload=message
+            # _output_packet routes q4 edges as addressed per (client, partition) and
+            # SUM edges as addressed per (output, client); every other edge stays basic.
+            return self._output_packet(
+                output_name,
+                message_protocol.internal.MessageType.EOF,
+                client_id,
+                message,
             )
+
+        def send_eof(output_name: str, total: int):
+            output_queues[output_name].send(eof_packet(output_name, total))
+            self._log_forwarded_eof(client_id, output_name, total)
 
         output_queues = output_queues or self.output_queues
         if CONFIGURATION == C_Q1:
-            expected_total = count(GATEWAY_QUEUE)
-            output_queues[GATEWAY_QUEUE].send(eof_packet(expected_total))
-            self._log_forwarded_eof(client_id, GATEWAY_QUEUE, expected_total)
+            send_eof(GATEWAY_QUEUE, count(GATEWAY_QUEUE))
         if CONFIGURATION == C_Q5:
-            expected_total = count(FILTER_Q5_USD_QUEUE)
-            output_queues[FILTER_Q5_USD_QUEUE].send(eof_packet(expected_total))
-            self._log_forwarded_eof(client_id, FILTER_Q5_USD_QUEUE, expected_total)
+            send_eof(FILTER_Q5_USD_QUEUE, count(FILTER_Q5_USD_QUEUE))
         if CONFIGURATION == C_USD:
             if USD_ENABLE_Q1:
-                expected_total = count(FILTER_Q1_QUEUE)
-                output_queues[FILTER_Q1_QUEUE].send(eof_packet(expected_total))
-                self._log_forwarded_eof(client_id, FILTER_Q1_QUEUE, expected_total)
+                send_eof(FILTER_Q1_QUEUE, count(FILTER_Q1_QUEUE))
             if USD_ENABLE_Q2:
-                expected_total = count(SUM_Q2_OUTPUT)
-                output_queues[SUM_Q2_OUTPUT].send(eof_packet(expected_total))
-                self._log_forwarded_eof(client_id, SUM_Q2_OUTPUT, expected_total)
+                send_eof(SUM_Q2_OUTPUT, count(SUM_Q2_OUTPUT))
             if USD_ENABLE_DATE:
-                expected_total = count(FILTER_DATE_QUEUE)
-                output_queues[FILTER_DATE_QUEUE].send(eof_packet(expected_total))
-                self._log_forwarded_eof(client_id, FILTER_DATE_QUEUE, expected_total)
+                send_eof(FILTER_DATE_QUEUE, count(FILTER_DATE_QUEUE))
         if CONFIGURATION == C_DATE:
             if DATE_ENABLE_Q3:
-                expected_total = count(SUM_Q3_QUEUE)
-                output_queues[SUM_Q3_QUEUE].send(eof_packet(expected_total))
-                self._log_forwarded_eof(client_id, SUM_Q3_QUEUE, expected_total)
-                expected_total = count(Q3_CANDIDATES_QUEUE)
-                output_queues[Q3_CANDIDATES_QUEUE].send(eof_packet(expected_total))
-                self._log_forwarded_eof(client_id, Q3_CANDIDATES_QUEUE, expected_total)
+                send_eof(SUM_Q3_QUEUE, count(SUM_Q3_QUEUE))
+                send_eof(Q3_CANDIDATES_QUEUE, count(Q3_CANDIDATES_QUEUE))
             if DATE_ENABLE_Q4:
                 if Q4_FILTER_INPUT_EXCHANGE:
                     expected_total = count(Q4_FILTER_OUTPUT)
                     for output_name in self._q4_filter_output_names():
-                        partition = self._q4_filter_partition_from_output(output_name)
-                        output_queues[output_name].send(
-                            eof_packet(expected_total, partition)
-                        )
-                        self._log_forwarded_eof(client_id, output_name, expected_total)
+                        send_eof(output_name, expected_total)
                 else:
-                    expected_total = count(SCATTER_GATHER_MAPPER_QUEUE)
-                    output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(
-                        eof_packet(expected_total)
-                    )
-                    self._log_forwarded_eof(
-                        client_id, SCATTER_GATHER_MAPPER_QUEUE, expected_total
-                    )
+                    send_eof(SCATTER_GATHER_MAPPER_QUEUE, count(SCATTER_GATHER_MAPPER_QUEUE))
 
     def _log_forwarded_eof(self, client_id: int, output_name: str, expected_total: int):
         logging.info(

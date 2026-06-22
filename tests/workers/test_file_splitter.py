@@ -5,6 +5,7 @@ from common.message_protocol.external.types import (
 )
 from common.message_protocol.internal import (
     ControlMessageSerializer,
+    InternalProtocol,
     LineBatchSerializer,
     MessageType,
 )
@@ -33,6 +34,20 @@ class RecordingSender:
         if self.closed:
             raise RuntimeError("send on closed sender")
         self.messages.append((msg_type, client_id, payload))
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class RecordingQueue:
+    def __init__(self):
+        self.sent = []
+        self.closed = False
+
+    def send(self, message: bytes) -> None:
+        if self.closed:
+            raise RuntimeError("send on closed queue")
+        self.sent.append(message)
 
     def close(self) -> None:
         self.closed = True
@@ -203,6 +218,73 @@ def test_file_splitter_drops_accounts_files():
     )
 
     assert sender.messages == []
+
+
+def test_file_splitter_accounts_output_uses_addressed_packets():
+    accounts_queue = RecordingQueue()
+    splitter = FileSplitter(
+        FileSplitterConfig(
+            id=5,
+            mom_host="localhost",
+            input_exchange="file_ingestor_exchange",
+            queue_name="file_splitter_5",
+            output_exchange="line_batch_exchange",
+            output_routing_prefix="file_ingestor",
+            output_shard_count=3,
+            max_line_bytes=1024,
+            max_batch_bytes=4096,
+            logging_level="INFO",
+            accounts_output_queue="accounts_line_batch_queue",
+        )
+    )
+    splitter._accounts_output = accounts_queue
+    path = "LI-Mini_accounts.csv"
+
+    splitter._handle_chunk(
+        FileChunk(
+            rel_path=path,
+            client_id=7,
+            file_type=FILE_TYPE_ACCOUNTS,
+            offset=0,
+            data=b"Bank ID,Bank Name\n001,Raw One\n",
+        )
+    )
+    splitter._handle_file_eof(
+        FileEof(
+            rel_path=path,
+            client_id=7,
+            file_type=FILE_TYPE_ACCOUNTS,
+        )
+    )
+
+    assert len(accounts_queue.sent) == 2
+    proto = InternalProtocol()
+    data_type, data_client, data_sender, data_seq, data_payload = (
+        proto.unpack_addressed_packet(accounts_queue.sent[0])
+    )
+    eof_type, eof_client, eof_sender, eof_seq, eof_payload = (
+        proto.unpack_addressed_packet(accounts_queue.sent[1])
+    )
+
+    assert (data_type, data_client, data_sender, data_seq) == (
+        MessageType.DATA,
+        7,
+        5,
+        0,
+    )
+    batch = LineBatchSerializer.deserialize(data_payload)
+    assert batch.file_type == FILE_TYPE_ACCOUNTS
+    assert batch.batch_id == 0
+    assert batch.lines == (b"001,Raw One",)
+
+    assert (eof_type, eof_client, eof_sender, eof_seq) == (
+        MessageType.EOF,
+        7,
+        5,
+        1,
+    )
+    eof = ControlMessageSerializer().deserialize(eof_payload)
+    assert eof.expected_total == 1
 
 
 def test_file_splitter_stop_does_not_close_outputs_until_start_unwinds(monkeypatch):
