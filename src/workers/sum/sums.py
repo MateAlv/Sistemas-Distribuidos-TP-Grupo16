@@ -6,6 +6,7 @@ import time
 from common import middleware
 from common.constants import C_Q2, C_Q3
 from common.eof_coordinator import EofCoordinator, BroadcastAction, FlushAction, SendAnswerAction
+from common.fault_tolerance.handler.action import Action
 from common.fault_tolerance.handler.persistent_state_handler import PersistentStateHandler
 from common.fault_tolerance.inbox import MsgKind
 from common.logging_utils import should_log_progress
@@ -200,10 +201,24 @@ class SumWorker:
             )
         return outputs
 
-    def _send_outputs(self, outputs) -> None:
-        # outputs are stamped OutboxEntry objects (destination/body attributes).
-        for entry in outputs:
+    def _publish_commit_ack(self, instruction, ack) -> bool:
+        """Publish the stamped outputs, commit the input, ack. Returns whether work
+        was actually done.
+
+        A duplicate or replayed message the inbox already finished comes back as
+        Action.ACK with ctx=None — just ack it; never call commit_done(*None).
+        This is the crash-recovery path: RabbitMQ redelivers an unacked message,
+        the inbox classifies it DONE, and we ack without reprocessing.
+        """
+        if instruction.action is Action.ACK:
+            ack()
+            return False
+        for entry in instruction.outputs:
             self._tl_sender(entry.destination).send(entry.body)
+        with self._lock:
+            self._handler.commit_done(*instruction.ctx)
+        ack()
+        return True
 
     # ---------- data path ----------
 
@@ -221,7 +236,7 @@ class SumWorker:
                 raise ValueError(f"Unexpected sum data message type: {msg_type}")
         except Exception:
             logging.exception("sum_data_error | configuration=%s | id=%s", CONFIGURATION, ID)
-            nack()
+            nack(requeue=True)
 
     def _handle_data(self, client_id, sender_id, seq, payload, ack) -> None:
         msg_id = f"d:{sender_id}:{client_id}:{seq}"
@@ -229,19 +244,19 @@ class SumWorker:
         def bfn(_pl):
             return SumState.data_change(client_id, _pl), []
 
+        # DATA has no outputs; _publish_commit_ack commits + acks (or just acks
+        # a duplicate that the inbox already finished).
         with self._lock:
             instruction = self._handler.handle(msg_id, client_id, sender_id, seq, payload, bfn)
-        # DATA has no outputs; commit immediately.
-        with self._lock:
-            self._handler.commit_done(*instruction.ctx)
-        ack()
+        committed = self._publish_commit_ack(instruction, ack)
 
-        processed = self._state.processed_count(client_id)
-        if should_log_progress(processed):
-            logging.info(
-                "sum_data | configuration=%s | id=%s | client_id=%s | processed_total=%s",
-                CONFIGURATION, ID, client_id, processed,
-            )
+        if committed:
+            processed = self._state.processed_count(client_id)
+            if should_log_progress(processed):
+                logging.info(
+                    "sum_data | configuration=%s | id=%s | client_id=%s | processed_total=%s",
+                    CONFIGURATION, ID, client_id, processed,
+                )
 
     def _handle_upstream_eof(self, client_id, sender_id, seq, payload, ack) -> None:
         ctrl = self._control_serializer.deserialize(payload)
@@ -286,10 +301,7 @@ class SumWorker:
                 msg_id, client_id, sender_id, seq, payload, bfn
             )
 
-        self._send_outputs(instruction.outputs)
-        with self._lock:
-            self._handler.commit_done(*instruction.ctx)
-        ack()
+        self._publish_commit_ack(instruction, ack)
         logging.info(
             "sum_upstream_eof | configuration=%s | id=%s | client_id=%s | "
             "local_count=%s | expected_total=%s",
@@ -305,7 +317,7 @@ class SumWorker:
             logging.exception(
                 "sum_control_parse_error | configuration=%s | id=%s", CONFIGURATION, ID
             )
-            nack()
+            nack(requeue=False)
             return
 
         if msg_type == MessageType.EOF_RECEIVED:
@@ -348,16 +360,13 @@ class SumWorker:
                     msg_id, client_id, sender_id, seq, message, bfn,
                     kind=MsgKind.CTRL_EOF_RECEIVED,
                 )
-            self._send_outputs(instruction.outputs)
-            with self._lock:
-                self._handler.commit_done(*instruction.ctx)
-            ack()
+            self._publish_commit_ack(instruction, ack)
         except Exception:
             logging.exception(
                 "sum_eof_received_error | configuration=%s | id=%s | client_id=%s",
                 CONFIGURATION, ID, client_id,
             )
-            nack()
+            nack(requeue=True)
 
     def _handle_processed_request(self, client_id, ctrl, ack, nack) -> None:
         # Pure re-report (no state mutation): direct coordinator call. The reported
@@ -376,7 +385,7 @@ class SumWorker:
                 "sum_processed_request_error | configuration=%s | id=%s | client_id=%s",
                 CONFIGURATION, ID, client_id,
             )
-            nack()
+            nack(requeue=True)
 
     def _handle_flush_order(self, client_id, ctrl, ack, nack) -> None:
         # The dynamic leader (it set _leader_expected) ignores its own FLUSH_ORDER;
@@ -413,20 +422,17 @@ class SumWorker:
                     msg_id, client_id, leader_id, seq, b"", bfn,
                     kind=MsgKind.CTRL_FLUSH_ORDER,
                 )
-            self._send_outputs(instruction.outputs)
-            with self._lock:
-                self._handler.commit_done(*instruction.ctx)
-            ack()
-            logging.info(
-                "sum_flush_ack_sent | configuration=%s | id=%s | client_id=%s",
-                CONFIGURATION, ID, client_id,
-            )
+            if self._publish_commit_ack(instruction, ack):
+                logging.info(
+                    "sum_flush_ack_sent | configuration=%s | id=%s | client_id=%s",
+                    CONFIGURATION, ID, client_id,
+                )
         except Exception:
             logging.exception(
                 "sum_flush_order_error | configuration=%s | id=%s | client_id=%s",
                 CONFIGURATION, ID, client_id,
             )
-            nack()
+            nack(requeue=True)
 
     def _run_control_consumer(self) -> None:
         consumer = MessageMiddlewareQueueRabbitMQ(MOM_HOST, self._coordinator.my_control_queue())
@@ -458,7 +464,7 @@ class SumWorker:
             logging.exception(
                 "sum_response_parse_error | configuration=%s | id=%s", CONFIGURATION, ID
             )
-            nack()
+            nack(requeue=False)
             return
 
         if msg_type == MessageType.PROCESSED_ANSWER:
@@ -494,7 +500,7 @@ class SumWorker:
                 "sum_processed_answer_error | configuration=%s | id=%s | client_id=%s",
                 CONFIGURATION, ID, client_id,
             )
-            nack()
+            nack(requeue=True)
 
     def _handle_flush_ack(self, message, client_id, ctrl, ack, nack) -> None:
         # WAL-tracked so the leader's final flush (partials + downstream EOF) and the
@@ -542,16 +548,13 @@ class SumWorker:
                     msg_id, client_id, sender_id, seq, message, bfn,
                     kind=MsgKind.CTRL_FLUSH_ACK,
                 )
-            self._send_outputs(instruction.outputs)
-            with self._lock:
-                self._handler.commit_done(*instruction.ctx)
-            ack()
+            self._publish_commit_ack(instruction, ack)
         except Exception:
             logging.exception(
                 "sum_flush_ack_error | configuration=%s | id=%s | client_id=%s",
                 CONFIGURATION, ID, client_id,
             )
-            nack()
+            nack(requeue=True)
 
     def _run_response_consumer(self) -> None:
         consumer = MessageMiddlewareQueueRabbitMQ(MOM_HOST, self._coordinator.my_response_queue())
