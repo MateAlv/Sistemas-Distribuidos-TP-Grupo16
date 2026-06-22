@@ -10,6 +10,7 @@ STATE_DIR (the durable disk survives). These prove the two guarantees:
 
 from common.fault_tolerance.handler import WorkerRunner
 from common.fault_tolerance.inbox import InboxStatus, MsgKind
+from common.routing import routing_key_for_shard
 from common.message_protocol.external.types import FILE_TYPE_TRANSACTIONS
 from common.message_protocol.internal import (
     ControlMessage,
@@ -271,7 +272,16 @@ def test_flush_ack_crash_after_done_before_ack_dedups_redelivery(tmp_path):
 
 
 def _ingestor(tmp_path, total_instances=1):
-    outputs = {"filter_usd": RecordingSender(), "filter_q5_format": RecordingSender()}
+    output_configs = (
+        FileIngestorOutputConfig(
+            name="filter_usd", exchange="filter_usd_exchange",
+            routing_prefix="filter_usd", shard_count=2,
+        ),
+        FileIngestorOutputConfig(
+            name="filter_q5_format", exchange="filter_q5_format_exchange",
+            routing_prefix="filter_q5_format", shard_count=3,
+        ),
+    )
     ingestor = FileIngestor(
         FileIngestorConfig(
             id=1,
@@ -280,32 +290,35 @@ def _ingestor(tmp_path, total_instances=1):
             queue_name="file_ingestor_1",
             input_exchange="line_batch_exchange",
             input_routing_prefix="file_ingestor",
-            outputs=(
-                FileIngestorOutputConfig(
-                    name="filter_usd", exchange="filter_usd_exchange",
-                    routing_prefix="filter_usd", shard_count=2,
-                ),
-                FileIngestorOutputConfig(
-                    name="filter_q5_format", exchange="filter_q5_format_exchange",
-                    routing_prefix="filter_q5_format", shard_count=3,
-                ),
-            ),
+            outputs=output_configs,
             control_queue_prefix="file_ingestor_control",
             response_queue_prefix="file_ingestor_response",
             logging_level="INFO",
             state_dir=str(tmp_path),
         )
     )
-    ingestor._downstream_outputs = outputs
-    ingestor._data_publishers = dict(outputs)
+    # Outputs are now addressed and routed per (output, shard) key. One sink per
+    # logical output; every shard routing key for an output maps to that output's
+    # sink. The returned map is keyed by routing key (so it doubles as the publisher
+    # map for the EOF/flush paths); per-output count assertions still hold because
+    # the shared sink records each message once regardless of which shard key it
+    # arrived through.
+    sinks = {"filter_usd": RecordingSender(), "filter_q5_format": RecordingSender()}
+    publishers = {
+        routing_key_for_shard(output.routing_prefix, shard): sinks[output.name]
+        for output in output_configs
+        for shard in range(output.shard_count)
+    }
+    ingestor._downstream_outputs = publishers
+    ingestor._data_publishers = dict(publishers)
     ingestor._runner = WorkerRunner(
         handler=ingestor._handler,
-        publishers=outputs,
+        publishers=publishers,
         process_payload=ingestor._data_process_payload,
         lock=ingestor._lock,
     )
     ingestor._runner.recover_and_republish()
-    return ingestor, outputs
+    return ingestor, publishers
 
 
 def _two_row_batch() -> LineBatch:
