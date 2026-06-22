@@ -188,13 +188,16 @@ class FilterWorker:
         self.first_data_logged_by_client = set()
         self.deserialized_by_client = {}
 
-        # Outputs whose downstream consumer (a WAL-wired SUM worker) deduplicates by
+        # Outputs whose downstream consumer (a WAL-wired worker) deduplicates by
         # (sender_id, seq): these edges carry addressed packets instead of basic ones.
         # Every other output stays basic so its consumer is unaffected.
-        self._addressed_outputs = {SUM_Q2_OUTPUT, SUM_Q3_QUEUE}
+        #   SUM_Q2_OUTPUT / SUM_Q3_QUEUE -> sum workers
+        #   FILTER_Q5_USD_QUEUE          -> filter_q5_usd (lets it drop its sha256
+        #                                   dedup workaround and read the real seq)
+        self._addressed_outputs = {SUM_Q2_OUTPUT, SUM_Q3_QUEUE, FILTER_Q5_USD_QUEUE}
         # Monotonic seq per (output, client). In-memory: resets to 0 on restart.
-        # Safe while only SUM crashes (it replays its WAL and ignores already-DONE
-        # seqs); a filter crash is the filter's own (future) FT gap.
+        # Safe while only the downstream crashes (it replays its WAL and ignores
+        # already-DONE seqs); a filter crash is the filter's own (future) FT gap.
         self._sum_seq_lock = threading.Lock()
         self._sum_seq_by_output_client: dict[tuple[str, int], int] = {}
 
