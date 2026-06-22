@@ -17,6 +17,8 @@ in an un-rotated WAL never double-applies.
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Callable
 
 from common.fault_tolerance.handler.action import Action
@@ -138,6 +140,8 @@ class PersistentStateHandler:
     def snapshot_now(self) -> None:
         """Snapshot + rotate unconditionally. Used to persist state mutated
         outside the WAL (e.g. the EOF coordinator) before acking its message."""
+        started = time.monotonic()
+        applied = self.applied_since_snapshot
         snapshot = Snapshot(
             wal_checkpoint_record=REPLAY_ALL,
             worker_state=self.worker_state.snapshot(),
@@ -148,6 +152,11 @@ class PersistentStateHandler:
         self.last_state.commit(snapshot)
         self.wal.rotate()
         self.applied_since_snapshot = 0
+        logging.info(
+            "SNAPSHOT_TAKEN | node=%s | applied_since_last=%s | every=%s | dur_ms=%.1f",
+            self.node_id, applied, self.snapshot_every,
+            (time.monotonic() - started) * 1000.0,
+        )
 
     def _apply_record(self, record: WalRecord) -> bool:
         """Replay one record into memory, skipping anything already reflected in
