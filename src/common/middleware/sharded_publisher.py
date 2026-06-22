@@ -16,6 +16,7 @@ from typing import Callable, Union
 from .middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
 )
+from common.message_protocol.internal.protocol import InternalProtocol
 from common.routing import routing_key_for_shard, shard_for_key
 
 
@@ -80,6 +81,63 @@ class ShardedPublisher:
         for shard in range(self._shard_count):
             routing_key = routing_key_for_shard(self._routing_key_prefix, shard)
             self._publisher.send(message, routing_key=routing_key)
+
+    def close(self) -> None:
+        try:
+            self._publisher.close()
+        except Exception:
+            pass
+
+
+class SequencedShardedPublisher:
+    """Publica paquetes *direccionados* (con sender_id y seq) sobre un edge sharded.
+
+    Cada salida lleva un ``seq`` por ``(client_id, shard de destino)``: como el
+    sharding por digest reparte un cliente entre todas las shards, un ``seq`` por
+    cliente dejaría a cada shard viendo ~1/N de los seqs (huecos sin fin en el
+    DeduplicationTracker del consumidor). Con seq por (client, shard) cada shard
+    recibe una secuencia densa y el dedup queda acotado.
+
+    La shard se deriva del *payload* (mismo digest que ``body_digest_key``), así
+    que coincide con la asignación del publisher plano. El seq es en memoria: con
+    el handler durable este rol pasa al ``SenderSequencer`` (que deberá adoptar la
+    misma clave (client, shard) antes de dedup-ar un edge sharded aguas abajo).
+    """
+
+    def __init__(
+        self,
+        mom_host: str,
+        exchange_name: str,
+        routing_key_prefix: str,
+        shard_count: int,
+        sender_id: int,
+    ) -> None:
+        if shard_count < 1:
+            raise ValueError("shard_count must be >= 1")
+        self._shard_count = shard_count
+        self._routing_key_prefix = routing_key_prefix
+        self._sender_id = sender_id
+        self._next_seq: dict[tuple[int, int], int] = {}
+        self._publisher = MessageMiddlewareExchangeRabbitMQ(
+            mom_host,
+            exchange_name,
+            [],
+        )
+
+    def send(self, msg_type: int, client_id: int, payload: bytes) -> None:
+        shard = shard_for_key(payload, self._shard_count)
+        seq_key = (client_id, shard)
+        seq = self._next_seq.get(seq_key, 0)
+        self._next_seq[seq_key] = seq + 1
+        message = InternalProtocol.create_addressed_packet(
+            msg_type,
+            client_id.to_bytes(16, byteorder="big"),
+            self._sender_id,
+            seq,
+            payload,
+        )
+        routing_key = routing_key_for_shard(self._routing_key_prefix, shard)
+        self._publisher.send(message, routing_key=routing_key)
 
     def close(self) -> None:
         try:

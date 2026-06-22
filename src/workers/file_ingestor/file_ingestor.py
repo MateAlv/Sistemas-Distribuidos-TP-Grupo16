@@ -3,14 +3,14 @@ import threading
 import time
 from dataclasses import dataclass
 
-from common.domain.transaction import Transaction
-from common.eof_coordinator import EofCoordinator, BroadcastAction, FlushAction, SendAnswerAction
+from common.eof_coordinator import EofCoordinator, BroadcastAction, SendAnswerAction
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal import InternalProtocol, LineBatchSerializer
 from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
-from common.last_state import LastStateManager
+from common.fault_tolerance.handler import PersistentStateHandler, WorkerRunner
+from common.fault_tolerance.inbox import InboxStatus, MsgKind
 from common.middleware import (
     LazyQueue,
     MessageMiddlewareQueueRabbitMQ,
@@ -22,6 +22,7 @@ from common.middleware.middleware_rabbitmq import (
     ensure_exchange_queue_bindings,
 )
 from common.routing import queue_name_for_worker
+from workers.file_ingestor.file_ingestor_state import FileIngestorState
 from workers.file_ingestor.line_batch_parser import LineBatchParser
 
 
@@ -83,64 +84,18 @@ class FileIngestor:
         self._closed = False
         self._stopped = False
 
+        # One lock serializes the handler (data thread) with every coordinator
+        # access on the control/response threads, so the snapshot is consistent.
         self._lock = threading.Lock()
-        self._processed_by_client: dict[int, int] = {}
-        self._batches_consumed = 0
 
-        self._last_state = LastStateManager(config.state_dir) if config.state_dir else None
-        self._msg_count = 0
-        self._restore_snapshot()
-
-    # ---------- snapshot ----------
-
-    def _build_snapshot(self) -> dict:
-        """Capture all mutable worker state into a serializable dict.
-        Must be called under self._lock to get a consistent view of state
-        and coordinator together. This dict is what gets written to disk."""
-        return {
-            "wal_checkpoint_record": 0,
-            "processed_by_client": dict(self._processed_by_client),
-            "batches_consumed": self._batches_consumed,
-            "eof_coordinator": self._coordinator.snapshot(),
-        }
-
-    def _restore_snapshot(self) -> None:
-        """Load the latest snapshot from disk and apply it to worker state.
-        Called once at startup before consuming any messages. No-op if no
-        snapshot exists or STATE_DIR is not configured."""
-        if self._last_state is None:
-            return
-        snap = self._last_state.load()
-        if snap is None:
-            return
-        with self._lock:
-            self._processed_by_client = snap["processed_by_client"]
-            self._batches_consumed = snap["batches_consumed"]
-            self._coordinator.restore(snap["eof_coordinator"])
-        logging.info("file_ingestor_restored | id=%s", self._config.id)
-
-    def _snapshot(self) -> None:
-        """Unconditionally persist current state to disk and reset the message
-        counter. Called on upstream EOF (important state boundary) and by
-        _maybe_snapshot when the interval is reached."""
-        if self._last_state is None:
-            return
-        self._msg_count = 0
-        with self._lock:
-            snap = self._build_snapshot()
-        try:
-            self._last_state.save(snap)
-        except Exception:
-            logging.exception("file_ingestor_snapshot_error | id=%s", self._config.id)
-
-    def _maybe_snapshot(self) -> None:
-        """Increment the message counter and trigger a snapshot every
-        SNAPSHOT_INTERVAL DATA messages. No-op if STATE_DIR is not set."""
-        if self._last_state is None:
-            return
-        self._msg_count += 1
-        if self._msg_count >= self._config.snapshot_interval:
-            self._snapshot()
+        self._state = FileIngestorState(self._coordinator)
+        self._handler = PersistentStateHandler(
+            state_dir=config.state_dir,
+            node_id=f"file_ingestor_{config.id}",
+            worker_state=self._state,
+            snapshot_every=config.snapshot_interval,
+        )
+        self._runner: WorkerRunner | None = None
 
     # ---------- connection factories ----------
 
@@ -198,33 +153,20 @@ class FileIngestor:
             )
         )
 
-    def _send_transaction_batch(
-        self,
-        senders: dict[str, ShardedPublisher],
-        client_id: int,
-        transactions: list[Transaction],
-    ) -> None:
-        message = self._packet(
-            MessageType.DATA,
-            client_id,
-            self._transaction_serializer.serialize_batch(transactions),
-        )
-        for sender in senders.values():
-            sender.send(message)
-
-    def _forward_eof_downstream(
-        self,
-        senders: dict[str, ShardedPublisher],
-        client_id: int,
-        total_forwarded: int,
-    ) -> None:
+    def _downstream_eof_outputs(self, client_id: int, total_forwarded: int) -> list:
+        """Logical outputs for the single downstream EOF (one per filter output),
+        carrying the cross-replica forwarded total. Routed through the outbox."""
         message = self._packet(MessageType.EOF, client_id, self._eof_payload(total_forwarded))
-        for sender in senders.values():
-            sender.send(message)
-        logging.info(
-            "file_ingestor_eof_forwarded | id=%s | client_id=%s | outputs=%s | total_fwd=%s",
-            self._config.id, client_id, ",".join(senders), total_forwarded,
-        )
+        return [(output.name, message) for output in self._config.outputs]
+
+    def _publish_outputs(self, entries, publishers: dict) -> None:
+        """Publish stamped outbox entries, resolving each destination name against
+        the given publishers map (filter exchanges + control/response queues)."""
+        for entry in entries:
+            publisher = publishers.get(entry.destination)
+            if publisher is None:
+                raise KeyError(f"no publisher for destination {entry.destination!r}")
+            publisher.send(entry.body)
 
     def _do_broadcast(self, action: BroadcastAction, control_senders: dict) -> None:
         if action.sleep_before > 0:
@@ -234,74 +176,116 @@ class FileIngestor:
 
     # ---------- data path ----------
 
-    def _handle_line_batch(self, client_id: int, payload: bytes) -> None:
+    def _on_input_message(self, message: bytes, ack, nack) -> None:
+        """Dispatch by type: DATA goes through the durable handler (runner);
+        upstream EOF drives the coordinator (snapshot-durable)."""
+        if not message:
+            logging.error("file_ingestor_empty_message | id=%s", self._config.id)
+            nack(requeue=False)
+            return
+        msg_type = message[0]
+        if msg_type == MessageType.DATA:
+            self._runner.process(message, ack, nack)
+        elif msg_type == MessageType.EOF:
+            self._handle_upstream_eof(message, ack, nack)
+        else:
+            logging.error(
+                "file_ingestor_unknown_message_type | id=%s | type=%s",
+                self._config.id, msg_type,
+            )
+            nack(requeue=False)
+
+    def _data_process_payload(self, client_id: int, payload: bytes):
+        """business_fn for a DATA line batch: parse it, return the forwarded count
+        as the state change and one transaction batch per downstream output. Pure
+        w.r.t. worker state (the handler applies the change), so WAL replay
+        reproduces it exactly. A closed client (late straggler) yields nothing."""
+        if self._state.is_closed(client_id):
+            return FileIngestorState.data_change(client_id, 0), []
+
         batch = self._line_batch_serializer.deserialize(payload)
         transactions = LineBatchParser.parse(batch)
 
+        outputs = []
         if transactions:
-            self._send_transaction_batch(
-                self._downstream_senders(), client_id, transactions
+            body = self._packet(
+                MessageType.DATA,
+                client_id,
+                self._transaction_serializer.serialize_batch(transactions),
             )
+            outputs = [(output.name, body) for output in self._config.outputs]
 
-        forwarded = len(transactions)
-        with self._lock:
-            self._processed_by_client[client_id] = (
-                self._processed_by_client.get(client_id, 0) + forwarded
-            )
-            self._batches_consumed += 1
-            batch_count = self._batches_consumed
-
-        if should_log_progress(batch_count):
+        if should_log_progress(self._state.batches_consumed()):
             logging.info(
                 "file_ingestor_line_batch | id=%s | client_id=%s | batches=%s",
-                self._config.id, client_id, batch_count,
+                self._config.id, client_id, self._state.batches_consumed(),
             )
 
-    def _handle_upstream_eof(self, client_id: int, payload: bytes) -> None:
-        ctrl = self._control_serializer.deserialize(payload)
-        expected_total = ctrl.expected_total
+        return FileIngestorState.data_change(client_id, len(transactions)), outputs
 
-        with self._lock:
-            count = self._processed_by_client.get(client_id, 0)
-            action = self._coordinator.on_upstream_eof(
-                client_id, expected_total, count, count
-            )
-
-        logging.info(
-            "file_ingestor_upstream_eof | id=%s | client_id=%s | "
-            "expected_total=%s | local_count=%s",
-            self._config.id, client_id, expected_total, count,
-        )
-
-        if isinstance(action, BroadcastAction):
-            self._do_broadcast(action, self._main_control_senders)
-
-        elif isinstance(action, FlushAction):
-            # N==1: coordinator returns total_forwarded=current_forwarded directly
-            with self._lock:
-                self._processed_by_client.pop(client_id, None)
-            self._forward_eof_downstream(
-                self._downstream_senders(), client_id, action.total_forwarded
-            )
-
-    def _process_message(self, message: bytes, ack, nack) -> None:
+    def _handle_upstream_eof(self, message: bytes, ack, nack) -> None:
+        """Upstream EOF (on the input queue) routed through the handler as a
+        durable input (kind=DATA): on_upstream_eof is idempotent, so apply_change
+        replays it safely; the broadcast (or N==1 downstream EOF) rides the outbox
+        and is re-published on recovery."""
         try:
-            if not message:
-                raise ValueError("empty file ingestor message")
-            msg_type, client_id, payload = self._internal_protocol.unpack_packet(message)
-            if msg_type == MessageType.DATA:
-                self._handle_line_batch(client_id, payload)
-                ack()
-                self._maybe_snapshot()
-            elif msg_type == MessageType.EOF:
-                self._handle_upstream_eof(client_id, payload)
-                ack()
-                self._snapshot()
-            else:
-                raise ValueError(f"unknown file ingestor message type: {msg_type}")
+            _msg_type, client_id, sender_id, seq, payload = (
+                self._internal_protocol.unpack_addressed_packet(message)
+            )
+            ctrl = self._control_serializer.deserialize(payload)
+            expected_total = ctrl.expected_total
+            msg_id = f"d:{sender_id}:{client_id}:{seq}"
+
+            with self._lock:
+                status = self._handler.inbox.classify(client_id, sender_id, seq)
+                if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
+                    ack()
+                    return
+                count = self._state.processed_count(client_id)
+
+                def bfn(_pl):
+                    eof_change = FileIngestorState.coordinator_upstream_eof_change(
+                        client_id, expected_total, count, count
+                    )
+                    if self._config.total_instances > 1:
+                        queue_names = [
+                            self._coordinator.control_queue_for(i)
+                            for i in range(self._config.total_instances)
+                        ]
+                        message = self._packet(
+                            MessageType.EOF_RECEIVED,
+                            client_id,
+                            self._eof_payload(expected_total),
+                        )
+                        return eof_change, [
+                            (qname, message) for qname in queue_names
+                        ]
+                    # N==1: flush directly, no inter-replica coordination.
+                    outputs = self._downstream_eof_outputs(client_id, count)
+                    compound = FileIngestorState.compound_change(
+                        eof_change, FileIngestorState.close_change(client_id)
+                    )
+                    return compound, outputs
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, sender_id, seq, payload, bfn
+                )
+
+            self._publish_outputs(instruction.outputs, self._data_publishers)
+            with self._lock:
+                self._handler.commit_done(*instruction.ctx)
+            ack()
+            logging.info(
+                "file_ingestor_upstream_eof | id=%s | client_id=%s | "
+                "expected_total=%s | local_count=%s",
+                self._config.id, client_id, expected_total, count,
+            )
         except Exception as e:
-            logging.error("file_ingestor_message_error | id=%s | error=%s", self._config.id, e)
-            nack()
+            logging.error(
+                "file_ingestor_upstream_eof_error | id=%s | error=%s",
+                self._config.id, e, exc_info=True,
+            )
+            nack(requeue=True)
 
     # ---------- control path ----------
 
@@ -310,11 +294,18 @@ class FileIngestor:
             msg_type, client_id, ctrl = self._coordinator.parse_message(message)
         except Exception:
             logging.exception("file_ingestor_control_parse_error | id=%s", self._config.id)
-            nack()
+            nack(requeue=False)
             return
 
+        if msg_type == MessageType.FLUSH_ORDER:
+            self._handle_flush_order(message, client_id, ctrl, ack, nack, response_senders)
+            return
+
+        # EOF_RECEIVED / PROCESSED_REQUEST: transient count-collection. Direct
+        # coordinator call (idempotent / retriable), not WAL-tracked. A leader
+        # crash here is rebuilt by RabbitMQ redelivery + the coordinator retry.
         with self._lock:
-            count = self._processed_by_client.get(client_id, 0)
+            count = self._state.processed_count(client_id)
             action = self._coordinator.process_control_message(
                 msg_type, client_id, ctrl, count, count
             )
@@ -334,33 +325,57 @@ class FileIngestor:
                 )
                 with self._lock:
                     self._coordinator.clear_pending_eof(client_id)
-                nack()
-
-        elif isinstance(action, FlushAction):
-            # Non-leader: send FLUSH_ACK with final forwarded count, then cleanup
-            with self._lock:
-                fwd_final = self._processed_by_client.get(client_id, 0)
-            ack_msg = self._coordinator.build_flush_ack(client_id, fwd_final)
-            try:
-                response_senders[action.ack_queue].send(ack_msg)
-            except Exception:
-                logging.exception(
-                    "file_ingestor_flush_ack_error | id=%s | client_id=%s",
-                    self._config.id, client_id,
-                )
-                nack()
-                return
-            with self._lock:
-                self._processed_by_client.pop(client_id, None)
-                self._coordinator.cleanup_client(client_id)
-            ack()
-
+                nack(requeue=True)
         else:
             logging.warning(
                 "file_ingestor_unexpected_control_action | id=%s | action=%s",
                 self._config.id, action,
             )
             ack()
+
+    def _handle_flush_order(self, message, client_id, ctrl, ack, nack, response_senders) -> None:
+        """Non-leader receives FLUSH_ORDER: WAL-track the close (cleanup + drop)
+        and send FLUSH_ACK with the forwarded count, all via the handler so a
+        crash never double-flushes. The leader ignores its own FLUSH_ORDER."""
+        leader_id = ctrl.sender_id
+        msg_id = f"fo:{client_id}:{leader_id}"
+        try:
+            with self._lock:
+                status = self._handler.inbox.classify(
+                    client_id, leader_id, client_id, MsgKind.CTRL_FLUSH_ORDER
+                )
+                if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
+                    ack()
+                    return
+                if self._coordinator.leader_expected(client_id) is not None:
+                    ack()  # leader for this client; ignores FLUSH_ORDER
+                    return
+
+                def bfn(_pl):
+                    fwd = self._state.processed_count(client_id)
+                    flush_ack_msg = self._coordinator.build_flush_ack(client_id, fwd)
+                    flush_ack_dest = self._coordinator.response_queue_for(leader_id)
+                    compound = FileIngestorState.compound_change(
+                        FileIngestorState.coordinator_cleanup_change(client_id),
+                        FileIngestorState.close_change(client_id),
+                    )
+                    return compound, [(flush_ack_dest, flush_ack_msg)]
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, leader_id, client_id, message, bfn,
+                    kind=MsgKind.CTRL_FLUSH_ORDER,
+                )
+
+            self._publish_outputs(instruction.outputs, response_senders)
+            with self._lock:
+                self._handler.commit_done(*instruction.ctx)
+            ack()
+        except Exception:
+            logging.exception(
+                "file_ingestor_flush_order_error | id=%s | client_id=%s",
+                self._config.id, client_id,
+            )
+            nack(requeue=True)
 
     def _run_control_consumer(self) -> None:
         consumer = MessageMiddlewareQueueRabbitMQ(
@@ -415,16 +430,17 @@ class FileIngestor:
             msg_type, client_id, ctrl = self._coordinator.parse_message(message)
         except Exception:
             logging.exception("file_ingestor_response_parse_error | id=%s", self._config.id)
-            nack()
+            nack(requeue=False)
             return
 
-        own_fwd = 0
+        if msg_type == MessageType.FLUSH_ACK:
+            self._handle_flush_ack(message, client_id, ctrl, ack, nack, eof_senders)
+            return
+
+        # PROCESSED_ANSWER: transient count-collection on the leader. Direct
+        # coordinator call; it accumulates and decides FLUSH_ORDER vs retry.
         with self._lock:
             action = self._coordinator.process_control_message(msg_type, client_id, ctrl)
-            if isinstance(action, FlushAction) and action.is_leader:
-                # Grab own forwarded under the same lock before cleanup.
-                # Coordinator cleans its own state in _on_flush_ack.
-                own_fwd = self._processed_by_client.pop(client_id, 0)
 
         if action is None:
             ack()
@@ -439,26 +455,74 @@ class FileIngestor:
                     "file_ingestor_broadcast_error | id=%s | client_id=%s",
                     self._config.id, client_id,
                 )
-                nack()
-
-        elif isinstance(action, FlushAction) and action.is_leader:
-            total_fwd = action.total_forwarded + own_fwd
-            try:
-                self._forward_eof_downstream(eof_senders, client_id, total_fwd)
-                ack()
-            except Exception:
-                logging.exception(
-                    "file_ingestor_forward_eof_error | id=%s | client_id=%s",
-                    self._config.id, client_id,
-                )
-                nack()
-
+                nack(requeue=True)
         else:
             logging.warning(
                 "file_ingestor_unexpected_response_action | id=%s | action=%s",
                 self._config.id, action,
             )
             ack()
+
+    def _handle_flush_ack(self, message, client_id, ctrl, ack, nack, eof_senders) -> None:
+        """Leader accumulates FLUSH_ACKs via the handler (decide/apply): business_fn
+        predicts the last ack with read-only accessors and emits the single
+        downstream EOF (with the cross-replica forwarded total) to the outbox; the
+        coordinator mutation + close happen in apply_change."""
+        sender_id = ctrl.sender_id
+        msg_id = f"fa:{client_id}:{sender_id}"
+        try:
+            with self._lock:
+                status = self._handler.inbox.classify(
+                    client_id, sender_id, client_id, MsgKind.CTRL_FLUSH_ACK
+                )
+                if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
+                    ack()
+                    return
+                if (
+                    status is not InboxStatus.APPLIED
+                    and self._coordinator.leader_expected(client_id) is None
+                ):
+                    ack()  # not the leader for this client; ignore
+                    return
+
+                already = self._coordinator.has_flush_ack(client_id, sender_id)
+                new_ack_count = self._coordinator.flush_ack_count(client_id) + (
+                    0 if already else 1
+                )
+
+                def bfn(_pl):
+                    ack_change = FileIngestorState.coordinator_msg_change(
+                        MessageType.FLUSH_ACK, client_id, sender_id,
+                        ctrl.expected_total, ctrl.processed_count,
+                    )
+                    if new_ack_count >= self._config.total_instances - 1:
+                        total_fwd = (
+                            self._coordinator.forwarded_from_acks(client_id)
+                            + (0 if already else ctrl.processed_count)
+                            + self._state.processed_count(client_id)
+                        )
+                        outputs = self._downstream_eof_outputs(client_id, total_fwd)
+                        compound = FileIngestorState.compound_change(
+                            ack_change, FileIngestorState.close_change(client_id)
+                        )
+                        return compound, outputs
+                    return ack_change, []
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, sender_id, client_id, message, bfn,
+                    kind=MsgKind.CTRL_FLUSH_ACK,
+                )
+
+            self._publish_outputs(instruction.outputs, eof_senders)
+            with self._lock:
+                self._handler.commit_done(*instruction.ctx)
+            ack()
+        except Exception:
+            logging.exception(
+                "file_ingestor_forward_eof_error | id=%s | client_id=%s",
+                self._config.id, client_id,
+            )
+            nack(requeue=True)
 
     def _run_response_consumer(self) -> None:
         consumer = MessageMiddlewareQueueRabbitMQ(
@@ -534,6 +598,24 @@ class FileIngestor:
             self._config.total_instances,
         )
 
+        # Build the data-thread publishers and runner, then recover (restoring the
+        # coordinator) BEFORE spawning the control/response threads, so they never
+        # touch coordinator state mid-recovery. The map is combined (filter
+        # exchanges + control + response queues) because recovery re-publishes any
+        # pending EOF output, whose destination may be any of those.
+        self._data_publishers = {
+            **self._downstream_senders(),
+            **self._main_control_senders,
+            **self._new_response_senders(),
+        }
+        self._runner = WorkerRunner(
+            handler=self._handler,
+            publishers=self._data_publishers,
+            process_payload=self._data_process_payload,
+            lock=self._lock,
+        )
+        self._runner.recover_and_republish()
+
         self._control_thread = threading.Thread(target=self._run_control_consumer)
         self._response_thread = threading.Thread(target=self._run_response_consumer)
         self._control_thread.start()
@@ -548,7 +630,7 @@ class FileIngestor:
         )
         try:
             if not self._stopped:
-                self._input_queue.start_consuming(self._process_message)
+                self._input_queue.start_consuming(self._on_input_message)
         finally:
             self.stop()
             if self._control_thread is not None:

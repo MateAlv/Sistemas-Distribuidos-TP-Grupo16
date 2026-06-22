@@ -1115,6 +1115,12 @@ def filter_service(
     prefetch = settings.get("filter_prefetch_count")
     if prefetch is not None:
         environment.append(f"PREFETCH_COUNT={prefetch}")
+    output_batch_bytes = settings.get("filter_output_batch_bytes")
+    if output_batch_bytes is not None:
+        environment.append(f"FILTER_OUTPUT_BATCH_BYTES={output_batch_bytes}")
+    output_batch_max_tx = settings.get("filter_output_batch_max_tx")
+    if output_batch_max_tx is not None:
+        environment.append(f"FILTER_OUTPUT_BATCH_MAX_TX={output_batch_max_tx}")
 
     return base_service(
         "workers/filter/Dockerfile",
