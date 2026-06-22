@@ -3,7 +3,7 @@ import os
 import threading
 from collections import defaultdict
 
-from common.fault_tolerance.handler import Action, PersistentStateHandler
+from common.fault_tolerance.handler import Action, EdgeSpec, PersistentStateHandler
 from common.fault_tolerance.inbox import InboxStatus
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal import (
@@ -69,6 +69,12 @@ class Q4JoinerWorker:
             node_id=f"q4_joiner_{ID}",
             worker_state=self._state,
             snapshot_every=SNAPSHOT_INTERVAL,
+            output_edges={
+                Q4_AGGREGATOR_EDGE: EdgeSpec(
+                    sender_id=ID,
+                    shard_count=Q4_AGGREGATOR_AMOUNT,
+                )
+            },
         )
 
         self._input = MessageMiddlewareExchangeRabbitMQ(
