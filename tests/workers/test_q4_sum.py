@@ -121,21 +121,23 @@ def _eof_packet(worker, client_id, upstream_id, expected_total=0, seq=0):
 def _block_messages(worker, module):
     edges, by_partition = [], {}
     for shard, body in worker._joiner_output.sent:
-        msg_type, _, payload = worker._proto.unpack_packet(body)
+        msg_type, _, sender_id, seq, payload = worker._proto.unpack_addressed_packet(body)
         if msg_type != MessageType.DATA:
             continue
+        assert sender_id == module.ID
         batch = module.Q4BlockJoinEdgeSerializer.deserialize_batch(payload)
         edges.extend(batch)
         by_partition[shard] = by_partition.get(shard, 0) + len(batch)
     return edges, by_partition
 
 
-def _eof_counts(worker):
+def _eof_counts(worker, module):
     counts = {}
     for shard, body in worker._joiner_output.sent:
-        msg_type, _, payload = worker._proto.unpack_packet(body)
+        msg_type, _, sender_id, _seq, payload = worker._proto.unpack_addressed_packet(body)
         if msg_type != MessageType.EOF:
             continue
+        assert sender_id == module.ID
         counts[shard] = worker._control_serializer.deserialize(payload).expected_total
     return counts
 
@@ -223,7 +225,7 @@ def test_fan_in_waits_for_all_upstream_eofs_then_emits(monkeypatch, tmp_path):
         (module.Q4_EDGE_OUTGOING, b, 0, 0, 7),
     }
     # One EOF per joiner partition, each carrying that partition's record count.
-    assert _eof_counts(worker) == {
+    assert _eof_counts(worker, module) == {
         partition: by_partition.get(partition, 0) for partition in range(4)
     }
     assert sum(by_partition.values()) == 2
@@ -268,14 +270,14 @@ def test_hot_intermediary_fans_out_to_blocks(monkeypatch, tmp_path):
     assert len(outgoing) == 4  # 2 endpoints x 2 a_buckets
 
     for shard, body in worker._joiner_output.sent:
-        msg_type, _, payload = worker._proto.unpack_packet(body)
+        msg_type, _, _, _, payload = worker._proto.unpack_addressed_packet(body)
         if msg_type != MessageType.DATA:
             continue
         for edge in module.Q4BlockJoinEdgeSerializer.deserialize_batch(payload):
             assert shard == worker._block_partition(edge.intermediate, edge.a_bucket, edge.b_bucket)
 
     assert sum(by_partition.values()) == 10
-    assert sum(_eof_counts(worker).values()) == 10
+    assert sum(_eof_counts(worker, module).values()) == 10
 
 
 def test_duplicate_eof_and_late_data_after_close_do_not_reemit(monkeypatch, tmp_path):
