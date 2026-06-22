@@ -9,8 +9,11 @@ STATE_DIR (the durable disk survives). These prove the two guarantees:
 """
 
 from common.fault_tolerance.handler import WorkerRunner
+from common.fault_tolerance.inbox import InboxStatus, MsgKind
 from common.message_protocol.external.types import FILE_TYPE_TRANSACTIONS
 from common.message_protocol.internal import (
+    ControlMessage,
+    ControlMessageSerializer,
     InternalProtocol,
     LineBatch,
     LineBatchSerializer,
@@ -102,12 +105,177 @@ def test_recovery_republishes_uncommitted_outbox_then_commits(tmp_path):
     assert {name: len(s.messages) for name, s in outputs2.items()} == before
 
 
-def _ingestor(tmp_path):
+def test_upstream_eof_decision_mutates_coordinator_once_via_apply(tmp_path, monkeypatch):
+    ingestor, _ = _ingestor(tmp_path, total_instances=3)
+    control_senders = {
+        ingestor._coordinator.control_queue_for(i): RecordingSender()
+        for i in range(ingestor._config.total_instances)
+    }
+    ingestor._data_publishers = {**ingestor._downstream_outputs, **control_senders}
+    calls = AckNack()
+    seen = 0
+    original = ingestor._coordinator.on_upstream_eof
+
+    def spy(*args, **kwargs):
+        nonlocal seen
+        seen += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ingestor._coordinator, "on_upstream_eof", spy)
+
+    ingestor._on_input_message(_eof_packet(expected_total=42), calls.ack, calls.nack)
+
+    assert calls.acks == 1
+    assert calls.nacks == 0
+    assert seen == 1
+    assert ingestor._coordinator.leader_expected(CLIENT) == 42
+
+
+def test_control_kind_does_not_collide_with_data_sender_and_seq(tmp_path):
+    ingestor, outputs = _ingestor(tmp_path, total_instances=3)
+    calls = AckNack()
+    data = InternalProtocol.create_addressed_packet(
+        MessageType.DATA,
+        CLIENT.to_bytes(16, byteorder="big"),
+        sender_id=1,
+        seq=CLIENT,
+        payload=LineBatchSerializer.serialize(_two_row_batch()),
+    )
+    ingestor._on_input_message(data, calls.ack, calls.nack)
+    assert calls.acks == 1
+    assert all(len(sender.messages) == 1 for sender in outputs.values())
+
+    response_senders = {ingestor._coordinator.response_queue_for(1): RecordingSender()}
+    ingestor._handle_flush_order(
+        _flush_order_packet(leader_id=1),
+        CLIENT,
+        ControlMessage(sender_id=1, expected_total=0, processed_count=0),
+        calls.ack,
+        calls.nack,
+        response_senders,
+    )
+
+    assert calls.acks == 2
+    assert calls.nacks == 0
+    assert len(response_senders[ingestor._coordinator.response_queue_for(1)].messages) == 1
+    assert (
+        ingestor._handler.inbox.classify(CLIENT, 1, CLIENT, MsgKind.DATA)
+        is InboxStatus.DONE
+    )
+    assert (
+        ingestor._handler.inbox.classify(CLIENT, 1, CLIENT, MsgKind.CTRL_FLUSH_ORDER)
+        is InboxStatus.DONE
+    )
+
+
+def test_late_data_after_close_is_noop(tmp_path):
+    ingestor, outputs = _ingestor(tmp_path)
+    ingestor._state.apply_change({"type": "close", "client_id": CLIENT})
+    calls = AckNack()
+
+    ingestor._on_input_message(_data_packet(seq=0), calls.ack, calls.nack)
+
+    assert calls.acks == 1
+    assert calls.nacks == 0
+    assert ingestor._state.processed_count(CLIENT) == 0
+    assert all(sender.messages == [] for sender in outputs.values())
+
+
+def test_flush_ack_applied_crash_recovers_and_commits_closed_redelivery(tmp_path):
+    ing1, _ = _ingestor(tmp_path, total_instances=3)
+    ing1._state.apply_change({"type": "data", "client_id": CLIENT, "transactions_forwarded": 1})
+    ing1._coordinator._leader_expected[CLIENT] = 4
+    ing1._coordinator._flush_acks[CLIENT] = {0}
+    ing1._coordinator._forwarded_from_acks[CLIENT] = 2
+    calls = AckNack()
+
+    def crash_before_publish(_entries, _publishers):
+        raise RuntimeError("crash before publish")
+
+    ing1._publish_outputs = crash_before_publish
+    ing1._handle_flush_ack(
+        _flush_ack_packet(sender_id=2, forwarded=1),
+        CLIENT,
+        ControlMessage(sender_id=2, expected_total=0, processed_count=1),
+        calls.ack,
+        calls.nack,
+        ing1._downstream_outputs,
+    )
+
+    assert calls.acks == 0
+    assert calls.nacks == 1
+    assert ing1._state.is_closed(CLIENT)
+    ing1._handler.wal.close()
+
+    ing2, outputs2 = _ingestor(tmp_path, total_instances=3)
+    assert ing2._state.is_closed(CLIENT)
+    assert all(len(sender.messages) == 1 for sender in outputs2.values())
+
+    redelivery = AckNack()
+    ing2._handle_flush_ack(
+        _flush_ack_packet(sender_id=2, forwarded=1),
+        CLIENT,
+        ControlMessage(sender_id=2, expected_total=0, processed_count=1),
+        redelivery.ack,
+        redelivery.nack,
+        ing2._downstream_outputs,
+    )
+
+    assert redelivery.acks == 1
+    assert redelivery.nacks == 0
+    assert (
+        ing2._handler.inbox.classify(CLIENT, 2, CLIENT, MsgKind.CTRL_FLUSH_ACK)
+        is InboxStatus.DONE
+    )
+    assert ing2._handler.outbox_to_republish() == []
+
+
+def test_flush_ack_crash_after_done_before_ack_dedups_redelivery(tmp_path):
+    ing1, outputs1 = _ingestor(tmp_path, total_instances=3)
+    ing1._state.apply_change({"type": "data", "client_id": CLIENT, "transactions_forwarded": 1})
+    ing1._coordinator._leader_expected[CLIENT] = 4
+    ing1._coordinator._flush_acks[CLIENT] = {0}
+    ing1._coordinator._forwarded_from_acks[CLIENT] = 2
+    calls = AckNack()
+
+    def crash_ack():
+        raise RuntimeError("crash before ack")
+
+    ing1._handle_flush_ack(
+        _flush_ack_packet(sender_id=2, forwarded=1),
+        CLIENT,
+        ControlMessage(sender_id=2, expected_total=0, processed_count=1),
+        crash_ack,
+        calls.nack,
+        outputs1,
+    )
+
+    assert calls.nacks == 1
+    assert all(len(sender.messages) == 1 for sender in outputs1.values())
+    ing1._handler.wal.close()
+
+    ing2, outputs2 = _ingestor(tmp_path, total_instances=3)
+    redelivery = AckNack()
+    ing2._handle_flush_ack(
+        _flush_ack_packet(sender_id=2, forwarded=1),
+        CLIENT,
+        ControlMessage(sender_id=2, expected_total=0, processed_count=1),
+        redelivery.ack,
+        redelivery.nack,
+        outputs2,
+    )
+
+    assert redelivery.acks == 1
+    assert redelivery.nacks == 0
+    assert all(sender.messages == [] for sender in outputs2.values())
+
+
+def _ingestor(tmp_path, total_instances=1):
     outputs = {"filter_usd": RecordingSender(), "filter_q5_format": RecordingSender()}
     ingestor = FileIngestor(
         FileIngestorConfig(
             id=1,
-            total_instances=1,
+            total_instances=total_instances,
             mom_host="localhost",
             queue_name="file_ingestor_1",
             input_exchange="line_batch_exchange",
@@ -129,6 +297,7 @@ def _ingestor(tmp_path):
         )
     )
     ingestor._downstream_outputs = outputs
+    ingestor._data_publishers = dict(outputs)
     ingestor._runner = WorkerRunner(
         handler=ingestor._handler,
         publishers=outputs,
@@ -160,4 +329,36 @@ def _data_packet(seq: int) -> bytes:
         SENDER,
         seq,
         LineBatchSerializer.serialize(_two_row_batch()),
+    )
+
+
+def _eof_packet(expected_total: int, seq: int = 0) -> bytes:
+    return InternalProtocol.create_addressed_packet(
+        MessageType.EOF,
+        CLIENT.to_bytes(16, byteorder="big"),
+        SENDER,
+        seq,
+        ControlMessageSerializer.serialize(
+            ControlMessage(sender_id=SENDER, expected_total=expected_total, processed_count=0)
+        ),
+    )
+
+
+def _flush_order_packet(leader_id: int) -> bytes:
+    return InternalProtocol.create_packet(
+        MessageType.FLUSH_ORDER,
+        CLIENT.to_bytes(16, byteorder="big"),
+        ControlMessageSerializer.serialize(
+            ControlMessage(sender_id=leader_id, expected_total=0, processed_count=0)
+        ),
+    )
+
+
+def _flush_ack_packet(sender_id: int, forwarded: int) -> bytes:
+    return InternalProtocol.create_packet(
+        MessageType.FLUSH_ACK,
+        CLIENT.to_bytes(16, byteorder="big"),
+        ControlMessageSerializer.serialize(
+            ControlMessage(sender_id=sender_id, expected_total=0, processed_count=forwarded)
+        ),
     )
