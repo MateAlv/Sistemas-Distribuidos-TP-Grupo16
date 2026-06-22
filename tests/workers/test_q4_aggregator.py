@@ -119,7 +119,10 @@ def _account_data_messages(worker, module):
     accounts = []
     by_partition = {}
     for shard, packet in worker._account_deduper_output.sent:
-        msg_type, _, payload = worker._proto.unpack_packet(packet)
+        msg_type, _, sender_id, _seq, payload = (
+            worker._proto.unpack_addressed_packet(packet)
+        )
+        assert sender_id == module.ID
         if msg_type != MessageType.DATA:
             continue
         batch = module.Q4AccountIdSerializer.deserialize_batch(payload)
@@ -131,7 +134,10 @@ def _account_data_messages(worker, module):
 def _eof_counts(worker, module):
     counts = {}
     for shard, packet in worker._account_deduper_output.sent:
-        msg_type, _, payload = worker._proto.unpack_packet(packet)
+        msg_type, _, sender_id, _seq, payload = (
+            worker._proto.unpack_addressed_packet(packet)
+        )
+        assert sender_id == module.ID
         if msg_type != MessageType.EOF:
             continue
         control = worker._control_serializer.deserialize(payload)

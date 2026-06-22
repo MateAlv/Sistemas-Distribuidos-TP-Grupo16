@@ -1,11 +1,9 @@
 import logging
 import os
 import threading
-from collections import defaultdict
 
-from common.upstream_eof_counter import UpstreamEofCounter
-
-from common.batch_buffer import BatchBuffer
+from common.fault_tolerance.handler import Action, PersistentStateHandler
+from common.fault_tolerance.inbox import InboxStatus, MsgKind
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal import (
     InternalProtocol,
@@ -22,6 +20,11 @@ from common.middleware.middleware_rabbitmq import (
 )
 from common.routing import queue_name_for_worker
 
+try:
+    from q4_deduper_state import Q4DeduperState
+except ImportError:
+    from workers.scatter_gather.q4_deduper.q4_deduper_state import Q4DeduperState
+
 
 ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
@@ -36,17 +39,34 @@ Q4_DEDUPER_RESPONSE_QUEUE_PREFIX = os.environ.get(
     "q4_deduper_response",
 )
 GATEWAY_Q4_QUEUE = os.environ["GATEWAY_Q4_QUEUE"]
-Q4_DEDUPER_BATCH_BYTES = int(
-    os.environ.get("Q4_DEDUPER_BATCH_BYTES", str(1024 * 1024))
-)
 Q4_DEDUPER_BATCH_MAX_ACCOUNTS = int(
     os.environ.get("Q4_DEDUPER_BATCH_MAX_ACCOUNTS", "5000")
 )
+STATE_DIR = os.environ.get("STATE_DIR", "")
+SNAPSHOT_INTERVAL = int(os.environ.get("SNAPSHOT_INTERVAL", "1000"))
+GATEWAY_Q4_DATA_EDGE = "gateway_q4_data"
+GATEWAY_Q4_EOF_EDGE = "gateway_q4_eof"
+Q4_DEDUPER_LEADER_EDGE = "q4_deduper_leader"
+LEADER_REPORT_KIND = MsgKind.CTRL_FLUSH_ACK
+
 
 class Q4DeduperWorker:
     """Deduplicates notebook Q4 account candidates and writes gateway batches."""
 
     def __init__(self):
+        self._proto = InternalProtocol()
+        self._account_serializer = Q4AccountIdSerializer()
+        self._control_serializer = ControlMessageSerializer()
+
+        self._lock = threading.Lock()
+        self._state = Q4DeduperState(Q4_AGGREGATOR_AMOUNT, Q4_DEDUPER_AMOUNT)
+        self._handler = PersistentStateHandler(
+            state_dir=STATE_DIR,
+            node_id=f"q4_deduper_{ID}",
+            worker_state=self._state,
+            snapshot_every=SNAPSHOT_INTERVAL,
+        )
+
         self._input = MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST,
             Q4_DEDUPER_EXCHANGE,
@@ -70,28 +90,18 @@ class Q4DeduperWorker:
             if Q4_DEDUPER_AMOUNT > 1 and ID == 0
             else None
         )
-
-        self._proto = InternalProtocol()
-        self._account_serializer = Q4AccountIdSerializer()
-        self._control_serializer = ControlMessageSerializer()
-        self._batcher = BatchBuffer(
-            Q4_DEDUPER_BATCH_BYTES,
-            Q4_DEDUPER_BATCH_MAX_ACCOUNTS,
-        )
-
-        self._lock = threading.Lock()
-        self._accounts_by_client: dict[int, set[tuple[str, str]]] = {}
-        self._processed_by_client: dict[int, int] = {}
-        self._eof_counter = UpstreamEofCounter(Q4_AGGREGATOR_AMOUNT)
-        self._closed_by_client: set[int] = set()
-
-        self._leader_reports_by_client: dict[int, set[int]] = defaultdict(set)
-        self._leader_totals_by_client: dict[int, int] = {}
-        self._leader_closed_by_client: set[int] = set()
+        self._publishers = {
+            GATEWAY_Q4_DATA_EDGE: self._gateway_output,
+            GATEWAY_Q4_EOF_EDGE: self._gateway_eof_output or self._gateway_output,
+            Q4_DEDUPER_LEADER_EDGE: self._leader_output,
+        }
 
         self._response_thread = None
         self._closed = False
         self._stopped = False
+
+        self._handler.recover()
+        self._republish_pending()
 
     def _input_routing_key(self) -> str:
         return queue_name_for_worker(Q4_DEDUPER_ROUTING_PREFIX, ID)
@@ -135,50 +145,25 @@ class Q4DeduperWorker:
     def _account_from_key(self, key: tuple[str, str]) -> Q4AccountId:
         return Q4AccountId(bank_id=key[0], account=key[1])
 
-    def _send_gateway_batch(
-        self,
-        client_id: int,
-        batch_payload: bytes,
-        output=None,
-    ) -> None:
-        output = output or self._gateway_output
-        output.send(self._packet(MessageType.DATA, client_id, batch_payload))
+    def _iter_unique_accounts(self, keys: set[tuple[str, str]]):
+        for key in sorted(keys):
+            yield self._account_from_key(key)
 
-    def _append_gateway_account(
-        self,
-        client_id: int,
-        account: Q4AccountId,
-        output=None,
-    ) -> None:
-        payload = self._account_serializer.serialize(account)
-        batch_payload = self._batcher.append(client_id, payload)
-        if batch_payload is not None:
-            self._send_gateway_batch(client_id, batch_payload, output)
-
-    def _flush_gateway_buffers(self, client_id: int, output=None) -> None:
-        for _, batch_payload in self._batcher.flush(lambda k: k == client_id):
-            self._send_gateway_batch(client_id, batch_payload, output)
-
-    def _send_gateway_eof(
-        self,
-        client_id: int,
-        expected_total: int,
-        output=None,
-    ) -> None:
-        """Send the single Q4 EOF to the gateway. In multi-shard mode only the
-        leader calls this, with the global count summed across all shards."""
-        output = output or self._gateway_output
-        output.send(
-            self._packet(
-                MessageType.EOF,
-                client_id,
-                self._control_payload(
-                    sender_id=ID,
-                    expected_total=expected_total,
-                    processed_count=0,
-                ),
+    def _build_gateway_data_outputs(self, client_id: int) -> list:
+        outputs = []
+        keys = self._state.accounts_for(client_id)
+        accounts = list(self._iter_unique_accounts(keys))
+        for chunk in _chunks(accounts, Q4_DEDUPER_BATCH_MAX_ACCOUNTS):
+            payload = self._account_serializer.serialize_batch(chunk)
+            outputs.append(
+                (
+                    GATEWAY_Q4_DATA_EDGE,
+                    self._packet(MessageType.DATA, client_id, payload),
+                )
             )
-        )
+        return outputs
+
+    def _build_gateway_eof_output(self, client_id: int, expected_total: int) -> tuple:
         logging.info(
             "q4_deduper_forward_gateway_eof | id=%s | client_id=%s | "
             "expected_total=%s",
@@ -186,29 +171,18 @@ class Q4DeduperWorker:
             client_id,
             expected_total,
         )
-
-    def _report_to_leader(
-        self,
-        client_id: int,
-        emitted_accounts: int,
-        output=None,
-    ) -> None:
-        """Non-leader shards. Send our emitted-account count to shard 0 so it can
-        decide when every shard is done and send the single gateway EOF."""
-        output = output or self._leader_output
-        if output is None:
-            raise RuntimeError("leader output is not configured")
-        output.send(
+        return (
+            GATEWAY_Q4_EOF_EDGE,
             self._packet(
-                MessageType.EOF_RECEIVED,
+                MessageType.EOF,
                 client_id,
-                self._control_payload(
-                    sender_id=ID,
-                    expected_total=emitted_accounts,
-                    processed_count=0,
-                ),
-            )
+                self._control_payload(ID, expected_total, 0),
+            ),
         )
+
+    def _build_leader_report_output(self, client_id: int, emitted_accounts: int) -> tuple:
+        if self._leader_output is None:
+            raise RuntimeError("leader output is not configured")
         logging.info(
             "q4_deduper_report_leader | id=%s | client_id=%s | "
             "emitted_accounts=%s",
@@ -216,175 +190,208 @@ class Q4DeduperWorker:
             client_id,
             emitted_accounts,
         )
+        return (
+            Q4_DEDUPER_LEADER_EDGE,
+            self._packet(
+                MessageType.EOF_RECEIVED,
+                client_id,
+                self._control_payload(ID, emitted_accounts, 0),
+            ),
+        )
 
-    def _iter_unique_accounts(self, keys: set[tuple[str, str]]):
-        for key in sorted(keys):
-            yield self._account_from_key(key)
+    def _build_close_outputs(self, client_id: int) -> tuple[list, int]:
+        emitted_accounts = len(self._state.accounts_for(client_id))
+        outputs = self._build_gateway_data_outputs(client_id)
+        if Q4_DEDUPER_AMOUNT == 1:
+            outputs.append(self._build_gateway_eof_output(client_id, emitted_accounts))
+        else:
+            outputs.append(self._build_leader_report_output(client_id, emitted_accounts))
+        return outputs, emitted_accounts
 
-    def _accept_accounts(self, client_id: int, payload: bytes) -> int:
-        """Main data path. Add each account to the per-client set. The set itself
-        handles deduplication — repeats are silently absorbed."""
-        accounts = self._account_serializer.deserialize_batch(payload)
-        if not accounts:
-            return 0
+    def _publish(self, entries) -> None:
+        for entry in entries:
+            publisher = self._publishers.get(entry.destination)
+            if publisher is None:
+                raise KeyError(f"no publisher for destination {entry.destination!r}")
+            publisher.send(entry.body)
+
+    def _publish_then_commit(self, instruction) -> None:
+        if instruction.action is Action.PUBLISH_THEN_COMMIT:
+            self._publish(instruction.outputs)
+            with self._lock:
+                self._handler.commit_done(*instruction.ctx)
+
+    def _republish_pending(self) -> None:
+        for entry in self._handler.outbox_to_republish():
+            try:
+                self._publish([entry])
+            except Exception:
+                logging.exception(
+                    "q4_deduper_republish_error | id=%s | destination=%s",
+                    ID,
+                    entry.destination,
+                )
+
+    # ---------- data path ----------
+
+    def _handle_data(self, msg_id, client_id, sender_id, seq, payload, ack) -> None:
+        def bfn(data):
+            return Q4DeduperState.data_change(client_id, data), []
 
         with self._lock:
-            if client_id in self._closed_by_client:
-                logging.info(
-                    "q4_deduper_message_for_closed_client | id=%s | "
-                    "client_id=%s",
-                    ID,
-                    client_id,
-                )
-                return 0
-
-            keys = self._accounts_by_client.setdefault(client_id, set())
-            for account in accounts:
-                keys.add(self._account_key(account))
-
-            self._processed_by_client[client_id] = (
-                self._processed_by_client.get(client_id, 0) + len(accounts)
+            status = self._handler.inbox.classify(client_id, sender_id, seq)
+            if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
+                ack()
+                return
+            instruction = self._handler.handle(
+                msg_id, client_id, sender_id, seq, payload, bfn
             )
-            processed_total = self._processed_by_client[client_id]
-            unique_in_memory = len(self._accounts_by_client.get(client_id, set()))
+        self._publish_then_commit(instruction)
+        ack()
 
-        if should_log_progress(processed_total):
+        processed = self._state.processed_count(client_id)
+        if should_log_progress(processed):
             logging.info(
                 "q4_deduper_data_batch | id=%s | client_id=%s | "
-                "batch_size=%s | processed_total=%s | in_memory_unique=%s",
+                "processed_total=%s | in_memory_unique=%s",
                 ID,
                 client_id,
-                len(accounts),
-                processed_total,
-                unique_in_memory,
+                processed,
+                len(self._state.accounts_for(client_id)),
             )
-        return len(accounts)
 
-    def _handle_eof(self, client_id: int, payload: bytes) -> None:
+    def _handle_eof(self, msg_id, client_id, sender_id, seq, payload, ack) -> None:
         control = self._control_serializer.deserialize(payload)
+        upstream_id = control.sender_id
 
         with self._lock:
-            should_emit = self._eof_counter.on_eof(client_id, control.sender_id)
-            eof_count = self._eof_counter.count(client_id)
-            processed_total = self._processed_by_client.get(client_id, 0)
+            status = self._handler.inbox.classify(client_id, sender_id, seq)
+            if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
+                ack()
+                return
+            completes = self._state.eof_would_complete(client_id, upstream_id)
+            eof_count = self._state.eof_count(client_id)
+            processed_total = self._state.processed_count(client_id)
 
+            def bfn(_data):
+                eof_change = Q4DeduperState.eof_change(client_id, upstream_id)
+                if completes:
+                    outputs, _emitted = self._build_close_outputs(client_id)
+                    return (
+                        Q4DeduperState.compound_change(
+                            eof_change,
+                            Q4DeduperState.close_change(client_id),
+                        ),
+                        outputs,
+                    )
+                return eof_change, []
+
+            instruction = self._handler.handle(
+                msg_id, client_id, sender_id, seq, payload, bfn
+            )
+
+        self._publish_then_commit(instruction)
+        ack()
         logging.info(
             "q4_deduper_eof_received | id=%s | client_id=%s | "
             "pair_reducer_id=%s | eof_count=%s | expected_eofs=%s | "
-            "sender_expected_total=%s | processed_total=%s",
-            ID, client_id, control.sender_id, eof_count, Q4_AGGREGATOR_AMOUNT,
-            control.expected_total, processed_total,
-        )
-
-        if should_emit:
-            self._emit_and_close_client(client_id)
-
-    def _emit_and_close_client(self, client_id: int, output=None) -> int:
-        """End-of-client. Emit every unique account to the gateway (sorted for
-        deterministic output). In single-shard mode, send the gateway EOF now.
-        In multi-shard mode, send our emitted count to shard 0; only shard 0
-        sends the one EOF to the gateway after every shard has reported."""
-        with self._lock:
-            if client_id in self._closed_by_client:
-                return 0
-            keys = self._accounts_by_client.pop(client_id, set())
-            processed_total = self._processed_by_client.pop(client_id, 0)
-            self._eof_counter.close(client_id)
-            self._closed_by_client.add(client_id)
-
-        emitted_accounts = 0
-        try:
-            for account in self._iter_unique_accounts(keys):
-                self._append_gateway_account(client_id, account, output)
-                emitted_accounts += 1
-            self._flush_gateway_buffers(client_id, output)
-        finally:
-            self._batcher.discard(lambda k: k == client_id)
-
-        logging.info(
-            "q4_deduper_emit_client | id=%s | client_id=%s | "
-            "processed_total=%s | emitted_accounts=%s",
+            "sender_expected_total=%s | processed_total=%s | flushed=%s",
             ID,
             client_id,
+            upstream_id,
+            eof_count + 1,
+            Q4_AGGREGATOR_AMOUNT,
+            control.expected_total,
             processed_total,
-            emitted_accounts,
+            completes,
         )
 
-        if Q4_DEDUPER_AMOUNT == 1:
-            self._send_gateway_eof(client_id, emitted_accounts, output)
-        else:
-            self._report_to_leader(client_id, emitted_accounts)
-        return emitted_accounts
+    def _on_message(self, raw, ack, nack):
+        try:
+            msg_type, client_id, sender_id, seq, payload = (
+                self._proto.unpack_addressed_packet(raw)
+            )
+            msg_id = f"{sender_id}:{seq}"
+            if msg_type == MessageType.DATA:
+                self._handle_data(msg_id, client_id, sender_id, seq, payload, ack)
+            elif msg_type == MessageType.EOF:
+                self._handle_eof(msg_id, client_id, sender_id, seq, payload, ack)
+            else:
+                raise ValueError(
+                    f"unexpected q4 account deduper message type: {msg_type}"
+                )
+        except Exception:
+            logging.exception("q4_deduper_error | id=%s", ID)
+            nack(requeue=True)
+
+    # ---------- leader report path ----------
 
     def _handle_leader_report(
         self,
         client_id: int,
         control: ControlMessage,
-        output=None,
+        raw: bytes,
+        ack,
     ) -> None:
-        """Leader-only (shard 0). Count one shard's emitted-account tally. Once
-        every deduper shard has reported, send the single final EOF to the gateway
-        with the global total. The gateway expects exactly one EOF per query."""
         if ID != 0:
+            ack()
             return
 
-        should_forward = False
+        sender_id = control.sender_id
+        seq = client_id
+        msg_id = f"leader:{sender_id}:{client_id}"
+
         with self._lock:
-            if client_id in self._leader_closed_by_client:
-                return
-            if control.sender_id in self._leader_reports_by_client[client_id]:
-                logging.info(
-                    "q4_deduper_duplicate_leader_report | id=%s | "
-                    "client_id=%s | deduper_id=%s",
-                    ID,
-                    client_id,
-                    control.sender_id,
-                )
-                return
-
-            self._leader_reports_by_client[client_id].add(control.sender_id)
-            total = (
-                self._leader_totals_by_client.get(client_id, 0)
-                + control.expected_total
+            status = self._handler.inbox.classify(
+                client_id, sender_id, seq, LEADER_REPORT_KIND
             )
-            self._leader_totals_by_client[client_id] = total
-            report_count = len(self._leader_reports_by_client[client_id])
-            if report_count >= Q4_DEDUPER_AMOUNT:
-                should_forward = True
-                self._leader_reports_by_client.pop(client_id, None)
-                self._leader_totals_by_client.pop(client_id, None)
-                self._leader_closed_by_client.add(client_id)
+            if self._state.is_leader_closed(client_id) and status is not InboxStatus.APPLIED:
+                ack()
+                return
+            completes = self._state.leader_report_would_complete(client_id, sender_id)
+            report_count = self._state.leader_report_count(client_id)
+            total_after = self._state.leader_total(client_id) + control.expected_total
 
+            def bfn(_data):
+                report_change = Q4DeduperState.leader_report_change(
+                    client_id,
+                    sender_id,
+                    control.expected_total,
+                )
+                if completes:
+                    return (
+                        Q4DeduperState.compound_change(
+                            report_change,
+                            Q4DeduperState.leader_close_change(client_id),
+                        ),
+                        [self._build_gateway_eof_output(client_id, total_after)],
+                    )
+                return report_change, []
+
+            instruction = self._handler.handle(
+                msg_id,
+                client_id,
+                sender_id,
+                seq,
+                raw,
+                bfn,
+                kind=LEADER_REPORT_KIND,
+            )
+
+        self._publish_then_commit(instruction)
+        ack()
         logging.info(
             "q4_deduper_leader_report | id=%s | client_id=%s | "
             "deduper_id=%s | report_count=%s | expected_reports=%s | "
-            "emitted_accounts=%s",
+            "emitted_accounts=%s | flushed=%s",
             ID,
             client_id,
-            control.sender_id,
-            report_count,
+            sender_id,
+            report_count + 1,
             Q4_DEDUPER_AMOUNT,
             control.expected_total,
+            completes,
         )
-
-        if should_forward:
-            self._send_gateway_eof(client_id, total, output or self._gateway_eof_output)
-
-    def _on_message(self, raw, ack, nack):
-        try:
-            msg_type, client_id, payload = self._proto.unpack_packet(raw)
-            if msg_type == MessageType.DATA:
-                self._accept_accounts(client_id, payload)
-            elif msg_type == MessageType.EOF:
-                self._handle_eof(client_id, payload)
-            else:
-                raise ValueError(
-                    f"unexpected q4 account deduper message type: {msg_type}"
-                )
-            ack()
-        except Exception:
-            logging.exception("q4_deduper_error | id=%s", ID)
-            nack()
 
     def _on_leader_message(self, raw, ack, nack):
         try:
@@ -396,12 +403,12 @@ class Q4DeduperWorker:
             self._handle_leader_report(
                 client_id,
                 self._control_serializer.deserialize(payload),
-                self._gateway_eof_output,
+                raw,
+                ack,
             )
-            ack()
         except Exception:
             logging.exception("q4_deduper_leader_error | id=%s", ID)
-            nack()
+            nack(requeue=True)
 
     def _start_response_consumer(self) -> None:
         if self._response_consumer is None:
@@ -416,8 +423,7 @@ class Q4DeduperWorker:
     def start(self) -> None:
         logging.info(
             "q4_deduper_start | id=%s | input_exchange=%s | input_key=%s | "
-            "aggregator_amount=%s | deduper_amount=%s | "
-            "gateway_queue=%s",
+            "aggregator_amount=%s | deduper_amount=%s | gateway_queue=%s",
             ID,
             Q4_DEDUPER_EXCHANGE,
             self._input_routing_key(),
@@ -465,3 +471,8 @@ class Q4DeduperWorker:
                 )
         if self._response_thread is not None:
             self._response_thread.join(timeout=5)
+
+
+def _chunks(items: list, size: int):
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
