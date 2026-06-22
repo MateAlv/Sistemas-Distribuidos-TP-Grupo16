@@ -138,7 +138,9 @@ class JoinerWorker:
         )
 
     def _process_message(self, message: bytes) -> None:
-        msg_type, client_id, payload = self.internal_protocol.unpack_packet(message)
+        msg_type, client_id, _sender_id, _seq, payload = (
+            self.internal_protocol.unpack_addressed_packet(message)
+        )
 
         with self.lock:
             if client_id in self.closed_by_client:
