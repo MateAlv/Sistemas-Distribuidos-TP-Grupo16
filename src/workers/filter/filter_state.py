@@ -78,12 +78,20 @@ Fields omitted from state (logging-only, non-deterministic):
 
 from __future__ import annotations
 
+import base64
+
+from common.batch_buffer import BatchBuffer
 from common.eof_coordinator import EofCoordinator
 from common.message_protocol.internal.common import ControlMessage, MessageType
 
 
 class FilterState:
-    def __init__(self, coordinator: EofCoordinator) -> None:
+    def __init__(
+        self,
+        coordinator: EofCoordinator,
+        batch_max_bytes: int,
+        batch_max_items: int,
+    ) -> None:
         # coordinator is shared with the worker and snapshotted alongside the
         # per-client maps so that EOF progress survives a crash.
         self._coordinator = coordinator
@@ -95,21 +103,37 @@ class FilterState:
         # accumulates FLUSH_ACKs from all non-leader peers before forwarding EOF.
         self._all_forwarded_by_output_by_client: dict[int, dict[str, int]] = {}
         self._flushed_acks_by_client: dict[int, set[int]] = {}
+        # Durable output batcher: keyed by (output_name, client_id). Filtered
+        # transactions are appended here; flushed batches are the DATA outputs.
+        # apply_change is the sole mutator; business_fn predicts via plan_*.
+        self._buffer = BatchBuffer(batch_max_bytes, batch_max_items)
 
     @staticmethod
     def data_change(
         client_id: int,
         processed_count: int,
-        forwarded_by_output: dict[str, int],
+        appends_by_output: dict[str, list[bytes]],
     ) -> dict:
-        # forwarded_by_output is the incremental per-output count for this batch
-        # (not cumulative); apply_change accumulates it into the running total.
+        # appends_by_output holds the serialized transactions forwarded to each
+        # output in this batch. apply_change appends them to the durable buffer
+        # (so replay reproduces it) and derives the per-output forwarded counts
+        # from their length. Payloads are base64 because the WAL frames the
+        # change dict as JSON.
         return {
             "type": "data",
             "client_id": client_id,
             "processed_count": processed_count,
-            "forwarded_by_output": forwarded_by_output,
+            "appends_by_output": {
+                output: [base64.b64encode(p).decode("ascii") for p in payloads]
+                for output, payloads in appends_by_output.items()
+            },
         }
+
+    @staticmethod
+    def compound_change(*changes: dict) -> dict:
+        # Bundle multiple change dicts so PersistentStateHandler sees a single
+        # change per message (its one-change-per-handle() invariant).
+        return {"type": "compound", "changes": list(changes)}
 
     @staticmethod
     def flush_ack_change(
@@ -193,6 +217,27 @@ class FilterState:
     def is_closed(self, client_id: int) -> bool:
         return client_id in self._closed_by_client
 
+    # ---------- batcher planners (read-only, for business_fn) ----------
+
+    def plan_data(
+        self, client_id: int, appends_by_output: dict[str, list[bytes]]
+    ) -> dict[str, list[bytes]]:
+        """Flushed batches per output that appending these would produce, WITHOUT
+        mutating the buffer. Pairs with apply_change("data"), which performs the
+        real append under the same lock — identical flushes by construction."""
+        return {
+            output: self._buffer.plan_append((output, client_id), payloads)
+            for output, payloads in appends_by_output.items()
+        }
+
+    def plan_drain(self, client_id: int) -> dict[str, bytes]:
+        """The leftover batch per output for a client (one each), WITHOUT mutating.
+        Pairs with the close change, which discards the buffer in apply_change."""
+        return {
+            key[0]: batch
+            for key, batch in self._buffer.plan_drain(lambda k: k[1] == client_id)
+        }
+
     # ---------- WorkerState protocol ----------
 
     def snapshot(self) -> dict:
@@ -212,6 +257,7 @@ class FilterState:
                 cid: set(senders)
                 for cid, senders in self._flushed_acks_by_client.items()
             },
+            "buffer": self._buffer.snapshot(),
             "eof_coordinator": self._coordinator.snapshot(),
         }
 
@@ -239,11 +285,16 @@ class FilterState:
             cid: set(senders)
             for cid, senders in data["flushed_acks_by_client"].items()
         }
+        self._buffer.restore(data["buffer"])
         self._coordinator.restore(data["eof_coordinator"])
 
     def apply_change(self, change: dict) -> None:
         # Single mutation path — runs both live and during WAL replay.
         kind = change["type"]
+        if kind == "compound":           # check before reading client_id
+            for sub in change["changes"]:
+                self.apply_change(sub)
+            return
         client_id = change["client_id"]
         if kind == "data":
             self._apply_data(client_id, change)
@@ -281,13 +332,16 @@ class FilterState:
         self._processed_by_client[client_id] = (
             self._processed_by_client.get(client_id, 0) + change["processed_count"]
         )
-        by_output = change["forwarded_by_output"]
-        forwarded_total = sum(by_output.values())
-        self._forwarded_by_client[client_id] = (
-            self._forwarded_by_client.get(client_id, 0) + forwarded_total
-        )
         acc = self._forwarded_by_output_by_client.setdefault(client_id, {})
-        for output, count in by_output.items():
+        for output, b64_payloads in change["appends_by_output"].items():
+            payloads = [base64.b64decode(s) for s in b64_payloads]
+            # Append to the durable buffer; the flushes it triggers are dropped
+            # (already stamped into the outbox by business_fn via plan_data).
+            self._buffer.apply_append((output, client_id), payloads)
+            count = len(payloads)
+            self._forwarded_by_client[client_id] = (
+                self._forwarded_by_client.get(client_id, 0) + count
+            )
             acc[output] = acc.get(output, 0) + count
 
     def _apply_flush_ack(self, client_id: int, change: dict) -> None:
@@ -309,4 +363,7 @@ class FilterState:
         self._forwarded_by_output_by_client.pop(client_id, None)
         self._all_forwarded_by_output_by_client.pop(client_id, None)
         self._flushed_acks_by_client.pop(client_id, None)
+        # Drop the client's leftover buffer (its final batch was already drained
+        # to the outbox by business_fn via plan_drain before this close).
+        self._buffer.discard(lambda k: k[1] == client_id)
         self._closed_by_client.add(client_id)

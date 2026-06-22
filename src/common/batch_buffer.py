@@ -53,6 +53,71 @@ class BatchBuffer:
                 self._buffers.pop(key, None)
                 self._bytes_by_key.pop(key, None)
 
+    # ─── durable (WAL) API: split into a pure planner and a mutator ──────────
+    # A WAL-backed worker needs to know the flushed batches *before* committing
+    # (to stamp them into the outbox in business_fn) and then reproduce the exact
+    # same buffer transition in apply_change — live and on replay. plan_* compute
+    # without mutating; apply_* mutate identically. Both share _simulate_append so
+    # they can never diverge.
+
+    @staticmethod
+    def _simulate_append(
+        buf: list[bytes], buf_bytes: int, payloads: list[bytes],
+        max_items: int, max_bytes: int,
+    ) -> tuple[list[bytes], list[bytes], int]:
+        """Append ``payloads`` to (``buf``, ``buf_bytes``), flushing whenever a
+        limit is reached. Pure: operates on copies. Returns
+        (flushed_batches, remaining_buf, remaining_bytes)."""
+        flushed: list[bytes] = []
+        cur = list(buf)
+        cur_bytes = buf_bytes
+        for payload in payloads:
+            cur.append(payload)
+            cur_bytes += len(payload)
+            if len(cur) >= max_items or cur_bytes >= max_bytes:
+                flushed.append(b"".join(cur))
+                cur = []
+                cur_bytes = 0
+        return flushed, cur, cur_bytes
+
+    def plan_append(self, key: Hashable, payloads: list[bytes]) -> list[bytes]:
+        """Batches that *would* flush if ``payloads`` were appended under ``key``.
+        Does NOT mutate (read by business_fn to stamp outputs before commit)."""
+        with self._lock:
+            flushed, _, _ = self._simulate_append(
+                self._buffers.get(key, []), self._bytes_by_key.get(key, 0),
+                payloads, self._max_items, self._max_bytes,
+            )
+        return flushed
+
+    def apply_append(self, key: Hashable, payloads: list[bytes]) -> None:
+        """Append ``payloads`` under ``key`` and drop whatever flushed (those
+        batches already live in the outbox). The sole buffer mutator for data;
+        run live and on WAL replay, it matches plan_append exactly."""
+        with self._lock:
+            _, rem, rem_bytes = self._simulate_append(
+                self._buffers.get(key, []), self._bytes_by_key.get(key, 0),
+                payloads, self._max_items, self._max_bytes,
+            )
+            if rem:
+                self._buffers[key] = rem
+                self._bytes_by_key[key] = rem_bytes
+            else:
+                self._buffers.pop(key, None)
+                self._bytes_by_key.pop(key, None)
+
+    def plan_drain(
+        self, predicate: Callable[[Hashable], bool]
+    ) -> list[tuple[Hashable, bytes]]:
+        """The (key, batch) pairs a drain would emit, without mutating (read by
+        business_fn at EOF/flush before the close change is committed)."""
+        with self._lock:
+            return [
+                (key, b"".join(self._buffers[key]))
+                for key in self._buffers
+                if predicate(key) and self._buffers[key]
+            ]
+
     def snapshot(self) -> dict:
         """Return a picklable copy of all buffered data."""
         with self._lock:
