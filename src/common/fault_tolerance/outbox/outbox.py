@@ -68,6 +68,7 @@ def _entry_to_dict(entry: OutboxEntry) -> dict:
         "input_id": entry.input_id,
         "destination": entry.destination,
         "body": entry.body,
+        "shard": entry.shard,
     }
 
 
@@ -77,4 +78,5 @@ def _entry_from_dict(data: dict) -> OutboxEntry:
         input_id=data["input_id"],
         destination=data["destination"],
         body=data["body"],
+        shard=data.get("shard"),
     )

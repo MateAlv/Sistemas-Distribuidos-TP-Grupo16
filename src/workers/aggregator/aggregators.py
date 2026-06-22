@@ -130,10 +130,12 @@ class AggregatorWorker:
 
     # ---------- packet helpers ----------
 
-    def _packet(self, msg_type, client_id, payload):
-        return self._internal_protocol.create_packet(
+    def _packet(self, msg_type, client_id, seq, payload):
+        return self._internal_protocol.create_addressed_packet(
             msg_type=msg_type,
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            sender_id=ID,
+            seq=seq,
             payload=payload,
         )
 
@@ -145,11 +147,11 @@ class AggregatorWorker:
     def _build_result_outputs(self, client_id: int, results: list, data_count: int) -> list:
         """Build [(destination, bytes)] for emitting aggregated results downstream."""
         outputs = [
-            (OUTPUT_QUEUE, self._packet(MessageType.DATA, client_id, p))
-            for p in results
+            (OUTPUT_QUEUE, self._packet(MessageType.DATA, client_id, seq, payload))
+            for seq, payload in enumerate(results)
         ]
         outputs.append((OUTPUT_QUEUE, self._packet(
-            MessageType.EOF, client_id, self._eof_payload(len(results))
+            MessageType.EOF, client_id, len(results), self._eof_payload(len(results))
         )))
         logging.info(
             "aggregation_emit | configuration=%s | id=%s | client_id=%s | "
