@@ -325,7 +325,7 @@ class FilterQ5UsdWorker:
 
         except Exception:
             logging.exception("filter_q5_usd_data_error | id=%s", ID)
-            nack()
+            nack(requeue=True)
 
     def _handle_upstream_eof(self, client_id: int, payload: bytes, ack, nack):
         ctrl = self._ctrl_ser.deserialize(payload)
@@ -381,7 +381,7 @@ class FilterQ5UsdWorker:
             logging.exception(
                 "filter_q5_usd_upstream_eof_error | id=%s | client_id=%s", ID, client_id
             )
-            nack()
+            nack(requeue=True)
 
     # ---------- control path ----------
 
@@ -390,7 +390,7 @@ class FilterQ5UsdWorker:
             msg_type, client_id, ctrl = self._coordinator.parse_message(message)
         except Exception:
             logging.exception("filter_q5_usd_control_parse_error | id=%s", ID)
-            nack()
+            nack(requeue=False)
             return
 
         sender_id = ctrl.sender_id
@@ -469,7 +469,7 @@ class FilterQ5UsdWorker:
             logging.exception(
                 "filter_q5_usd_control_error | id=%s | client_id=%s", ID, client_id
             )
-            nack()
+            nack(requeue=True)
 
     def _start_control_consumer(self):
         consumer = MessageMiddlewareQueueRabbitMQ(
@@ -500,7 +500,7 @@ class FilterQ5UsdWorker:
             msg_type, client_id, ctrl = self._coordinator.parse_message(message)
         except Exception:
             logging.exception("filter_q5_usd_response_parse_error | id=%s", ID)
-            nack()
+            nack(requeue=False)
             return
 
         try:
@@ -580,7 +580,7 @@ class FilterQ5UsdWorker:
             logging.exception(
                 "filter_q5_usd_response_error | id=%s | client_id=%s", ID, client_id
             )
-            nack()
+            nack(requeue=True)
 
     def _start_response_consumer(self):
         consumer = MessageMiddlewareQueueRabbitMQ(
