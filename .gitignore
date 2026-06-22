@@ -24,6 +24,8 @@ output/*
 
 
 /venv
+.venv/
+.venv-test/
 
 data/rates/
 data/monitor/
