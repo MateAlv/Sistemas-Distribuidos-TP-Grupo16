@@ -1,14 +1,17 @@
+import base64
+import copy
 import logging
-import os
 import threading
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from common import middleware
 from common.bank_ids import notebook_bank_id
 from common.domain.account import Q2BankMaxResult
 from common.domain.partial_result import Q2BankMaxPartial
-from common.logging_utils import should_log_progress
+from common.fault_tolerance.handler.action import Action
+from common.fault_tolerance.handler.persistent_state_handler import (
+    PersistentStateHandler,
+)
 from common.message_protocol.external.types import FILE_TYPE_ACCOUNTS
 from common.message_protocol.internal import (
     InternalProtocol,
@@ -21,28 +24,13 @@ from common.message_protocol.internal.control_message_serializer import (
     ControlMessageSerializer,
 )
 from workers.common.line_splitter import parse_csv_line
+from workers.q2_bank_name_joiner.bank_name_joiner_state import (
+    BankNameJoinerState,
+    ClientState,
+)
 
 
-MAX_CLOSED_CLIENTS = 500
-
-
-@dataclass
-class ClientState:
-    bank_names: dict[str, list[str]] = field(default_factory=dict)
-    q2_results: dict[str, Q2BankMaxPartial] = field(default_factory=dict)
-    q2_data_count: int = 0
-    q2_expected_total: int | None = None
-    accounts_batch_count: int = 0
-    accounts_expected_total: int | None = None
-
-    def ready(self) -> bool:
-        if self.q2_expected_total is None or self.accounts_expected_total is None:
-            return False
-        if self.q2_data_count < self.q2_expected_total:
-            return False
-        if self.accounts_batch_count < self.accounts_expected_total:
-            return False
-        return True
+ACCOUNTS_SENDER_OFFSET = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -52,6 +40,8 @@ class BankNameJoinerConfig:
     q2_input_queue: str
     accounts_input_queue: str
     output_queue: str
+    state_dir: str
+    snapshot_interval: int
 
 
 class BankNameJoinerWorker:
@@ -60,23 +50,32 @@ class BankNameJoinerWorker:
 
         self._q2_consumer: middleware.MessageMiddlewareQueueRabbitMQ | None = None
         self._accounts_consumer: middleware.MessageMiddlewareQueueRabbitMQ | None = None
+        self._output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
+            self._config.mom_host, self._config.output_queue
+        )
 
         self._protocol = InternalProtocol()
         self._control_serializer = ControlMessageSerializer()
         self._line_batch_serializer = LineBatchSerializer()
 
         self._lock = threading.Lock()
-        self._output_queues_lock = threading.Lock()
-        self._states: dict[int, ClientState] = {}
-        self._closed_by_client: dict[int, float] = {}
-        self._output_queues_by_thread: dict[
-            int, middleware.MessageMiddlewareQueueRabbitMQ
-        ] = {}
+        self._publish_lock = threading.Lock()
+        self._state = BankNameJoinerState()
+        self._handler = PersistentStateHandler(
+            state_dir=self._config.state_dir,
+            node_id=f"q2_bank_name_joiner_{self._config.id}",
+            worker_state=self._state,
+            snapshot_every=self._config.snapshot_interval,
+        )
+
         self._closed = False
         self._stopped = False
 
         self._q2_thread: threading.Thread | None = None
         self._accounts_thread: threading.Thread | None = None
+
+        self._handler.recover()
+        self._republish_pending()
 
     def start(self) -> None:
         logging.info(
@@ -122,32 +121,16 @@ class BankNameJoinerWorker:
         if self._closed:
             return
         self._closed = True
-        self._close_thread_output_queue()
-
-    def _output_queue_for_thread(self) -> middleware.MessageMiddlewareQueueRabbitMQ:
-        thread_id = threading.get_ident()
-        with self._output_queues_lock:
-            output_queue = self._output_queues_by_thread.get(thread_id)
-            if output_queue is None:
-                output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
-                    self._config.mom_host, self._config.output_queue
+        for resource in (self._q2_consumer, self._accounts_consumer, self._output_queue):
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except Exception as e:
+                logging.warning(
+                    "q2_bank_name_joiner_close_error | id=%s | error=%s",
+                    self._config.id, e,
                 )
-                self._output_queues_by_thread[thread_id] = output_queue
-            return output_queue
-
-    def _close_thread_output_queue(self) -> None:
-        thread_id = threading.get_ident()
-        with self._output_queues_lock:
-            output_queue = self._output_queues_by_thread.pop(thread_id, None)
-        if output_queue is None:
-            return
-        try:
-            output_queue.close()
-        except Exception as e:
-            logging.warning(
-                "q2_bank_name_joiner_close_error | id=%s | error=%s",
-                self._config.id, e,
-            )
 
     def _run_q2_consumer(self) -> None:
         self._q2_consumer = middleware.MessageMiddlewareQueueRabbitMQ(
@@ -163,7 +146,6 @@ class BankNameJoinerWorker:
                     self._config.id, e,
                 )
         finally:
-            self._close_thread_output_queue()
             try:
                 self._q2_consumer.close()
             except Exception:
@@ -183,7 +165,6 @@ class BankNameJoinerWorker:
                     self._config.id, e,
                 )
         finally:
-            self._close_thread_output_queue()
             try:
                 self._accounts_consumer.close()
             except Exception:
@@ -191,138 +172,160 @@ class BankNameJoinerWorker:
 
     def _on_q2_message(self, message: bytes, ack, nack) -> None:
         try:
-            msg_type, client_id, _sender_id, _seq, payload = (
+            msg_type, client_id, sender_id, seq, payload = (
                 self._protocol.unpack_addressed_packet(message)
             )
             msg_type = MessageType(msg_type)
-            should_emit = False
+            msg_id = f"q2:{sender_id}:{client_id}:{seq}"
 
             with self._lock:
-                if client_id in self._closed_by_client:
-                    logging.info(
-                        "q2_bank_name_joiner_q2_for_closed_client | id=%s | "
-                        "client_id=%s | msg_type=%s",
-                        self._config.id, client_id, msg_type,
-                    )
-                    ack()
-                    return
-
-                state = self._state_for(client_id)
-
                 if msg_type == MessageType.DATA:
-                    partial = Q2BankMaxPartialSerializer.deserialize(payload)
-                    bank_id = notebook_bank_id(partial.bank_id)
-                    if bank_id != partial.bank_id:
-                        partial = Q2BankMaxPartial(
-                            bank_id=bank_id,
-                            from_account=partial.from_account,
-                            amount=partial.amount,
-                        )
-                    state.q2_results[bank_id] = partial
-                    state.q2_data_count += 1
-                    if should_log_progress(state.q2_data_count):
-                        logging.info(
-                            "q2_bank_name_joiner_q2_data | id=%s | client_id=%s | "
-                            "data_count=%s | banks=%s | payload_bytes=%s",
-                            self._config.id,
-                            client_id,
-                            state.q2_data_count,
-                            len(state.q2_results),
-                            len(payload),
-                        )
+                    def bfn(pl: bytes):
+                        change = BankNameJoinerState.q2_data_change(client_id, pl)
+                        return self._change_outputs_for(client_id, change)
+
+                    instruction = self._handler.handle(
+                        msg_id, client_id, sender_id, seq, payload, bfn
+                    )
                 elif msg_type == MessageType.EOF:
                     control = self._control_serializer.deserialize(payload)
-                    state.q2_expected_total = control.expected_total
+
+                    def bfn(_pl: bytes):
+                        change = BankNameJoinerState.q2_eof_change(
+                            client_id, control.expected_total
+                        )
+                        return self._change_outputs_for(client_id, change)
+
+                    instruction = self._handler.handle(
+                        msg_id, client_id, sender_id, seq, payload, bfn
+                    )
                     logging.info(
                         "q2_bank_name_joiner_q2_eof | id=%s | client_id=%s | "
-                        "data_count=%s | expected_total=%s",
-                        self._config.id, client_id,
-                        state.q2_data_count, state.q2_expected_total,
+                        "expected_total=%s",
+                        self._config.id, client_id, control.expected_total,
                     )
                 else:
                     raise ValueError(f"unsupported q2 message type: {msg_type}")
 
-                should_emit = state.ready()
-
-            if should_emit:
-                self._emit_results(client_id)
-            ack()
+            committed = self._publish_commit_ack(instruction, ack)
+            self._log_if_emitted(client_id, instruction, committed)
         except Exception as e:
             logging.error(
                 "q2_bank_name_joiner_q2_error | id=%s | error=%s",
                 self._config.id, e,
+                exc_info=True,
             )
-            nack()
+            nack(requeue=True)
 
     def _on_accounts_message(self, message: bytes, ack, nack) -> None:
         try:
-            msg_type, client_id, _sender_id, _seq, payload = (
+            msg_type, client_id, sender_id, seq, payload = (
                 self._protocol.unpack_addressed_packet(message)
             )
             msg_type = MessageType(msg_type)
-            should_emit = False
+            effective_sender_id = sender_id + ACCOUNTS_SENDER_OFFSET
+            msg_id = f"acc:{sender_id}:{client_id}:{seq}"
 
             if msg_type == MessageType.DATA:
                 mappings = self._parse_accounts_batch(payload)
                 with self._lock:
-                    if client_id in self._closed_by_client:
-                        ack()
-                        return
-                    state = self._state_for(client_id)
-                    for bank_id, bank_name in mappings:
-                        bank_names = state.bank_names.setdefault(bank_id, [])
-                        if bank_name not in bank_names:
-                            bank_names.append(bank_name)
-                    state.accounts_batch_count += 1
-                    if should_log_progress(state.accounts_batch_count):
-                        logging.info(
-                            "q2_bank_name_joiner_accounts_data | id=%s | "
-                            "client_id=%s | batches=%s | mappings_in_batch=%s | "
-                            "known_banks=%s | payload_bytes=%s",
-                            self._config.id,
-                            client_id,
-                            state.accounts_batch_count,
-                            len(mappings),
-                            len(state.bank_names),
-                            len(payload),
+                    def bfn(_pl: bytes):
+                        change = BankNameJoinerState.accounts_data_change(
+                            client_id, mappings
                         )
-                    should_emit = state.ready()
+                        return self._change_outputs_for(client_id, change)
 
+                    instruction = self._handler.handle(
+                        msg_id,
+                        client_id,
+                        effective_sender_id,
+                        seq,
+                        payload,
+                        bfn,
+                    )
             elif msg_type == MessageType.EOF:
                 control = self._control_serializer.deserialize(payload)
                 with self._lock:
-                    if client_id in self._closed_by_client:
-                        ack()
-                        return
-                    state = self._state_for(client_id)
-                    state.accounts_expected_total = control.expected_total
+                    def bfn(_pl: bytes):
+                        change = BankNameJoinerState.accounts_eof_change(
+                            client_id, control.expected_total
+                        )
+                        return self._change_outputs_for(client_id, change)
+
+                    instruction = self._handler.handle(
+                        msg_id,
+                        client_id,
+                        effective_sender_id,
+                        seq,
+                        payload,
+                        bfn,
+                    )
                     logging.info(
                         "q2_bank_name_joiner_accounts_eof | id=%s | client_id=%s | "
-                        "batch_count=%s | expected_total=%s | mappings=%s",
-                        self._config.id, client_id,
-                        state.accounts_batch_count,
-                        state.accounts_expected_total,
-                        len(state.bank_names),
+                        "expected_total=%s",
+                        self._config.id, client_id, control.expected_total,
                     )
-                    should_emit = state.ready()
             else:
                 raise ValueError(f"unsupported accounts message type: {msg_type}")
 
-            if should_emit:
-                self._emit_results(client_id)
-            ack()
+            committed = self._publish_commit_ack(instruction, ack)
+            self._log_if_emitted(client_id, instruction, committed)
         except Exception as e:
             logging.error(
                 "q2_bank_name_joiner_accounts_error | id=%s | error=%s",
                 self._config.id, e,
+                exc_info=True,
             )
-            nack()
+            nack(requeue=True)
 
-    def _state_for(self, client_id: int) -> ClientState:
-        state = self._states.get(client_id)
-        if state is None:
-            state = ClientState()
-            self._states[client_id] = state
+    def _change_outputs_for(self, client_id: int, change: dict) -> tuple[dict, list]:
+        # DATA messages can only trigger ready() if both expected_totals are already set
+        # (i.e. both EOFs already arrived). Skip the expensive deepcopy otherwise.
+        if change["type"] in ("q2_data", "accounts_data"):
+            current = self._state.client_state(client_id)
+            if (
+                current is None
+                or current.q2_expected_total is None
+                or current.accounts_expected_total is None
+            ):
+                return change, []
+        prospective = self._prospective_state(client_id, change)
+        if not prospective.ready():
+            return change, []
+        return (
+            BankNameJoinerState.close_change(client_id),
+            self._build_result_outputs(prospective, client_id),
+        )
+
+    def _prospective_state(self, client_id: int, change: dict) -> ClientState:
+        current = self._state.client_state(client_id)
+        state = copy.deepcopy(current) if current is not None else ClientState()
+        kind = change["type"]
+        if kind == "q2_data":
+            partial = Q2BankMaxPartialSerializer.deserialize(
+                self._decode_payload(change["payload_b64"])
+            )
+            bank_id = notebook_bank_id(partial.bank_id)
+            if bank_id != partial.bank_id:
+                partial = Q2BankMaxPartial(
+                    bank_id=bank_id,
+                    from_account=partial.from_account,
+                    amount=partial.amount,
+                )
+            state.q2_results[bank_id] = partial
+            state.q2_data_count += 1
+        elif kind == "q2_eof":
+            state.q2_expected_total = change["expected_total"]
+        elif kind == "accounts_data":
+            for bank_id, bank_name in change["mappings"]:
+                bank_names = state.bank_names.setdefault(bank_id, [])
+                if bank_name not in bank_names:
+                    bank_names.append(bank_name)
+            state.accounts_batch_count += 1
+        elif kind == "accounts_eof":
+            state.accounts_expected_total = change["expected_total"]
+        else:
+            raise ValueError(f"unsupported prospective change type: {kind}")
         return state
 
     def _parse_accounts_batch(self, payload: bytes) -> list[tuple[str, str]]:
@@ -354,71 +357,86 @@ class BankNameJoinerWorker:
             mappings.append((bank_id, bank_name))
         return mappings
 
-    def _emit_results(self, client_id: int) -> None:
-        with self._lock:
-            state = self._states.pop(client_id, None)
-
-        if state is None:
-            return
-
-        output_queue = self._output_queue_for_thread()
-        missing = 0
+    def _build_result_outputs(
+        self, state: ClientState, client_id: int
+    ) -> list[tuple[str, bytes]]:
+        outputs: list[tuple[str, bytes]] = []
         emitted = 0
-        try:
-            for bank_id, partial in state.q2_results.items():
-                bank_names = state.bank_names.get(bank_id, [])
-                if not bank_names:
-                    missing += 1
-                    continue
-                for bank_name in bank_names:
-                    result = Q2BankMaxResult(
-                        bank_id=partial.bank_id,
-                        from_account=partial.from_account,
-                        bank_name=bank_name,
-                        amount=partial.amount,
-                    )
-                    payload = Q2BankMaxResultSerializer.serialize(result)
-                    output_queue.send(
-                        self._packet(MessageType.DATA, client_id, payload)
-                    )
-                    emitted += 1
-
-            control_payload = self._control_serializer.serialize(
-                ControlMessage(
-                    sender_id=self._config.id,
-                    expected_total=emitted,
-                    processed_count=0,
+        for bank_id, partial in state.q2_results.items():
+            bank_names = state.bank_names.get(bank_id, [])
+            for bank_name in bank_names:
+                result = Q2BankMaxResult(
+                    bank_id=partial.bank_id,
+                    from_account=partial.from_account,
+                    bank_name=bank_name,
+                    amount=partial.amount,
                 )
+                payload = Q2BankMaxResultSerializer.serialize(result)
+                outputs.append((
+                    self._config.output_queue,
+                    self._packet(MessageType.DATA, client_id, emitted, payload),
+                ))
+                emitted += 1
+
+        control_payload = self._control_serializer.serialize(
+            ControlMessage(
+                sender_id=self._config.id,
+                expected_total=emitted,
+                processed_count=0,
             )
-            output_queue.send(self._packet(MessageType.EOF, client_id, control_payload))
-        except Exception:
-            # Restore state so the triggering message can be nacked and retried.
-            # Without this, _closed_by_client would never be set, and a redelivery
-            # would find no state and silently discard the client's results.
-            with self._lock:
-                self._states.setdefault(client_id, state)
-            raise
-
-        with self._lock:
-            self._closed_by_client[client_id] = time.monotonic()
-            if len(self._closed_by_client) > MAX_CLOSED_CLIENTS:
-                self._cleanup_closed_clients()
-
-        logging.info(
-            "q2_bank_name_joiner_emit | id=%s | client_id=%s | results=%s | "
-            "bank_names=%s | unmatched=%s",
-            self._config.id, client_id, emitted, len(state.bank_names), missing,
         )
+        outputs.append((
+            self._config.output_queue,
+            self._packet(MessageType.EOF, client_id, emitted, control_payload),
+        ))
+        return outputs
 
-    def _cleanup_closed_clients(self) -> None:
-        items = sorted(self._closed_by_client.items(), key=lambda item: item[1])
-        to_remove = len(items) - MAX_CLOSED_CLIENTS // 2
-        for client_id, _ in items[:to_remove]:
-            self._closed_by_client.pop(client_id, None)
+    def _publish_commit_ack(self, instruction, ack) -> bool:
+        if instruction.action is Action.ACK:
+            ack()
+            return False
+        for entry in instruction.outputs:
+            self._send_output(entry.body)
+        with self._lock:
+            self._handler.commit_done(*instruction.ctx)
+        ack()
+        return True
 
-    def _packet(self, msg_type: MessageType, client_id: int, payload: bytes) -> bytes:
-        return self._protocol.create_packet(
+    def _send_output(self, body: bytes) -> None:
+        with self._publish_lock:
+            self._output_queue.send(body)
+
+    def _republish_pending(self) -> None:
+        for entry in self._handler.outbox_to_republish():
+            try:
+                self._send_output(entry.body)
+            except Exception:
+                logging.exception(
+                    "q2_bank_name_joiner_republish_error | id=%s | destination=%s",
+                    self._config.id,
+                    entry.destination,
+                )
+
+    def _packet(
+        self, msg_type: MessageType, client_id: int, seq: int, payload: bytes
+    ) -> bytes:
+        return self._protocol.create_addressed_packet(
             msg_type=msg_type,
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            sender_id=self._config.id,
+            seq=seq,
             payload=payload,
         )
+
+    def _log_if_emitted(self, client_id: int, instruction, committed: bool) -> None:
+        if not committed or not instruction.outputs:
+            return
+        results = max(len(instruction.outputs) - 1, 0)
+        logging.info(
+            "q2_bank_name_joiner_emit | id=%s | client_id=%s | results=%s",
+            self._config.id, client_id, results,
+        )
+
+    @staticmethod
+    def _decode_payload(payload_b64: str) -> bytes:
+        return base64.b64decode(payload_b64)

@@ -551,7 +551,8 @@ def main():
         if watcher is not None:
             watcher.stop()
             watcher.join(timeout=5)
-        sampler.join(timeout=5)
+        if sampler.is_alive():
+            sampler.join(timeout=5)
         if log_proc is not None:
             _kill_pipeline(log_proc)
 
