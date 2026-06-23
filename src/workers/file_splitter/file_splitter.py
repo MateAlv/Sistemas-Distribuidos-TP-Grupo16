@@ -1,34 +1,38 @@
 import logging
-from dataclasses import dataclass, field
+import zlib
+from dataclasses import dataclass
 
+from common.fault_tolerance.handler import PersistentStateHandler
+from common.fault_tolerance.handler.action import Action
+from common.fault_tolerance.handler.sender_sequencer import EdgeSpec
+from common.fault_tolerance.inbox import MsgKind
 from common.logging_utils import should_log_progress
 from common.message_protocol.external import FileChunk, FileEof
 from common.message_protocol.external.types import (
-    FILE_TYPE_ACCOUNTS,
-    FILE_TYPE_TRANSACTIONS,
     MSG_CHUNK,
     MSG_EOF,
     file_ingestor_routing_key,
-    file_type_name,
 )
-from common.message_protocol.internal import (
-    ControlMessage,
-    ControlMessageSerializer,
-    InternalProtocol,
-    LineBatch,
-    LineBatchSerializer,
-    MessageType,
-)
+from common.message_protocol.internal import InternalProtocol, MessageType
 from common.middleware import (
     MessageMiddlewareQueueRabbitMQ,
-    SequencedShardedPublisher,
+    ShardedPublisher,
 )
 from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
     ensure_exchange_queue_bindings,
 )
 from common.routing import queue_name_for_worker
-from workers.common.line_splitter import LineSplitter, parse_csv_line
+from workers.file_splitter.file_splitter_state import (
+    ACCOUNTS_EDGE,
+    LINE_BATCH_EDGE,
+    FileKey,
+    FileSplitterState,
+)
+
+# Reserved sender bucket for the (dead in the current gateway topology) aggregate
+# client-EOF; distinct from any per-file crc32(rel_path) bucket.
+_CLIENT_EOF_SENDER = 0xFFFFFFFF
 
 
 @dataclass(frozen=True)
@@ -45,51 +49,40 @@ class FileSplitterConfig:
     logging_level: str
     input_routing_key: str | None = None
     accounts_output_queue: str | None = None
-
-
-@dataclass(frozen=True)
-class FileKey:
-    client_id: int
-    rel_path: str
-
-
-@dataclass
-class FileState:
-    splitter: LineSplitter
-    file_type: int | None = None
-    header: tuple[str, ...] | None = None
-    batch_lines: list[bytes] = field(default_factory=list)
-    batch_first_line_number: int = 0
-    batch_payload_bytes: int = 0
-    batch_id: int = 0
-    lines_seen: int = 0
-    data_lines_emitted: int = 0
-    batches_emitted: int = 0
-    chunks_received: int = 0
-    bytes_received: int = 0
+    state_dir: str = ""
+    snapshot_interval: int = 1000
 
 
 class FileSplitter:
     def __init__(self, config: FileSplitterConfig) -> None:
         self._config = config
         self._consumer: MessageMiddlewareExchangeRabbitMQ | None = None
-        self._line_batch_output: SequencedShardedPublisher | None = None
-        self._accounts_output: MessageMiddlewareQueueRabbitMQ | None = None
-        self._line_batch_serializer = LineBatchSerializer()
-        self._control_serializer = ControlMessageSerializer()
         self._internal_protocol = InternalProtocol()
-        self._files: dict[FileKey, FileState] = {}
-        self._accounts_batches_by_client: dict[int, int] = {}
+        self._state = FileSplitterState(
+            max_line_bytes=config.max_line_bytes,
+            max_batch_bytes=config.max_batch_bytes,
+            splitter_id=config.id,
+            accounts_enabled=config.accounts_output_queue is not None,
+        )
+        self._handler: PersistentStateHandler | None = None
+        self._publishers: dict[str, object] = {}
         self._chunks_received = 0
         self._eofs_received = 0
+
+    # ---------- lifecycle ----------
 
     def start(self) -> None:
         routing_key = self._input_routing_key()
         self._ensure_line_batch_bindings()
+        self._handler = self._build_handler()
+        self._publishers = self._build_publishers()
+        self._handler.recover()
+        self._publish(self._handler.outbox_to_republish())
+
         logging.info(
             "file_splitter_start | id=%s | mom_host=%s | exchange=%s | queue=%s | "
             "routing_key=%s | output_exchange=%s | output_prefix=%s | "
-            "output_shards=%s | max_batch_bytes=%s",
+            "output_shards=%s | max_batch_bytes=%s | snapshot_every=%s",
             self._config.id,
             self._config.mom_host,
             self._config.input_exchange,
@@ -99,6 +92,7 @@ class FileSplitter:
             self._config.output_routing_prefix,
             self._config.output_shard_count,
             self._config.max_batch_bytes,
+            self._config.snapshot_interval,
         )
 
         with MessageMiddlewareExchangeRabbitMQ(
@@ -120,30 +114,52 @@ class FileSplitter:
         if self._consumer is not None:
             self._consumer.request_stop_consuming()
 
-    def _close_outputs(self) -> None:
-        if self._line_batch_output is not None:
-            try:
-                self._line_batch_output.close()
-            except Exception as e:
-                logging.warning(
-                    "file_splitter_close_output_error | id=%s | output=line_batch | error=%s",
-                    self._config.id,
-                    e,
-                )
-            finally:
-                self._line_batch_output = None
+    def _build_handler(self) -> PersistentStateHandler:
+        return PersistentStateHandler(
+            state_dir=self._config.state_dir,
+            node_id=f"file_splitter_{self._config.id}",
+            worker_state=self._state,
+            snapshot_every=self._config.snapshot_interval,
+            output_edges=self._output_edges(),
+        )
 
-        if self._accounts_output is not None:
+    def _output_edges(self) -> dict[str, EdgeSpec]:
+        edges = {
+            LINE_BATCH_EDGE: EdgeSpec(self._config.id, self._config.output_shard_count)
+        }
+        if self._config.accounts_output_queue is not None:
+            edges[ACCOUNTS_EDGE] = EdgeSpec(self._config.id, 1)
+        return edges
+
+    def _build_publishers(self) -> dict[str, object]:
+        publishers: dict[str, object] = {
+            LINE_BATCH_EDGE: ShardedPublisher(
+                self._config.mom_host,
+                self._config.output_exchange,
+                self._config.output_routing_prefix,
+                self._config.output_shard_count,
+            ),
+        }
+        if self._config.accounts_output_queue is not None:
+            publishers[ACCOUNTS_EDGE] = _AccountsQueuePublisher(
+                self._config.mom_host, self._config.accounts_output_queue
+            )
+        return publishers
+
+    def _close_outputs(self) -> None:
+        for edge, publisher in self._publishers.items():
             try:
-                self._accounts_output.close()
+                publisher.close()
             except Exception as e:
                 logging.warning(
-                    "file_splitter_close_output_error | id=%s | output=accounts | error=%s",
+                    "file_splitter_close_output_error | id=%s | output=%s | error=%s",
                     self._config.id,
+                    edge,
                     e,
                 )
-            finally:
-                self._accounts_output = None
+        self._publishers = {}
+
+    # ---------- message dispatch ----------
 
     def _on_message(self, message: bytes, ack, nack) -> None:
         try:
@@ -154,363 +170,141 @@ class FileSplitter:
             payload = message[1:]
 
             if msg_type == MSG_CHUNK:
-                self._handle_chunk(FileChunk.deserialize(payload))
-                ack()
-                return
-
-            if msg_type == MSG_EOF:
+                self._dispatch_chunk(FileChunk.deserialize(payload), ack)
+            elif msg_type == MSG_EOF:
                 eof = _deserialize_eof(payload)
                 if isinstance(eof, FileEof):
-                    self._handle_file_eof(eof)
+                    self._dispatch_file_eof(eof, ack)
                 else:
-                    self._handle_eof(eof)
-                ack()
-                return
-
-            raise ValueError(f"unknown file splitter message type: {msg_type}")
+                    self._dispatch_client_eof(eof, ack)
+            else:
+                raise ValueError(f"unknown file splitter message type: {msg_type}")
         except Exception as e:
             logging.error(
                 "file_splitter_message_error | id=%s | error=%s",
                 self._config.id,
                 e,
+                exc_info=True,
             )
-            nack()
+            nack(requeue=True)
 
-    def _handle_chunk(self, chunk: FileChunk) -> None:
-        key = FileKey(client_id=chunk.client_id(), rel_path=chunk.path())
-        state = self._state_for(key)
+    def _dispatch_chunk(self, chunk: FileChunk, ack) -> None:
+        client_id = chunk.client_id()
+        rel_path = chunk.path()
+        key = FileKey(client_id=client_id, rel_path=rel_path)
+        sender_id = _sender_id_for_path(rel_path)
+        offset = chunk.offset()
+        payload = chunk.payload()
+        expected = self._state.expected_offset(key)
 
-        if state.file_type is None:
-            state.file_type = chunk.file_type()
-        elif state.file_type != chunk.file_type():
-            raise ValueError(
-                "file_type changed for file "
-                f"(client_id={key.client_id}, path={key.rel_path}, "
-                f"expected={state.file_type}, received={chunk.file_type()})"
-            )
+        if offset == expected:
+            seq = self._state.next_ordinal(key)
+        elif offset + len(payload) == expected:
+            # Strict in-order delivery (LineSplitter enforces it) means the only
+            # chunk that can be applied-but-not-committed after a crash is the last
+            # applied one; re-drive it (republish pending outputs + commit, or ack
+            # if it was already committed).
+            seq = self._state.next_ordinal(key) - 1
+        else:
+            # offset + len < expected: already committed, nothing to redo.
+            ack()
+            return
 
-        try:
-            complete_lines = state.splitter.push(chunk.offset(), chunk.payload())
-        except ValueError as exc:
-            raise ValueError(
-                f"{exc} (client_id={key.client_id}, path={key.rel_path})"
-            ) from exc
+        change = FileSplitterState.chunk_change(
+            client_id, rel_path, chunk.file_type(), offset, payload
+        )
+        self._run(f"d:{sender_id}:{offset}", client_id, sender_id, seq, change, MsgKind.DATA)
+        ack()
 
-        for line in complete_lines:
-            self._handle_line(key, state, line)
-
-        state.bytes_received += chunk.payload_size()
-        state.chunks_received += 1
         self._chunks_received += 1
-
         if should_log_progress(self._chunks_received):
             logging.info(
-                "file_splitter_chunk | id=%s | client_id=%s | file_type=%s | path=%s | "
-                "offset=%s | payload_bytes=%s | complete_lines=%s | pending_bytes=%s | "
-                "file_chunks=%s | chunks_received=%s",
+                "file_splitter_chunk | id=%s | client_id=%s | path=%s | offset=%s | "
+                "payload_bytes=%s | chunks_received=%s",
                 self._config.id,
-                key.client_id,
-                file_type_name(state.file_type),
-                key.rel_path,
-                chunk.offset(),
-                chunk.payload_size(),
-                len(complete_lines),
-                state.splitter.pending_size(),
-                state.chunks_received,
+                client_id,
+                rel_path,
+                offset,
+                len(payload),
                 self._chunks_received,
             )
 
-    def _handle_file_eof(self, eof: FileEof) -> None:
-        key = FileKey(client_id=eof.client_id(), rel_path=eof.path())
-        file_finished, saw_transactions_file, emitted = self._finish_file(
-            key,
-            expected_file_type=eof.file_type(),
+    def _dispatch_file_eof(self, eof: FileEof, ack) -> None:
+        client_id = eof.client_id()
+        rel_path = eof.path()
+        sender_id = _sender_id_for_path(rel_path)
+        change = FileSplitterState.file_eof_change(client_id, rel_path)
+        self._run(
+            f"e:{sender_id}", client_id, sender_id, 0, change, MsgKind.CTRL_UPSTREAM_EOF
         )
-
-        if saw_transactions_file:
-            self._send_eof(eof.client_id(), emitted)
-
+        ack()
         self._eofs_received += 1
         logging.info(
-            "file_splitter_eof | id=%s | client_id=%s | file_type=%s | path=%s | "
-            "files_finished=%s | transactions_file=%s | expected_total=%s | "
-            "eofs_received=%s",
+            "file_splitter_eof | id=%s | client_id=%s | path=%s | eofs_received=%s",
             self._config.id,
-            eof.client_id(),
-            file_type_name(eof.file_type()),
-            eof.path(),
-            1 if file_finished else 0,
-            saw_transactions_file,
-            emitted,
+            client_id,
+            rel_path,
             self._eofs_received,
         )
 
-    def _handle_eof(self, client_id: int) -> None:
-        keys = [key for key in self._files if key.client_id == client_id]
-        expected_total = 0
-        saw_transactions_file = False
-
-        for key in keys:
-            _, file_saw_transactions, file_emitted = self._finish_file(key)
-            saw_transactions_file = saw_transactions_file or file_saw_transactions
-            expected_total += file_emitted
-
-        if saw_transactions_file:
-            self._send_eof(client_id, expected_total)
-
+    def _dispatch_client_eof(self, client_id: int, ack) -> None:
+        # Dead path in the current gateway topology (it emits per-file FileEof);
+        # kept for completeness so an aggregate client EOF still finishes open files.
+        change = FileSplitterState.client_eof_change(client_id)
+        self._run(
+            f"c:{client_id}",
+            client_id,
+            _CLIENT_EOF_SENDER,
+            0,
+            change,
+            MsgKind.CTRL_UPSTREAM_EOF,
+        )
+        ack()
         self._eofs_received += 1
-        logging.info(
-            "file_splitter_eof | id=%s | client_id=%s | files_finished=%s | "
-            "transactions_file=%s | expected_total=%s | eofs_received=%s",
-            self._config.id,
-            client_id,
-            len(keys),
-            saw_transactions_file,
-            expected_total,
-            self._eofs_received,
-        )
 
-    def _finish_file(
+    def _run(
         self,
-        key: FileKey,
-        expected_file_type: int | None = None,
-    ) -> tuple[bool, bool, int]:
-        state = self._files.get(key)
-        if state is None:
-            logging.warning(
-                "file_splitter_file_eof_missing | id=%s | client_id=%s | path=%s",
-                self._config.id,
-                key.client_id,
-                key.rel_path,
-            )
-            return False, False, 0
-
-        if expected_file_type is not None and state.file_type != expected_file_type:
-            raise ValueError(
-                "file EOF type mismatch "
-                f"(client_id={key.client_id}, path={key.rel_path}, "
-                f"expected={state.file_type}, received={expected_file_type})"
-            )
-
-        for line in state.splitter.finish():
-            self._handle_line(key, state, line)
-
-        if state.file_type == FILE_TYPE_TRANSACTIONS:
-            self._flush_batch(key, state)
-        elif state.file_type == FILE_TYPE_ACCOUNTS:
-            self._flush_batch(key, state)
-            self._send_accounts_eof(key.client_id)
-
-        saw_transactions_file = state.file_type == FILE_TYPE_TRANSACTIONS
-        emitted = state.data_lines_emitted if saw_transactions_file else 0
-
-        logging.info(
-            "file_splitter_file_finished | id=%s | client_id=%s | file_type=%s | "
-            "path=%s | chunks=%s | lines=%s | batches=%s | expected_total=%s | bytes=%s",
-            self._config.id,
-            key.client_id,
-            file_type_name(state.file_type),
-            key.rel_path,
-            state.chunks_received,
-            state.lines_seen,
-            state.batch_id,
-            emitted,
-            state.bytes_received,
-        )
-        del self._files[key]
-        return True, saw_transactions_file, emitted
-
-    def _handle_line(self, key: FileKey, state: FileState, line: bytes) -> None:
-        state.lines_seen += 1
-
-        if state.file_type not in (FILE_TYPE_TRANSACTIONS, FILE_TYPE_ACCOUNTS):
-            raise ValueError(
-                "unknown file_type for file "
-                f"(client_id={key.client_id}, path={key.rel_path}, "
-                f"file_type={state.file_type})"
-            )
-
-        if state.file_type == FILE_TYPE_ACCOUNTS and self._config.accounts_output_queue is None:
-            return
-
-        if state.header is None:
-            state.header = _parse_header(line)
-            logging.debug(
-                "file_splitter_header | id=%s | client_id=%s | path=%s | "
-                "file_type=%s | columns=%s",
-                self._config.id,
-                key.client_id,
-                key.rel_path,
-                file_type_name(state.file_type),
-                len(state.header),
-            )
-            return
-
-        self._append_line(key, state, line)
-
-    def _append_line(self, key: FileKey, state: FileState, line: bytes) -> None:
-        line_size = _line_item_size(line)
-        candidate_size = self._batch_packet_size(key, state, line_size)
-        if state.batch_lines and candidate_size > self._config.max_batch_bytes:
-            self._flush_batch(key, state)
-
-        if not state.batch_lines:
-            state.batch_first_line_number = state.lines_seen
-            state.batch_payload_bytes = 0
-
-        state.batch_lines.append(line)
-        state.batch_payload_bytes += line_size
-
-    def _flush_batch(self, key: FileKey, state: FileState) -> None:
-        if not state.batch_lines:
-            return
-
-        if state.header is None:
-            raise ValueError(
-                "missing header for file "
-                f"(client_id={key.client_id}, path={key.rel_path})"
-            )
-
-        if state.file_type not in (FILE_TYPE_TRANSACTIONS, FILE_TYPE_ACCOUNTS):
-            raise ValueError(
-                "cannot flush batch for unknown file_type "
-                f"(client_id={key.client_id}, path={key.rel_path}, "
-                f"file_type={state.file_type})"
-            )
-
-        batch = LineBatch(
-            file_type=state.file_type,
-            rel_path=key.rel_path,
-            batch_id=state.batch_id,
-            first_line_number=state.batch_first_line_number,
-            header=state.header,
-            lines=tuple(state.batch_lines),
-        )
-        payload = self._line_batch_serializer.serialize(batch)
-        if state.file_type == FILE_TYPE_ACCOUNTS:
-            message = self._internal_protocol.create_addressed_packet(
-                msg_type=MessageType.DATA,
-                client_id_bytes=key.client_id.to_bytes(16, byteorder="big"),
-                sender_id=self._config.id,
-                seq=state.batch_id,
-                payload=payload,
-            )
-            self._accounts_sender().send(message)
-            self._accounts_batches_by_client[key.client_id] = (
-                self._accounts_batches_by_client.get(key.client_id, 0) + 1
-            )
-        else:
-            self._line_batch_sender().send(MessageType.DATA, key.client_id, payload)
-        state.data_lines_emitted += len(batch.lines)
-        state.batches_emitted += 1
-
-        if should_log_progress(state.batches_emitted):
-            logging.info(
-                "file_splitter_batch | id=%s | client_id=%s | file_type=%s | path=%s | "
-                "batch_id=%s | first_line_number=%s | lines=%s | bytes=%s | "
-                "expected_total=%s",
-                self._config.id,
-                key.client_id,
-                file_type_name(state.file_type),
-                key.rel_path,
-                batch.batch_id,
-                batch.first_line_number,
-                len(batch.lines),
-                len(payload),
-                state.data_lines_emitted,
-            )
-
-        state.batch_id += 1
-        state.batch_lines.clear()
-        state.batch_first_line_number = 0
-        state.batch_payload_bytes = 0
-
-    def _send_eof(self, client_id: int, expected_total: int) -> None:
-        payload = self._control_serializer.serialize(
-            ControlMessage(
-                sender_id=self._config.id,
-                expected_total=expected_total,
-                processed_count=0,
-            )
-        )
-        self._line_batch_sender().send(MessageType.EOF, client_id, payload)
-        logging.info(
-            "file_splitter_transaction_eof_sent | id=%s | client_id=%s | "
-            "output_exchange=%s | expected_total=%s",
-            self._config.id,
+        msg_id: str,
+        client_id: int,
+        sender_id: int,
+        seq: int,
+        change: dict,
+        kind: MsgKind,
+    ) -> None:
+        instruction = self._handler.handle(
+            msg_id,
             client_id,
-            self._config.output_exchange,
-            expected_total,
+            sender_id,
+            seq,
+            b"",
+            lambda _payload: self._business_fn(change),
+            kind=kind,
         )
+        if instruction.action is Action.PUBLISH_THEN_COMMIT:
+            self._publish(instruction.outputs)
+            self._handler.commit_done(*instruction.ctx)
 
-    def _send_accounts_eof(self, client_id: int) -> None:
-        if self._config.accounts_output_queue is None:
-            return
-        batches = self._accounts_batches_by_client.pop(client_id, 0)
-        payload = self._control_serializer.serialize(
-            ControlMessage(
-                sender_id=self._config.id,
-                expected_total=batches,
-                processed_count=0,
+    def _business_fn(self, change: dict):
+        client_bytes = change["client_id"].to_bytes(16, byteorder="big")
+        logical = []
+        for edge, msg_type, payload in self._state.simulate(change):
+            body = self._internal_protocol.create_packet(
+                msg_type=msg_type, client_id_bytes=client_bytes, payload=payload
             )
-        )
-        message = self._internal_protocol.create_addressed_packet(
-            msg_type=MessageType.EOF,
-            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-            sender_id=self._config.id,
-            seq=batches,
-            payload=payload,
-        )
-        self._accounts_sender().send(message)
-        logging.info(
-            "file_splitter_accounts_eof | id=%s | client_id=%s | expected_total=%s",
-            self._config.id,
-            client_id,
-            batches,
-        )
+            logical.append((edge, body))
+        return change, logical
 
-    def _batch_packet_size(
-        self,
-        key: FileKey,
-        state: FileState,
-        additional_line_bytes: int = 0,
-    ) -> int:
-        if state.header is None:
-            raise ValueError(
-                "missing transaction header "
-                f"(client_id={key.client_id}, path={key.rel_path})"
-            )
-        header_size = (
-            InternalProtocol.ADDRESSED_HEADER_SIZE
-            if state.file_type == FILE_TYPE_ACCOUNTS
-            else InternalProtocol.HEADER_SIZE
-        )
-        return (
-            header_size
-            + LineBatchSerializer.FIXED_HEADER_SIZE
-            + len(key.rel_path.encode("utf-8"))
-            + sum(_string_item_size(column) for column in state.header)
-            + state.batch_payload_bytes
-            + additional_line_bytes
-        )
+    def _publish(self, entries) -> None:
+        for entry in entries:
+            publisher = self._publishers.get(entry.destination)
+            if publisher is None:
+                raise KeyError(f"no publisher for destination {entry.destination!r}")
+            if entry.shard is None:
+                publisher.send(entry.body)
+            else:
+                publisher.send_to_shard(entry.body, entry.shard)
 
-    def _state_for(self, key: FileKey) -> FileState:
-        state = self._files.get(key)
-        if state is None:
-            state = FileState(splitter=LineSplitter(self._config.max_line_bytes))
-            self._files[key] = state
-        return state
-
-    def _line_batch_sender(self) -> SequencedShardedPublisher:
-        if self._line_batch_output is None:
-            self._line_batch_output = SequencedShardedPublisher(
-                self._config.mom_host,
-                self._config.output_exchange,
-                self._config.output_routing_prefix,
-                self._config.output_shard_count,
-                sender_id=self._config.id,
-            )
-        return self._line_batch_output
+    # ---------- topology ----------
 
     def _ensure_line_batch_bindings(self) -> None:
         def queue_name(index: int) -> str:
@@ -526,38 +320,38 @@ class FileSplitter:
             bindings,
         )
 
-    def _accounts_sender(self) -> MessageMiddlewareQueueRabbitMQ:
-        if self._accounts_output is None:
-            if self._config.accounts_output_queue is None:
-                raise RuntimeError("accounts_output_queue is not configured")
-            self._accounts_output = MessageMiddlewareQueueRabbitMQ(
-                self._config.mom_host,
-                self._config.accounts_output_queue,
-            )
-        return self._accounts_output
-
     def _input_routing_key(self) -> str:
         return self._config.input_routing_key or file_ingestor_routing_key(
             self._config.id
         )
 
 
-def _parse_header(line: bytes) -> tuple[str, ...]:
-    clean_line = line[:-1] if line.endswith(b"\r") else line
-    if not clean_line:
-        raise ValueError("empty transaction header")
-    return tuple(parse_csv_line(clean_line))
+class _AccountsQueuePublisher:
+    """Single-queue publisher exposing the (send, send_to_shard) interface the
+    handler's outbox routing expects. The accounts edge has one shard, so
+    send_to_shard ignores the shard index."""
+
+    def __init__(self, mom_host: str, queue_name: str) -> None:
+        self._queue = MessageMiddlewareQueueRabbitMQ(mom_host, queue_name)
+
+    def send(self, message: bytes) -> None:
+        self._queue.send(message)
+
+    def send_to_shard(self, message: bytes, shard: int) -> None:
+        self._queue.send(message)
+
+    def close(self) -> None:
+        self._queue.close()
+
+
+def _sender_id_for_path(rel_path: str) -> int:
+    # Stable 32-bit per-file sender bucket so a redelivered chunk maps to the same
+    # inbox dedup tracker. crc32 (not hash()) because it must be deterministic
+    # across processes and recovery.
+    return zlib.crc32(rel_path.encode("utf-8")) & 0xFFFFFFFF
 
 
 def _deserialize_eof(payload: bytes) -> int | FileEof:
     if len(payload) == 4:
         return int.from_bytes(payload, byteorder="big")
     return FileEof.deserialize(payload)
-
-
-def _line_item_size(line: bytes) -> int:
-    return 4 + len(line)
-
-
-def _string_item_size(value: str) -> int:
-    return 4 + len(str(value).encode("utf-8"))

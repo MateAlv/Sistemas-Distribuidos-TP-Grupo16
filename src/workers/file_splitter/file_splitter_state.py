@@ -1,59 +1,81 @@
 """WorkerState adapter for the file splitter.
 
 Wraps the splitter's mutable business state behind the snapshot/restore/apply_change
-contract the durable-state engine expects.
+contract the durable-state engine expects, and is the single source of truth for
+both the live output and the WAL replay.
+
+Output emission vs state mutation
+---------------------------------
+The durable handler requires the business function to be side-effect free: it
+returns the logical outputs without touching worker state, and the handler then
+applies the recorded change (also on replay). For the splitter the outputs of a
+chunk depend on accumulated buffer state (partial lines in the LineSplitter, lines
+buffered toward the next batch), so they cannot be computed from the chunk payload
+alone. ``simulate`` therefore runs the exact same accumulation as ``apply_change``
+on a *copy* of the affected file, collecting the emitted outputs without mutating
+real state; ``apply_change`` re-runs it on the real state to advance the buffers.
+Sharing ``_run_*`` between both keeps the emitted outputs and the applied state in
+lockstep.
 
 Change types (all JSON-safe)
 -----------------------------
-  "chunk"
-      A file chunk arrived. Carries the raw chunk payload (base64) so
-      apply_change can replay the exact parsing, header detection and
-      batch-accumulation logic without re-sending any output.
+  "chunk"      raw chunk payload (base64); replays parsing, header detection and
+               batch accumulation so batch_id / counters stay in sync.
+  "file_eof"   drains the LineSplitter, flushes the last partial batch, removes
+               the file from the tracked set.
+  "client_eof" applies the same finish logic to every remaining open file.
 
-      The chunk payload travels in the change dict rather than the resulting
-      state because the batch-accumulation logic is tightly coupled to
-      LineSplitter's internal cursor (expected_offset, pending buffer). Storing
-      the raw payload and re-running the pipeline on replay is the only way to
-      keep batch_id, data_lines_emitted and batches_emitted in sync with what
-      the live worker produced.
-
-  "file_eof"
-      A file's last chunk was processed. Drains LineSplitter's pending bytes,
-      flushes the last partial batch, and removes the file from the tracked set.
-
-  "client_eof"
-      All files for the client have been received. Iterates over remaining open
-      files and applies the same finish logic as "file_eof" for each.
-
-Caller protocol (one change dict per handle() call to PersistentStateHandler)
-------------------------------------------------------------------------------
-  CHUNK message (a piece of a file):
-    → chunk_change(client_id, file_key, chunk_payload)
-    Batches accumulate in the LineSplitter; actual line-batch outputs go to
-    the outbox as part of the same handle() call.
-
-  FILE_EOF message (end of one file):
-    → file_eof_change(client_id, file_key)
-    Drains the remaining partial batch from LineSplitter to the outbox.
-
-  CLIENT_EOF message (end of all files for a client):
-    → client_eof_change(client_id)
-    Drains all remaining open files' partial batches and removes the client.
-
-Note: this adapter has no EofCoordinator and no per-client EOF counter.
-The splitter operates as a pure chunked-stream parser; downstream workers
-handle the multi-sender EOF coordination.
+Note: this adapter has no EofCoordinator and no per-client EOF counter. The
+splitter is a pure chunked-stream parser; downstream workers handle the
+multi-sender EOF coordination.
 """
 
 from __future__ import annotations
 
 import base64
 import dataclasses
+from dataclasses import dataclass, field
 
-from common.message_protocol.external.types import FILE_TYPE_ACCOUNTS
-from common.message_protocol.internal import InternalProtocol, LineBatchSerializer
+from common.message_protocol.external.types import (
+    FILE_TYPE_ACCOUNTS,
+    FILE_TYPE_TRANSACTIONS,
+)
+from common.message_protocol.internal import (
+    ControlMessage,
+    ControlMessageSerializer,
+    InternalProtocol,
+    LineBatch,
+    LineBatchSerializer,
+    MessageType,
+)
 from workers.common.line_splitter import LineSplitter, parse_csv_line
-from workers.file_splitter.file_splitter import FileKey, FileState
+
+
+@dataclass(frozen=True)
+class FileKey:
+    client_id: int
+    rel_path: str
+
+
+@dataclass
+class FileState:
+    splitter: LineSplitter
+    file_type: int | None = None
+    header: tuple[str, ...] | None = None
+    batch_lines: list[bytes] = field(default_factory=list)
+    batch_first_line_number: int = 0
+    batch_payload_bytes: int = 0
+    batch_id: int = 0
+    lines_seen: int = 0
+    data_lines_emitted: int = 0
+    batches_emitted: int = 0
+    chunks_received: int = 0
+    bytes_received: int = 0
+
+# Logical output edges. The worker maps these to concrete publisher-registry keys
+# (the sharded line-batch exchange and the accounts queue).
+LINE_BATCH_EDGE = "line_batch"
+ACCOUNTS_EDGE = "accounts"
 
 # Fixed per-packet overhead must stay in sync with _batch_packet_size() in
 # file_splitter.py — any divergence causes flush decisions on replay to differ
@@ -63,12 +85,18 @@ _ADDRESSED_PACKET_FIXED = (
     InternalProtocol.ADDRESSED_HEADER_SIZE + LineBatchSerializer.FIXED_HEADER_SIZE
 )
 
+# One emitted output: (edge, msg_type, payload). The payload is a plain serialized
+# LineBatch (DATA) or ControlMessage (EOF); the handler's SenderSequencer rebuilds
+# it as an addressed packet on the way out.
+EmittedOutput = tuple[str, int, bytes]
+
 
 class FileSplitterState:
     def __init__(
         self,
         max_line_bytes: int,
         max_batch_bytes: int,
+        splitter_id: int,
         accounts_enabled: bool = True,
         # accounts_enabled mirrors `self._config.accounts_output_queue is not None`
         # in the live worker: when False, account-file lines are dropped after
@@ -76,7 +104,10 @@ class FileSplitterState:
     ) -> None:
         self._max_line_bytes = max_line_bytes
         self._max_batch_bytes = max_batch_bytes
+        self._splitter_id = splitter_id
         self._accounts_enabled = accounts_enabled
+        self._line_batch_serializer = LineBatchSerializer()
+        self._control_serializer = ControlMessageSerializer()
         self._files: dict[FileKey, FileState] = {}
         self._accounts_batches_by_client: dict[int, int] = {}
         self._chunks_received: int = 0
@@ -113,6 +144,44 @@ class FileSplitterState:
 
     def file_keys_for_client(self, client_id: int) -> list[FileKey]:
         return [k for k in self._files if k.client_id == client_id]
+
+    def expected_offset(self, key: FileKey) -> int:
+        """Next byte offset the file expects. 0 when the file is unknown. Drives
+        the worker's in-order chunk dedup guard."""
+        state = self._files.get(key)
+        return state.splitter.expected_offset if state is not None else 0
+
+    def next_ordinal(self, key: FileKey) -> int:
+        """Dense per-file chunk ordinal that the next NEW chunk will get (= number
+        of chunks already applied to this file)."""
+        state = self._files.get(key)
+        return state.chunks_received if state is not None else 0
+
+    # ---------- output simulation (read-only) ----------
+
+    def simulate(self, change: dict) -> list[EmittedOutput]:
+        """Compute the outputs ``apply_change`` would emit, without mutating real
+        state. Runs the shared accumulation on a copy of the affected file(s)."""
+        out: list[EmittedOutput] = []
+        kind = change["type"]
+        if kind == "chunk":
+            key = FileKey(client_id=change["client_id"], rel_path=change["rel_path"])
+            state = self._copy_or_new(key)
+            self._run_chunk(key, state, change, dict(self._accounts_batches_by_client), out)
+        elif kind == "file_eof":
+            key = FileKey(client_id=change["client_id"], rel_path=change["rel_path"])
+            state = self._files.get(key)
+            if state is not None:
+                self._run_finish(
+                    key, _copy_file_state(state), dict(self._accounts_batches_by_client), out
+                )
+        elif kind == "client_eof":
+            accounts_counts = dict(self._accounts_batches_by_client)
+            for key in [k for k in self._files if k.client_id == change["client_id"]]:
+                self._run_finish(key, _copy_file_state(self._files[key]), accounts_counts, out)
+        else:
+            raise ValueError(f"unknown change type: {kind}")
+        return out
 
     # ---------- WorkerState protocol ----------
 
@@ -151,31 +220,45 @@ class FileSplitterState:
         # Single mutation path — runs both live and during WAL replay.
         kind = change["type"]
         if kind == "chunk":
-            self._apply_chunk(change)
+            key = FileKey(client_id=change["client_id"], rel_path=change["rel_path"])
+            state = self._state_for(key)
+            self._run_chunk(key, state, change, self._accounts_batches_by_client, None)
+            self._chunks_received += 1
         elif kind == "file_eof":
-            self._apply_file_eof(change["client_id"], change["rel_path"])
+            self._finish_and_remove(
+                FileKey(client_id=change["client_id"], rel_path=change["rel_path"])
+            )
+            self._eofs_received += 1
         elif kind == "client_eof":
-            self._apply_client_eof(change["client_id"])
+            for key in [k for k in self._files if k.client_id == change["client_id"]]:
+                self._finish_and_remove(key)
+            self._eofs_received += 1
         else:
             raise ValueError(f"unknown change type: {kind}")
 
-    # ---------- chunk processing ----------
+    # ---------- shared accumulation ----------
+    #
+    # Each _run_* mutates the FileState it is given and, when `out` is not None,
+    # appends the emitted plain outputs. apply_change passes the real state and
+    # out=None (mutation only); simulate passes a copy and a collector (outputs
+    # only). Both must run identical logic so emitted outputs match applied state.
 
-    def _apply_chunk(self, change: dict) -> None:
-        key = FileKey(client_id=change["client_id"], rel_path=change["rel_path"])
-        state = self._state_for(key)
+    def _run_chunk(
+        self, key: FileKey, state: FileState, change: dict, accounts_counts: dict, out
+    ) -> None:
         if state.file_type is None:
             # file_type is set once from the first chunk; subsequent chunks carry it
             # redundantly but we ignore them to match live worker behavior.
             state.file_type = change["file_type"]
         payload = base64.b64decode(change["payload_b64"])
         for line in state.splitter.push(change["offset"], payload):
-            self._process_line(key, state, line)
+            self._run_line(key, state, line, accounts_counts, out)
         state.bytes_received += len(payload)
         state.chunks_received += 1
-        self._chunks_received += 1
 
-    def _process_line(self, key: FileKey, state: FileState, line: bytes) -> None:
+    def _run_line(
+        self, key: FileKey, state: FileState, line: bytes, accounts_counts: dict, out
+    ) -> None:
         state.lines_seen += 1
         if state.file_type == FILE_TYPE_ACCOUNTS and not self._accounts_enabled:
             return
@@ -185,18 +268,85 @@ class FileSplitterState:
             clean = line[:-1] if line.endswith(b"\r") else line
             state.header = tuple(parse_csv_line(clean))
             return
-        self._accumulate_line(key, state, line)
+        self._run_accumulate(key, state, line, accounts_counts, out)
 
-    def _accumulate_line(self, key: FileKey, state: FileState, line: bytes) -> None:
+    def _run_accumulate(
+        self, key: FileKey, state: FileState, line: bytes, accounts_counts: dict, out
+    ) -> None:
         # 4-byte length prefix per string item, matching LineBatchSerializer wire format.
         line_size = 4 + len(line)
         if state.batch_lines and self._packet_size(key, state, line_size) > self._max_batch_bytes:
-            self._flush_batch_state(key, state)
+            self._run_flush(key, state, accounts_counts, out)
         if not state.batch_lines:
             state.batch_first_line_number = state.lines_seen
             state.batch_payload_bytes = 0
         state.batch_lines.append(line)
         state.batch_payload_bytes += line_size
+
+    def _run_flush(
+        self, key: FileKey, state: FileState, accounts_counts: dict, out
+    ) -> None:
+        if not state.batch_lines:
+            return
+        if out is not None:
+            batch = LineBatch(
+                file_type=state.file_type,
+                rel_path=key.rel_path,
+                batch_id=state.batch_id,
+                first_line_number=state.batch_first_line_number,
+                header=state.header,
+                lines=tuple(state.batch_lines),
+            )
+            edge = ACCOUNTS_EDGE if state.file_type == FILE_TYPE_ACCOUNTS else LINE_BATCH_EDGE
+            out.append((edge, MessageType.DATA, self._line_batch_serializer.serialize(batch)))
+        state.data_lines_emitted += len(state.batch_lines)
+        state.batches_emitted += 1
+        if state.file_type == FILE_TYPE_ACCOUNTS:
+            accounts_counts[key.client_id] = accounts_counts.get(key.client_id, 0) + 1
+        state.batch_id += 1
+        state.batch_lines = []
+        state.batch_first_line_number = 0
+        state.batch_payload_bytes = 0
+
+    def _run_finish(
+        self, key: FileKey, state: FileState, accounts_counts: dict, out
+    ) -> None:
+        for line in state.splitter.finish():
+            self._run_line(key, state, line, accounts_counts, out)
+        self._run_flush(key, state, accounts_counts, out)
+        if out is not None:
+            if state.file_type == FILE_TYPE_TRANSACTIONS:
+                out.append(
+                    (LINE_BATCH_EDGE, MessageType.EOF, self._eof_payload(state.data_lines_emitted))
+                )
+            elif state.file_type == FILE_TYPE_ACCOUNTS and self._accounts_enabled:
+                out.append(
+                    (
+                        ACCOUNTS_EDGE,
+                        MessageType.EOF,
+                        self._eof_payload(accounts_counts.get(key.client_id, 0)),
+                    )
+                )
+        if state.file_type == FILE_TYPE_ACCOUNTS and self._accounts_enabled:
+            # Mirrors _send_accounts_eof() in the live worker, which pops the
+            # counter when emitting the accounts EOF output.
+            accounts_counts.pop(key.client_id, None)
+
+    def _finish_and_remove(self, key: FileKey) -> None:
+        state = self._files.get(key)
+        if state is None:
+            return
+        self._run_finish(key, state, self._accounts_batches_by_client, None)
+        del self._files[key]
+
+    def _eof_payload(self, expected_total: int) -> bytes:
+        return self._control_serializer.serialize(
+            ControlMessage(
+                sender_id=self._splitter_id,
+                expected_total=expected_total,
+                processed_count=0,
+            )
+        )
 
     def _packet_size(self, key: FileKey, state: FileState, extra: int = 0) -> int:
         # Reproduces _batch_packet_size() from file_splitter.py exactly.
@@ -211,51 +361,43 @@ class FileSplitterState:
         )
         return fixed_size + rel_path_bytes + header_bytes + state.batch_payload_bytes + extra
 
-    def _flush_batch_state(self, key: FileKey, state: FileState) -> None:
-        # Updates all batch counters as if a batch was sent; no actual I/O.
-        if not state.batch_lines:
-            return
-        state.data_lines_emitted += len(state.batch_lines)
-        state.batches_emitted += 1
-        if state.file_type == FILE_TYPE_ACCOUNTS:
-            self._accounts_batches_by_client[key.client_id] = (
-                self._accounts_batches_by_client.get(key.client_id, 0) + 1
-            )
-        state.batch_id += 1
-        state.batch_lines.clear()
-        state.batch_first_line_number = 0
-        state.batch_payload_bytes = 0
-
-    # ---------- EOF processing ----------
-
-    def _finish_file(self, key: FileKey) -> None:
-        state = self._files.get(key)
-        if state is None:
-            return
-        for line in state.splitter.finish():
-            self._process_line(key, state, line)
-        self._flush_batch_state(key, state)
-        if state.file_type == FILE_TYPE_ACCOUNTS and self._accounts_enabled:
-            # Mirrors _send_accounts_eof() in the live worker, which pops the
-            # counter when emitting the accounts EOF output to the outbox.
-            self._accounts_batches_by_client.pop(key.client_id, None)
-        del self._files[key]
-
-    def _apply_file_eof(self, client_id: int, rel_path: str) -> None:
-        self._finish_file(FileKey(client_id=client_id, rel_path=rel_path))
-        self._eofs_received += 1
-
-    def _apply_client_eof(self, client_id: int) -> None:
-        for key in [k for k in self._files if k.client_id == client_id]:
-            self._finish_file(key)
-        self._eofs_received += 1
-
     def _state_for(self, key: FileKey) -> FileState:
         state = self._files.get(key)
         if state is None:
             state = FileState(splitter=LineSplitter(self._max_line_bytes))
             self._files[key] = state
         return state
+
+    def _copy_or_new(self, key: FileKey) -> FileState:
+        state = self._files.get(key)
+        if state is None:
+            return FileState(splitter=LineSplitter(self._max_line_bytes))
+        return _copy_file_state(state)
+
+
+def _copy_file_state(state: FileState) -> FileState:
+    # Cheap copy for read-only simulation: the only field the accumulation mutates
+    # in place is batch_lines (appended to / replaced), so a shallow list copy is
+    # enough — pending and header are immutable and safe to share. Avoids
+    # copy.deepcopy, which is markedly slower on the splitter's hot path.
+    return FileState(
+        splitter=LineSplitter(
+            max_line_bytes=state.splitter.max_line_bytes,
+            expected_offset=state.splitter.expected_offset,
+            pending=state.splitter.pending,
+        ),
+        file_type=state.file_type,
+        header=state.header,
+        batch_lines=list(state.batch_lines),
+        batch_first_line_number=state.batch_first_line_number,
+        batch_payload_bytes=state.batch_payload_bytes,
+        batch_id=state.batch_id,
+        lines_seen=state.lines_seen,
+        data_lines_emitted=state.data_lines_emitted,
+        batches_emitted=state.batches_emitted,
+        chunks_received=state.chunks_received,
+        bytes_received=state.bytes_received,
+    )
 
 
 def _filestate_from_dict(d: dict) -> FileState:
@@ -269,7 +411,7 @@ def _filestate_from_dict(d: dict) -> FileState:
         ),
         file_type=d["file_type"],
         # asdict() converts tuple fields to lists in some serialization paths;
-        # restore the tuple invariant that _process_line and _packet_size expect.
+        # restore the tuple invariant that _run_line and _packet_size expect.
         header=tuple(d["header"]) if d["header"] is not None else None,
         batch_lines=[bytes(line) for line in d["batch_lines"]],
         batch_first_line_number=d["batch_first_line_number"],
