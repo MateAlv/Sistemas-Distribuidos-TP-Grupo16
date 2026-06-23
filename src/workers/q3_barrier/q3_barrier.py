@@ -178,6 +178,10 @@ class Q3BarrierWorker:
                         ), []
                 elif msg_type == MessageType.EOF:
                     ready = self._state.has_candidate_eof(client_id)
+                    logging.info(
+                        "q3_barrier_avg_eof | id=%s | client_id=%s | ready=%s",
+                        ID, client_id, ready,
+                    )
 
                     def bfn(_pl):
                         eof_change = Q3BarrierState.avg_eof_change(client_id)
@@ -218,6 +222,11 @@ class Q3BarrierWorker:
                     control = self.control_serializer.deserialize(payload)
                     expected_total = control.expected_total
                     ready = self._state.has_avg_eof(client_id)
+                    logging.info(
+                        "q3_barrier_candidate_eof | id=%s | client_id=%s | "
+                        "ready=%s | expected_total=%s",
+                        ID, client_id, ready, expected_total,
+                    )
 
                     def bfn(_pl):
                         eof_change = Q3BarrierState.candidate_eof_change(

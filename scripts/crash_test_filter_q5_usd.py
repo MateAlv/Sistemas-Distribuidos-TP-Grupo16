@@ -30,7 +30,10 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-COMPOSE_FILE = ROOT / "docker-compose.test.yaml"
+sys.path.insert(0, str(ROOT / "scripts"))
+from crash_test_paths import resolve_compose_file  # noqa: E402
+
+COMPOSE_FILE = ROOT / "tmp" / "crash-tests" / "docker-compose.filter-q5-usd.yaml"
 PROJECT = "crash-test-filter-q5-usd"
 CONTAINER_PREFIX = "filter_q5_usd"
 
@@ -45,7 +48,17 @@ CLIENT_TIMEOUT = 600    # seconds to wait for client_0 to finish
 # ---------------------------------------------------------------------------
 
 def compose(project, *args):
-    return ["docker", "compose", "-p", project, "-f", str(COMPOSE_FILE), *args]
+    return [
+        "docker",
+        "compose",
+        "--project-directory",
+        str(ROOT),
+        "-p",
+        project,
+        "-f",
+        str(COMPOSE_FILE),
+        *args,
+    ]
 
 
 def run(cmd, check=False, **kw):
@@ -190,9 +203,18 @@ def validate() -> bool:
 # ---------------------------------------------------------------------------
 
 def main():
+    global COMPOSE_FILE
+
     args = parse_args()
     scenario = args.scenario
     keep = args.keep
+    COMPOSE_FILE = resolve_compose_file(
+        ROOT,
+        args.compose_file,
+        "filter-q5-usd",
+        scenario,
+        DATASET,
+    )
 
     if scenario == "smoke":
         target = f"{CONTAINER_PREFIX}_0"
@@ -275,6 +297,10 @@ def parse_args():
     p = argparse.ArgumentParser(description="Crash-recovery test for filter_q5_usd")
     p.add_argument("--scenario", choices=["smoke", "A", "B"], required=True)
     p.add_argument("--keep", action="store_true", help="Leave stack running after test")
+    p.add_argument(
+        "--compose-file",
+        help="Path for the generated compose file (default: tmp/crash-tests/...).",
+    )
     return p.parse_args()
 
 

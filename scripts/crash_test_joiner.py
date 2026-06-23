@@ -31,9 +31,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+from crash_test_paths import resolve_compose_file  # noqa: E402
 import reference_results as ref  # noqa: E402
 
-COMPOSE_FILE = ROOT / "docker-compose.crash-test.yaml"
+COMPOSE_FILE = ROOT / "tmp" / "crash-tests" / "docker-compose.joiner.yaml"
 
 KILL_DELAY_AFTER_START = 10
 TRIGGER_TIMEOUT = 120
@@ -56,7 +57,17 @@ _SCENARIOS = {
 # ---------------------------------------------------------------------------
 
 def compose(project, *args):
-    return ["docker", "compose", "-p", project, "-f", str(COMPOSE_FILE), *args]
+    return [
+        "docker",
+        "compose",
+        "--project-directory",
+        str(ROOT),
+        "-p",
+        project,
+        "-f",
+        str(COMPOSE_FILE),
+        *args,
+    ]
 
 
 def run(cmd, check=False, **kw):
@@ -193,9 +204,18 @@ def validate(dataset: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def main():
+    global COMPOSE_FILE
+
     args = parse_args()
     scenario = args.scenario
     dataset = args.dataset
+    COMPOSE_FILE = resolve_compose_file(
+        ROOT,
+        args.compose_file,
+        "joiner",
+        scenario,
+        dataset,
+    )
     cfg = _SCENARIOS[scenario]
     target = cfg["container"]
     kill_pattern = cfg["kill_pattern"]
@@ -281,6 +301,10 @@ def parse_args():
     p.add_argument(
         "--keep", action="store_true", default=False,
         help="Leave the stack up after the test (for log inspection)",
+    )
+    p.add_argument(
+        "--compose-file",
+        help="Path for the generated compose file (default: tmp/crash-tests/...).",
     )
     return p.parse_args()
 

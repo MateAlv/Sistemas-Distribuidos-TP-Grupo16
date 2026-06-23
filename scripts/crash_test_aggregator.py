@@ -33,9 +33,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+from crash_test_paths import resolve_compose_file  # noqa: E402
 import reference_results as ref  # noqa: E402  (after path insert)
 
-COMPOSE_FILE = ROOT / "docker-compose.crash-test.yaml"
+COMPOSE_FILE = ROOT / "tmp" / "crash-tests" / "docker-compose.aggregator.yaml"
 
 # Seconds to sleep after the start log before killing, so the worker
 # has time to process at least a few messages and write WAL entries.
@@ -84,7 +85,17 @@ _QUERY_CFG = {
 # ---------------------------------------------------------------------------
 
 def compose(project, *args):
-    return ["docker", "compose", "-p", project, "-f", str(COMPOSE_FILE), *args]
+    return [
+        "docker",
+        "compose",
+        "--project-directory",
+        str(ROOT),
+        "-p",
+        project,
+        "-f",
+        str(COMPOSE_FILE),
+        *args,
+    ]
 
 
 def run(cmd, check=False, **kw):
@@ -231,10 +242,20 @@ def validate(dataset: str, query: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def main():
+    global COMPOSE_FILE
+
     args = parse_args()
     scenario = args.scenario
     dataset = args.dataset
     query = args.query
+    COMPOSE_FILE = resolve_compose_file(
+        ROOT,
+        args.compose_file,
+        "aggregator",
+        query,
+        scenario,
+        dataset,
+    )
 
     cfg = _QUERY_CFG[query]
     prefix = cfg["container_prefix"]
@@ -343,6 +364,10 @@ def parse_args():
     p.add_argument(
         "--keep", action="store_true", default=False,
         help="Leave the stack up after the test (for log inspection)",
+    )
+    p.add_argument(
+        "--compose-file",
+        help="Path for the generated compose file (default: tmp/crash-tests/...).",
     )
     return p.parse_args()
 

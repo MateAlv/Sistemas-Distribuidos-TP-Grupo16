@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-"""Crash-recovery smoke test for q2_bank_name_joiner on LI-Small.
+"""Crash-recovery smoke test for the q3_barrier worker on Q3.
 
-The worker is a single instance with two input streams, so the three scenarios
-target different recovery windows inside the same container instead of
-leader/non-leader replicas:
+The worker joins two input streams per client: Q3 averages from join_q3 and
+candidate transactions from the date/usd filter path. These scenarios target
+the recovery windows that matter for that barrier.
 
 Scenarios
 ---------
   smoke   Kill after startup and a short delay, while DATA is being processed.
-          Exercises WAL replay for accumulated Q2/accounts state.
+          Exercises WAL replay for averages and candidate disk-log state.
 
-  A       Kill right after the Q2 EOF is observed.
-          Exercises recovery after one stream is complete.
+  A       Kill right after an averages EOF is observed.
+          Exercises recovery when the averages side of the barrier is complete.
 
-  B       Kill right after the accounts EOF is observed.
-          Exercises the ready/emit edge where joined outputs may be in outbox.
+  B       Kill right after a candidates EOF is observed.
+          Exercises recovery when the candidate side may be ready to emit.
 
 Usage
 -----
-  venv/bin/python scripts/crash_test_q2_bank_name_joiner.py --scenario smoke
-  venv/bin/python scripts/crash_test_q2_bank_name_joiner.py --scenario A
-  venv/bin/python scripts/crash_test_q2_bank_name_joiner.py --scenario B --keep
+  venv/bin/python scripts/crash_test_q3_barrier.py --scenario smoke --dataset LI-Small
+  venv/bin/python scripts/crash_test_q3_barrier.py --scenario A
+  venv/bin/python scripts/crash_test_q3_barrier.py --scenario B --keep
 """
 
 from __future__ import annotations
@@ -40,29 +40,29 @@ from crash_test_paths import resolve_compose_file  # noqa: E402
 import reference_results as ref  # noqa: E402
 
 
-COMPOSE_FILE = ROOT / "tmp" / "crash-tests" / "docker-compose.q2-bank-name-joiner.yaml"
-PROJECT = "crash-test-q2-bank-name-joiner"
-DATASET = "LI-Small"
-TARGET = "q2_bank_name_joiner"
+COMPOSE_FILE = ROOT / "tmp" / "crash-tests" / "docker-compose.q3-barrier.yaml"
+PROJECT = "crash-test-q3-barrier"
+DEFAULT_DATASET = "LI-Small"
+TARGET = "q3_barrier_0"
 
 TRIGGER_TIMEOUT = 120
 CLIENT_TIMEOUT = 300
 
 _SCENARIOS = {
     "smoke": {
-        "pattern": "q2_bank_name_joiner_start | id=0",
+        "pattern": "q3_barrier_start | id=0",
         "delay": 10,
         "description": "kill during DATA after startup",
     },
     "A": {
-        "pattern": "q2_bank_name_joiner_q2_eof | id=0",
+        "pattern": "q3_barrier_avg_eof | id=0",
         "delay": 0,
-        "description": "kill after Q2 EOF",
+        "description": "kill after averages EOF",
     },
     "B": {
-        "pattern": "q2_bank_name_joiner_accounts_eof | id=0",
+        "pattern": "q3_barrier_candidate_eof | id=0",
         "delay": 0,
-        "description": "kill after accounts EOF / ready edge",
+        "description": "kill after candidates EOF / ready edge",
     },
 }
 
@@ -95,7 +95,7 @@ def log(msg: str) -> None:
 
 
 def die(msg: str, code: int = 1) -> None:
-    print(f"\n✗ {msg}", file=sys.stderr)
+    print(f"\n{ref.red('ERROR')} {msg}", file=sys.stderr)
     sys.exit(code)
 
 
@@ -105,7 +105,7 @@ class LogWatcher(threading.Thread):
         self.container = container
         self.pattern = pattern
         self.matched = threading.Event()
-        self._stop = threading.Event()
+        self._stop_requested = threading.Event()
 
     def run(self) -> None:
         proc = subprocess.Popen(
@@ -115,8 +115,9 @@ class LogWatcher(threading.Thread):
             text=True,
         )
         try:
+            assert proc.stdout is not None
             for line in proc.stdout:
-                if self._stop.is_set():
+                if self._stop_requested.is_set():
                     break
                 if self.pattern in line:
                     self.matched.set()
@@ -128,22 +129,22 @@ class LogWatcher(threading.Thread):
         return self.matched.wait(timeout=timeout)
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_requested.set()
 
 
-def generate_compose() -> None:
+def generate_compose(dataset: str) -> None:
     cmd = [
         sys.executable,
         str(ROOT / "scripts" / "generate_compose.py"),
         "--preset",
-        "q2-test",
+        "q3-test",
         "--dataset",
-        DATASET,
+        dataset,
         "--test-output",
         str(COMPOSE_FILE),
         "--skip-output",
     ]
-    log(f"Generating compose (q2-test, dataset={DATASET})...")
+    log(f"Generating compose (q3-test, dataset={dataset})...")
     run(cmd, check=True)
 
 
@@ -186,20 +187,20 @@ def wait_for_client(timeout: int) -> bool:
 def clear_output() -> None:
     out = ROOT / "data" / "output"
     out.mkdir(parents=True, exist_ok=True)
-    for path in out.glob("results_q2*.csv"):
+    for path in out.glob("results_q3*.csv"):
         path.unlink()
 
 
-def validate() -> bool:
-    dataset_dir = ROOT / "data" / "datasets" / DATASET
-    log("Validating Q2 output...")
+def validate(dataset: str) -> bool:
+    dataset_dir = ROOT / "data" / "datasets" / dataset
+    log("Validating Q3 output...")
     env = {
         **os.environ,
-        "Q2_DATASET_DIR": str(dataset_dir),
-        "Q2_DATASET_TRANS": f"{DATASET}_Trans.csv",
+        "Q3_DATASET_DIR": str(dataset_dir),
+        "Q3_DATASET_TRANS": f"{dataset}_Trans.csv",
     }
     result = run(
-        [sys.executable, str(ROOT / "scripts" / "validate_q2_output.py")],
+        [sys.executable, str(ROOT / "scripts" / "validate_q3_output.py")],
         env=env,
     )
     return result.returncode == 0
@@ -210,23 +211,24 @@ def main() -> int:
 
     args = parse_args()
     scenario = args.scenario
+    dataset = args.dataset
     COMPOSE_FILE = resolve_compose_file(
         ROOT,
         args.compose_file,
-        "q2-bank-name-joiner",
+        "q3-barrier",
         scenario,
-        DATASET,
+        dataset,
     )
     cfg = _SCENARIOS[scenario]
 
     log(
-        "=== Crash test: worker=q2_bank_name_joiner "
-        f"scenario={scenario} target={TARGET} dataset={DATASET} ==="
+        "=== Crash test: worker=q3_barrier "
+        f"scenario={scenario} target={TARGET} dataset={dataset} ==="
     )
     log(f"Scenario detail: {cfg['description']}")
     print()
 
-    generate_compose()
+    generate_compose(dataset)
     teardown(keep=False)
     clear_output()
     build_and_start()
@@ -269,14 +271,14 @@ def main() -> int:
         teardown(args.keep)
         die(f"client_0 did not finish after crash+restart of {TARGET}")
 
-    ok = validate()
+    ok = validate(dataset)
     teardown(args.keep)
 
     print()
     if ok:
-        print(ref.green(f"✓✓✓ CRASH TEST PASSED (scenario={scenario}) ✓✓✓"))
+        print(ref.green(f"CRASH TEST PASSED (scenario={scenario})"))
         return 0
-    print(ref.red(f"✗✗✗ CRASH TEST FAILED (scenario={scenario}) ✗✗✗"))
+    print(ref.red(f"CRASH TEST FAILED (scenario={scenario})"))
     return 1
 
 
@@ -296,6 +298,12 @@ def parse_args():
         action="store_true",
         default=False,
         help="Leave the stack up after the test (for log inspection)",
+    )
+    parser.add_argument(
+        "--dataset",
+        default=DEFAULT_DATASET,
+        choices=["LI-Mini", "LI-Small"],
+        help=f"Dataset to use (default: {DEFAULT_DATASET})",
     )
     parser.add_argument(
         "--compose-file",

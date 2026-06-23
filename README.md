@@ -232,9 +232,18 @@ venv/bin/python scripts/crash_test_aggregator.py --query q5 --scenario B --datas
 venv/bin/python scripts/crash_test_q2_bank_name_joiner.py --scenario smoke
 venv/bin/python scripts/crash_test_q2_bank_name_joiner.py --scenario A
 venv/bin/python scripts/crash_test_q2_bank_name_joiner.py --scenario B --keep
+
+# q3_barrier — dataset LI-Small, DATA / EOF averages / EOF candidates
+venv/bin/python scripts/crash_test_q3_barrier.py --scenario smoke --dataset LI-Small
+venv/bin/python scripts/crash_test_q3_barrier.py --scenario A --dataset LI-Small
+venv/bin/python scripts/crash_test_q3_barrier.py --scenario B --dataset LI-Small --keep
 ```
 
 Usar `venv/bin/python` (no `python3`): el script llama a `generate_compose.py` que necesita el paquete `yaml` del venv.
+
+Cada crash test genera su compose bajo `tmp/crash-tests/` con un nombre propio
+para la query/escenario/dataset. Si hace falta inspeccionar o reutilizar una
+ruta concreta, se puede pasar `--compose-file <path>`.
 
 Al terminar imprime `✓✓✓ CRASH TEST PASSED` o `✗✗✗ CRASH TEST FAILED` con los logs del container para debuggear.
 
