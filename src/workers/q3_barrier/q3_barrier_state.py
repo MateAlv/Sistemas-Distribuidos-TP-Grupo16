@@ -3,100 +3,77 @@
 Wraps the barrier's per-client state behind the snapshot/restore/apply_change
 contract the durable-state engine expects.
 
-This worker receives data from two independent streams (averages + candidates)
-and emits filtered candidates once both streams have fully arrived. No
-EofCoordinator is used.
+This worker joins two independent streams (averages + candidates) per client and
+emits the filtered candidates once both streams have signalled EOF (the barrier).
+No EofCoordinator is used.
 
-STATE LIMITATION — disk log
+Durable disk log (named file)
 -----------------------------
-Candidate batches are stored in a _DiskLog backed by tempfile.TemporaryFile().
-TemporaryFile is anonymous (no filesystem path on Linux after creation) so its
-content cannot be included in snapshot(). Only the "light" state is snapshotted:
-averages, EOF flags, and expected_total counters.
-
-On crash recovery the disk log is rebuilt entirely from WAL replay: every
-"candidate_data" change that arrived AFTER the last snapshot checkpoint is
-re-applied by apply_change, which re-appends the raw batch to a fresh disk log.
-Batches that arrived BEFORE the last snapshot checkpoint are lost and cannot be
-recovered without replacing TemporaryFile with a named file under STATE_DIR.
-
-Mitigation options (not implemented):
-  - Set snapshot_interval = ∞ so the WAL accumulates all messages; a full
-    replay always rebuilds the disk log completely.
-  - Replace _DiskLog with a named file in STATE_DIR and include its path in
-    snapshot() so restore() can re-open it.
+Candidate batches are appended to a per-client named file under STATE_DIR
+(``q3cand_{node_id}_{client_id}.log``). The file survives a crash; the snapshot
+records each open client's byte length, and restore() truncates the file back to
+that length so a WAL replay re-appends exactly the post-checkpoint batches (no
+double-append). The append-then-WAL ordering is made consistent by this
+truncate-to-snapshot-offset + replay, so the file always matches the WAL.
 
 Change types
 ------------
-  "avg_data"
-      One average DATA arrived. Carries payment_format + average value as JSON-
-      safe primitives (no base64 needed).
-  "avg_eof"
-      Averages stream EOF arrived. Sets avg_expected_total.
-  "candidate_data"
-      One candidate batch arrived. Carries the raw payload (base64) so
-      apply_change can re-append it to the disk log on WAL replay.
-  "candidate_eof"
-      Candidates stream EOF arrived. Sets candidates_expected_total.
-  "close"
-      Client was fully emitted and cleaned up. Closes the disk log fd and
-      marks the client closed.
+  "avg_data"        one average DATA (payment_format -> average; idempotent set).
+  "avg_eof"         averages stream EOF.
+  "candidate_data"  one candidate batch; raw payload (base64) re-appended on replay.
+  "candidate_eof"   candidates stream EOF (carries expected_total).
+  "close"           both streams done + emitted; drop state and delete the file.
+  "compound"        apply several of the above atomically (EOF that closes the
+                    barrier bundles eof + close).
 
-Caller protocol (one change dict per handle() call to PersistentStateHandler)
-------------------------------------------------------------------------------
-  Averages DATA message
-    → avg_data_change(client_id, payment_format, avg_value)
-
-  Averages EOF message
-    → avg_eof_change(client_id, expected_total)
-    If both streams complete after applying: emit + → close_change(client_id)
-
-  Candidates DATA message
-    → candidate_data_change(client_id, payload)
-    (Batches are buffered in the disk log; no emit until both streams done.)
-
-  Candidates EOF message
-    → candidate_eof_change(client_id, expected_total)
-    If both streams complete after applying:
-      Stream disk log → filter by average → emit to outbox.
-      → close_change(client_id)
-
-State accessors (read before close_change)
-------------------------------------------
-  averages_for(client_id)   → dict[str, float]  payment_format → average
-  disk_log_for(client_id)   → _DiskLog          iterate batches from disk
-  is_ready(client_id)       → bool  True when both stream EOFs received + counts match
+State accessors (read before close_change, at emit time)
+--------------------------------------------------------
+  averages(client_id)   -> dict[str, float]
+  disk_log(client_id)   -> _DiskLog | None   (iterate raw batches from disk)
+  is_ready(client_id)   -> bool  (both stream EOFs received)
 """
 
 from __future__ import annotations
 
 import base64
-import tempfile
+import os
 
 _RECORD_LEN_SIZE = 4
 
 
 class _DiskLog:
-    """Append-only log backed by a TemporaryFile; rebuilt from WAL on recovery."""
+    """Append-only log backed by a named file under STATE_DIR.
 
-    def __init__(self) -> None:
-        self._file = tempfile.TemporaryFile()
-        self.batch_count: int = 0
-        self.byte_count: int = 0
+    Durable across crashes: the file persists, the snapshot records ``byte_count``,
+    and restore() truncates back to it so WAL replay re-appends the rest."""
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+        # "a+b" creates if missing and appends; reopened verbatim on restore.
+        self._file = open(path, "a+b")
+        self._file.seek(0, os.SEEK_END)
+        self.byte_count: int = self._file.tell()
 
     def append(self, payload: bytes) -> None:
         n = len(payload)
         self._file.write(n.to_bytes(_RECORD_LEN_SIZE, "big"))
         self._file.write(payload)
-        self.batch_count += 1
-        self.byte_count += n
+        self._file.flush()
+        self.byte_count += _RECORD_LEN_SIZE + n
+
+    def truncate_to(self, byte_count: int) -> None:
+        """Drop everything past ``byte_count`` (post-snapshot appends); replay
+        re-adds exactly those records."""
+        self._file.truncate(byte_count)
+        self._file.seek(0, os.SEEK_END)
+        self.byte_count = self._file.tell()
 
     def iter_raw_batches(self):
-        """Sequential iterator; yields raw batch payloads in append order."""
+        """Sequential iterator; yields raw batch payloads in append order. O(1) RAM."""
         self._file.seek(0)
         while True:
             header = self._file.read(_RECORD_LEN_SIZE)
-            if not header:
+            if not header or len(header) < _RECORD_LEN_SIZE:
                 return
             n = int.from_bytes(header, "big")
             yield self._file.read(n)
@@ -107,20 +84,31 @@ class _DiskLog:
         except Exception:
             pass
 
+    def delete(self) -> None:
+        self.close()
+        try:
+            os.remove(self._path)
+        except OSError:
+            pass
+
 
 class Q3BarrierState:
-    def __init__(self) -> None:
+    def __init__(self, state_dir: str, node_id: str) -> None:
+        self._state_dir = state_dir or "."
+        self._node_id = node_id
         self._averages_by_client: dict[int, dict[str, float]] = {}
         self._avg_eof_by_client: set[int] = set()
         self._candidates_eof_by_client: set[int] = set()
         self._expected_total_by_client: dict[int, int] = {}
         self._closed_by_client: set[int] = set()
-        # Disk logs are intentionally NOT in the snapshot — see module docstring.
+        # Disk log content lives in the named files; the snapshot only records the
+        # byte length per open client (see _DiskLog).
         self._disk_logs: dict[int, _DiskLog] = {}
+
+    # ---------- change constructors ----------
 
     @staticmethod
     def avg_data_change(client_id: int, payment_format: str, average: float) -> dict:
-        # payment_format and average are JSON-safe primitives; no base64 needed.
         return {
             "type": "avg_data",
             "client_id": client_id,
@@ -134,7 +122,6 @@ class Q3BarrierState:
 
     @staticmethod
     def candidate_data_change(client_id: int, payload: bytes) -> dict:
-        # payload is base64 because the WAL frames state_change dicts as JSON.
         return {
             "type": "candidate_data",
             "client_id": client_id,
@@ -153,15 +140,25 @@ class Q3BarrierState:
     def close_change(client_id: int) -> dict:
         return {"type": "close", "client_id": client_id}
 
+    @staticmethod
+    def compound_change(*changes: dict) -> dict:
+        return {"type": "compound", "changes": list(changes)}
+
+    # ---------- read accessors ----------
+
     def averages(self, client_id: int) -> dict[str, float]:
         return self._averages_by_client.get(client_id, {})
 
     def disk_log(self, client_id: int) -> _DiskLog | None:
-        """Read-only access to disk log; used at emit time before close_change."""
         return self._disk_logs.get(client_id)
 
+    def has_avg_eof(self, client_id: int) -> bool:
+        return client_id in self._avg_eof_by_client
+
+    def has_candidate_eof(self, client_id: int) -> bool:
+        return client_id in self._candidates_eof_by_client
+
     def is_ready(self, client_id: int) -> bool:
-        """Both streams have signalled EOF — emit can proceed."""
         return (
             client_id in self._avg_eof_by_client
             and client_id in self._candidates_eof_by_client
@@ -173,20 +170,21 @@ class Q3BarrierState:
     # ---------- WorkerState protocol ----------
 
     def snapshot(self) -> dict:
-        # disk_log content is intentionally excluded — see module docstring.
         return {
             "averages_by_client": {
-                cid: dict(avgs)
-                for cid, avgs in self._averages_by_client.items()
+                cid: dict(avgs) for cid, avgs in self._averages_by_client.items()
             },
             "avg_eof_by_client": set(self._avg_eof_by_client),
             "candidates_eof_by_client": set(self._candidates_eof_by_client),
             "expected_total_by_client": dict(self._expected_total_by_client),
             "closed_by_client": set(self._closed_by_client),
+            # Per open client: the durable file's length at this checkpoint.
+            "disk_log_bytes": {
+                cid: log.byte_count for cid, log in self._disk_logs.items()
+            },
         }
 
     def restore(self, data: dict) -> None:
-        # Discard existing disk logs — WAL replay will rebuild them.
         for log in self._disk_logs.values():
             log.close()
         self._disk_logs = {}
@@ -200,17 +198,24 @@ class Q3BarrierState:
             return
 
         self._averages_by_client = {
-            cid: dict(avgs)
-            for cid, avgs in data["averages_by_client"].items()
+            cid: dict(avgs) for cid, avgs in data["averages_by_client"].items()
         }
         self._avg_eof_by_client = set(data["avg_eof_by_client"])
         self._candidates_eof_by_client = set(data["candidates_eof_by_client"])
         self._expected_total_by_client = dict(data["expected_total_by_client"])
         self._closed_by_client = set(data["closed_by_client"])
+        # Reopen each open client's file and truncate to the checkpoint length; the
+        # WAL replay that follows re-appends the post-checkpoint candidate batches.
+        for cid, byte_count in data.get("disk_log_bytes", {}).items():
+            log = self._disk_log_for(cid)
+            log.truncate_to(byte_count)
 
     def apply_change(self, change: dict) -> None:
-        # Single mutation path — runs both live and during WAL replay.
         kind = change["type"]
+        if kind == "compound":            # check before reading client_id
+            for sub in change["changes"]:
+                self.apply_change(sub)
+            return
         client_id = change["client_id"]
         if kind == "avg_data":
             self._apply_avg_data(client_id, change)
@@ -249,10 +254,9 @@ class Q3BarrierState:
         self._expected_total_by_client[client_id] = change["expected_total"]
 
     def _apply_close(self, client_id: int) -> None:
-        # Close and discard disk log before marking closed — idempotent.
         log = self._disk_logs.pop(client_id, None)
         if log is not None:
-            log.close()
+            log.delete()
         self._averages_by_client.pop(client_id, None)
         self._avg_eof_by_client.discard(client_id)
         self._candidates_eof_by_client.discard(client_id)
@@ -262,6 +266,9 @@ class Q3BarrierState:
     def _disk_log_for(self, client_id: int) -> _DiskLog:
         log = self._disk_logs.get(client_id)
         if log is None:
-            log = _DiskLog()
+            path = os.path.join(
+                self._state_dir, f"q3cand_{self._node_id}_{client_id}.log"
+            )
+            log = _DiskLog(path)
             self._disk_logs[client_id] = log
         return log
