@@ -13,6 +13,8 @@ DEFAULT_QUEUE_PREFIX = "file_splitter"
 DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024
 DEFAULT_MAX_BATCH_BYTES = 64 * 1024
 DEFAULT_LOGGING_LEVEL = "INFO"
+DEFAULT_STATE_DIR = "/worker_state"
+DEFAULT_SNAPSHOT_INTERVAL = 1000
 
 
 def main() -> int:
@@ -54,6 +56,10 @@ def load_config() -> FileSplitterConfig:
     if output_shard_count <= 0:
         raise ValueError("FILE_INGESTOR_AMOUNT must be greater than 0")
 
+    snapshot_interval = get_int("SNAPSHOT_INTERVAL", DEFAULT_SNAPSHOT_INTERVAL)
+    if snapshot_interval <= 0:
+        raise ValueError("SNAPSHOT_INTERVAL must be greater than 0")
+
     return FileSplitterConfig(
         id=splitter_id,
         mom_host=os.getenv("MOM_HOST", DEFAULT_MOM_HOST),
@@ -67,6 +73,8 @@ def load_config() -> FileSplitterConfig:
         logging_level=os.getenv("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
         input_routing_key=os.getenv("FILE_SPLITTER_INPUT_ROUTING_KEY"),
         accounts_output_queue=os.getenv("ACCOUNTS_LINE_BATCH_OUTPUT_QUEUE"),
+        state_dir=os.getenv("STATE_DIR", DEFAULT_STATE_DIR),
+        snapshot_interval=snapshot_interval,
     )
 
 
