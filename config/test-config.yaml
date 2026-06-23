@@ -15,6 +15,16 @@ settings:
   filter_prefetch_count: 50
   snapshot_interval: 1000
 
+monitor:
+  enabled: true
+  count: 3
+  port: 9000
+  election_port: 9001
+  check_interval: 3
+  max_missed: 3
+  election_timeout: 5
+  coordinator_timeout: 10
+
 workers:
   file_splitters: 3
   file_ingestors: 6
