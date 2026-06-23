@@ -57,11 +57,30 @@ State accessors (read before close_change)
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass, field
 
 from common.bank_ids import notebook_bank_id
 from common.domain.partial_result import Q2BankMaxPartial
 from common.message_protocol.internal import Q2BankMaxPartialSerializer
-from workers.q2_bank_name_joiner.bank_name_joiner import ClientState
+
+
+@dataclass
+class ClientState:
+    bank_names: dict[str, list[str]] = field(default_factory=dict)
+    q2_results: dict[str, Q2BankMaxPartial] = field(default_factory=dict)
+    q2_data_count: int = 0
+    q2_expected_total: int | None = None
+    accounts_batch_count: int = 0
+    accounts_expected_total: int | None = None
+
+    def ready(self) -> bool:
+        if self.q2_expected_total is None or self.accounts_expected_total is None:
+            return False
+        if self.q2_data_count < self.q2_expected_total:
+            return False
+        if self.accounts_batch_count < self.accounts_expected_total:
+            return False
+        return True
 
 
 class BankNameJoinerState:
