@@ -93,7 +93,6 @@ services:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - STATE_DIR=/worker_state
-    - SNAPSHOT_INTERVAL=1000
     - FILTER_USD_AMOUNT=1
     - FILTER_USD_EXCHANGE=filter_usd_exchange
     - FILTER_USD_ROUTING_PREFIX=filter_usd
@@ -105,6 +104,7 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
+    - SNAPSHOT_INTERVAL=1000
     - NODE_NAME=file_ingestor_0
     volumes:
     - file_ingestor_0_state:/worker_state
@@ -210,7 +210,6 @@ services:
     - SUM_AMOUNT=1
     - SUM_PREFIX=sum_q2
     - STATE_DIR=/worker_state
-    - SNAPSHOT_INTERVAL=1000
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100000
     - FLOW_LOG_EVERY_BYTES=2147483648
@@ -219,6 +218,7 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
+    - SNAPSHOT_INTERVAL=1000
     - NODE_NAME=aggregation_q2_0
     volumes:
     - aggregation_q2_0_state:/worker_state
