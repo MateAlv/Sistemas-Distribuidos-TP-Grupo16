@@ -227,6 +227,11 @@ venv/bin/python scripts/crash_test_aggregator.py --query q5 --scenario B --datas
 
 # --keep deja el stack vivo para inspeccionar logs
 venv/bin/python scripts/crash_test_aggregator.py --query q5 --scenario B --dataset LI-Small --keep
+
+# q2_bank_name_joiner — dataset LI-Small, tres ventanas de caída
+venv/bin/python scripts/crash_test_q2_bank_name_joiner.py --scenario smoke
+venv/bin/python scripts/crash_test_q2_bank_name_joiner.py --scenario A
+venv/bin/python scripts/crash_test_q2_bank_name_joiner.py --scenario B --keep
 ```
 
 Usar `venv/bin/python` (no `python3`): el script llama a `generate_compose.py` que necesita el paquete `yaml` del venv.
