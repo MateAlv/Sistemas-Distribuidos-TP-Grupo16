@@ -13,7 +13,7 @@ settings:
   connect_timeout_seconds: 30
   io_timeout_seconds: 3600
   filter_prefetch_count: 50
-  snapshot_interval: 10000
+  snapshot_interval: 1000
 
 workers:
   file_splitters: 3
