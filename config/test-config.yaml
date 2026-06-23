@@ -46,8 +46,8 @@ workers:
 clients: 2
 client_accounts:
   - client_id: 0
-    accounts_file: data/datasets/HI-Medium/HI-Medium_accounts.csv
-    transactions_file: data/datasets/HI-Medium/HI-Medium_Trans.csv
+    accounts_file: data/datasets/LI-Mini/LI-Mini_accounts.csv
+    transactions_file: data/datasets/LI-Mini/LI-Mini_Trans.csv
   - client_id: 1
-    accounts_file: data/datasets/HI-Medium/HI-Medium_accounts.csv
-    transactions_file: data/datasets/HI-Medium/HI-Medium_Trans.csv
+    accounts_file: data/datasets/LI-Mini/LI-Mini_accounts.csv
+    transactions_file: data/datasets/LI-Mini/LI-Mini_Trans.csv
