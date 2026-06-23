@@ -132,18 +132,6 @@ class BankNameJoinerWorker:
                     self._config.id, e,
                 )
 
-    def _republish_pending(self) -> None:
-        for entry in self._handler.outbox_to_republish():
-            try:
-                self._send_output(entry.body)
-            except Exception:
-                logging.exception(
-                    "q2_bank_name_joiner_republish_error | id=%s | destination=%s",
-                    self._config.id,
-                    entry.destination,
-                )
-                raise
-
     def _run_q2_consumer(self) -> None:
         self._q2_consumer = middleware.MessageMiddlewareQueueRabbitMQ(
             self._config.mom_host, self._config.q2_input_queue
@@ -291,6 +279,16 @@ class BankNameJoinerWorker:
             nack(requeue=True)
 
     def _change_outputs_for(self, client_id: int, change: dict) -> tuple[dict, list]:
+        # DATA messages can only trigger ready() if both expected_totals are already set
+        # (i.e. both EOFs already arrived). Skip the expensive deepcopy otherwise.
+        if change["type"] in ("q2_data", "accounts_data"):
+            current = self._state.client_state(client_id)
+            if (
+                current is None
+                or current.q2_expected_total is None
+                or current.accounts_expected_total is None
+            ):
+                return change, []
         prospective = self._prospective_state(client_id, change)
         if not prospective.ready():
             return change, []
@@ -407,6 +405,17 @@ class BankNameJoinerWorker:
     def _send_output(self, body: bytes) -> None:
         with self._publish_lock:
             self._output_queue.send(body)
+
+    def _republish_pending(self) -> None:
+        for entry in self._handler.outbox_to_republish():
+            try:
+                self._send_output(entry.body)
+            except Exception:
+                logging.exception(
+                    "q2_bank_name_joiner_republish_error | id=%s | destination=%s",
+                    self._config.id,
+                    entry.destination,
+                )
 
     def _packet(
         self, msg_type: MessageType, client_id: int, seq: int, payload: bytes

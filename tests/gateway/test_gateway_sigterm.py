@@ -10,8 +10,10 @@ all threads are real.
 import socket
 import threading
 import time
+import queue
 
 import gateway.gateway as gw_module
+from common.domain.account import Q2BankMaxResult
 from gateway.gateway import Gateway, GatewayConfig
 
 HANDSHAKE = 1
@@ -27,6 +29,27 @@ class _FakePublisher:
 
     def send(self, *args, **kwargs):
         pass
+
+    def close(self):
+        self.closed = True
+
+
+class _ImmediateConsumer:
+    def __init__(self, messages):
+        self.messages = messages
+        self.closed = False
+        self.acks = 0
+        self.nacks = 0
+
+    def start_consuming(self, callback):
+        for message in self.messages:
+            callback(message, self._ack, self._nack)
+
+    def _ack(self):
+        self.acks += 1
+
+    def _nack(self, *_args, **_kwargs):
+        self.nacks += 1
 
     def close(self):
         self.closed = True
@@ -127,3 +150,36 @@ def test_gateway_sigterm_unblocks_client_and_stops_consumers(pika_env, monkeypat
             pass
 
     assert not runner.is_alive(), "gateway run thread still alive after shutdown"
+
+
+def test_gateway_dedups_addressed_q2_result_redelivery(monkeypatch):
+    monkeypatch.setenv("GATEWAY_Q1_ENABLED", "0")
+    gw = Gateway(_config())
+    client_id = 7
+    result_queue = queue.Queue()
+    gw._client_queues[client_id] = result_queue
+
+    payload = gw_module.Q2BankMaxResultSerializer.serialize(
+        Q2BankMaxResult(
+            bank_id="1",
+            from_account="acc-1",
+            bank_name="Raw One",
+            amount=10.0,
+        )
+    )
+    packet = gw_module.InternalProtocol.create_addressed_packet(
+        msg_type=gw_module.MessageType.DATA,
+        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        sender_id=0,
+        seq=0,
+        payload=payload,
+    )
+    consumer = _ImmediateConsumer([packet, packet])
+
+    gw._run_result_consumer(consumer, gw._q2_csv_lines, "Q2|", addressed=True)
+
+    assert consumer.acks == 2
+    assert consumer.nacks == 0
+    assert consumer.closed
+    assert result_queue.get_nowait() == "Q2|1,acc-1,Raw One,10.00\n"
+    assert result_queue.empty()

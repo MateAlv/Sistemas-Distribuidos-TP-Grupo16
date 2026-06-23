@@ -63,6 +63,7 @@ class Gateway:
 
         self._client_queues = {}
         self._pending_eofs_by_client = {}  # client_id -> pending EOF count
+        self._addressed_result_seen: set[tuple[str, int, int, int]] = set()
         self._client_queues_lock = threading.Lock()
 
         self._q1_queue_name = (
@@ -264,6 +265,9 @@ class Gateway:
             with self._client_queues_lock:
                 self._client_queues.pop(client_id, None)
                 self._pending_eofs_by_client.pop(client_id, None)
+                self._addressed_result_seen = {
+                    key for key in self._addressed_result_seen if key[1] != client_id
+                }
 
         return client_id
 
@@ -454,7 +458,7 @@ class Gateway:
         def callback(message, ack, nack):
             try:
                 if addressed:
-                    msg_type, client_id, _sender_id, _seq, payload = (
+                    msg_type, client_id, sender_id, seq, payload = (
                         internal_serializer.unpack_addressed_packet(message)
                     )
                 else:
@@ -465,6 +469,13 @@ class Gateway:
                     if not client_queue:
                         ack()
                         return
+
+                    if addressed:
+                        dedup_key = (prefix, client_id, sender_id, seq)
+                        if dedup_key in self._addressed_result_seen:
+                            ack()
+                            return
+                        self._addressed_result_seen.add(dedup_key)
 
                     if msg_type == MessageType.EOF:
                         remaining = self._pending_eofs_by_client.get(client_id, 1) - 1
