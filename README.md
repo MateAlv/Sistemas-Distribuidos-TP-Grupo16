@@ -227,6 +227,9 @@ venv/bin/python scripts/crash_test_aggregator.py --query q5 --scenario B --datas
 
 # --keep deja el stack vivo para inspeccionar logs
 venv/bin/python scripts/crash_test_aggregator.py --query q5 --scenario B --dataset LI-Small --keep
+
+# q2_bank_name_joiner — wrapper dedicado, mata el worker con dataset LI-Small
+venv/bin/python scripts/crash_test_q2_bank_name_joiner.py
 ```
 
 Usar `venv/bin/python` (no `python3`): el script llama a `generate_compose.py` que necesita el paquete `yaml` del venv.
