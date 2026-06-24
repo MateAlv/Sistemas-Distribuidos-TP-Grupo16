@@ -233,7 +233,7 @@ class Client:
             result_files = {"q1": f1, "q2": f2, "q3": f3, "q4": f4, "q5": f5}
             query_by_prefix = {"Q2|": "q2", "Q3|": "q3", "Q4|": "q4", "Q5|": "q5"}
 
-            # Q2..Q5 lines carry a "Qn|" prefix; Q1 lines have none.
+            # Q2 to Q5 lines carry a "Qn|" prefix; Q1 lines have none.
             for line in sender.iter_result_lines(config.result_line_max_bytes):
                 query = query_by_prefix.get(line[:3])
                 if query is None:
