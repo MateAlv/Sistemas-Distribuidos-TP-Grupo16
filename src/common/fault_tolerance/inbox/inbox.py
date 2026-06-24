@@ -1,17 +1,10 @@
-"""Per-client dedup brain: classifies every incoming message as NEW, APPLIED or
-DONE, and tracks the transitions.
+"""Per-client dedup: classifies each incoming message as NEW, APPLIED or DONE.
 
-The dedup key is (client_id, kind, sender_id, seq).  `kind` (MsgKind) separates
-DATA messages from control messages (FLUSH_ORDER, FLUSH_ACK) so they can never
-share a bucket even when sender_id and seq collide numerically.
-
-`applied` holds (kind, sender_id, seq) triples whose state change was applied but
-whose outputs are not yet published+committed. `done` is a tracker per
-(client_id, kind, sender_id), the bounded-memory replacement for storing every
-finished id.
-
-Holds no files: persistence is via to_dict()/from_dict() (plain picklable data);
-transitions are driven by PersistentStateHandler after each WAL write.
+The dedup key is (client_id, kind, sender_id, seq). kind separates DATA from
+control messages so they never share a bucket when sender_id and seq collide.
+applied holds triples whose change was applied but whose outputs are not yet
+committed; done is a bounded tracker per (client_id, kind, sender_id) that
+replaces storing every finished id. Persists via to_dict()/from_dict().
 """
 
 from __future__ import annotations
@@ -93,13 +86,9 @@ class Inbox:
 
 
 def _parse_done_key(key) -> tuple[int, int]:
-    """Parse a (kind, sender_id) key from its serialized form.
-
-    New format: "kind_val:sender_id" string (e.g. "0:1").
-    Old format: bare integer sender_id (pre-MsgKind snapshots) — treated as DATA.
-    """
+    """Parse a (kind, sender_id) key, serialized as a "kind:sender_id" string."""
     if isinstance(key, str):
         kind_val, sender_id = key.split(":", 1)
         return int(kind_val), int(sender_id)
-    # Legacy snapshot: bare int sender_id, assume DATA kind.
+    # A bare int key carries no kind, so default it to DATA.
     return int(MsgKind.DATA), int(key)
