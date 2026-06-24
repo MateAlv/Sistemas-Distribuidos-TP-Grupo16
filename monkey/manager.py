@@ -5,7 +5,7 @@ import random
 import logging
 
 # Substrings protected from kills: broker, entry point, rates edge, clients, self.
-DEFAULT_EXCLUDED = ["rabbitmq", "gateway", "rates_service", "client", "chaos"]
+DEFAULT_EXCLUDED = ["rabbitmq", "gateway", "rates_service", "client", "monkey"]
 
 _MONITOR_RE = re.compile(r"monitor_(\d+)")
 
@@ -18,16 +18,16 @@ def monitor_index(container):
 
 def excluded_from_env(env=None):
     env = os.environ if env is None else env
-    extra = [token.strip() for token in env.get("CHAOS_EXCLUDE", "").split(",") if token.strip()]
+    extra = [token.strip() for token in env.get("MONKEY_EXCLUDE", "").split(",") if token.strip()]
     return list(DEFAULT_EXCLUDED) + extra
 
 
 def included_from_env(env=None):
     env = os.environ if env is None else env
-    return [token.strip() for token in env.get("CHAOS_INCLUDE", "").split(",") if token.strip()]
+    return [token.strip() for token in env.get("MONKEY_INCLUDE", "").split(",") if token.strip()]
 
 
-class ChaosManager:
+class MonkeyManager:
     def __init__(self, excluded_containers=None, included_containers=None):
         if excluded_containers is None:
             excluded_containers = list(DEFAULT_EXCLUDED)

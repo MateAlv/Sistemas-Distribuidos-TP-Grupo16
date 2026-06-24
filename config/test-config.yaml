@@ -14,7 +14,7 @@ settings:
   io_timeout_seconds: 3600
   filter_prefetch_count: 50
   snapshot_interval: 1000
-  chaos:
+  monkey:
     enabled: true
     # Kill at most this many containers, each after a random delay in
     # [interval_min, interval_max] seconds, so the kills land at random points
@@ -27,7 +27,7 @@ settings:
     # kill-list workers.
     kill_monitor_leader_first: true
     # Per-worker kill toggles: the monkey only kills workers set to true.
-    # gateway, rabbitmq, rates_service, clients and chaos are always protected.
+    # gateway, rabbitmq, rates_service, clients and monkey are always protected.
     targets:
       file_ingestor: true
       file_splitter: true

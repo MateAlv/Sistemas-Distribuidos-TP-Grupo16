@@ -438,7 +438,7 @@ def validate_all(client_inputs):
 
 
 # --------------------------------------------------------------------------- #
-# chaos monkey footer
+# monkey footer
 # --------------------------------------------------------------------------- #
 _MONKEY_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})")
 _MONKEY_KILL_RE = re.compile(
@@ -503,7 +503,7 @@ def print_election_summary(log_path):
         return
 
     kdt, khms, leader = leader_kill
-    print(f"Chaos killed monitor leader: {leader} at {khms}")
+    print(f"Monkey killed monitor leader: {leader} at {khms}")
     print()
     # Only events at/after the leader kill, deduplicated, in time order.
     seen, won = set(), False
@@ -523,7 +523,7 @@ def print_election_summary(log_path):
 
 
 def print_monkey_summary(log_path):
-    """Parse the run log for chaos-monkey kills and monitor revivals and print a
+    """Parse the run log for monkey kills and monitor revivals and print a
     'Monkey Kill Count' table above the golden pipeline summary."""
     kills, revives_ok, revives_fail = [], [], []
     try:
@@ -549,7 +549,7 @@ def print_monkey_summary(log_path):
     print("Monkey Kill Count and its results")
     print(BAR)
     if not kills:
-        print("Kills: 0 — no chaos kills during this run "
+        print("Kills: 0 — no monkey kills during this run "
               "(it may have finished before the kill interval).")
         print(BAR)
         return

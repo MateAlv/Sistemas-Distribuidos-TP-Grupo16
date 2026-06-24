@@ -3505,19 +3505,19 @@ services:
     volumes:
     - ./data/datasets/LI-Small:/data/input:ro
     - ./data/output:/data/output:rw
-  chaos_monkey:
+  monkey:
     build:
-      context: ./chaos_monkey
+      context: ./monkey
       dockerfile: Dockerfile
     environment:
     - PYTHONUNBUFFERED=1
-    - CHAOS_ENABLED=true
-    - CHAOS_INTERVAL=30
-    - CHAOS_INTERVAL_MIN=30
-    - CHAOS_INTERVAL_MAX=180
-    - CHAOS_MAX_KILLS=2
-    - CHAOS_KILL_MONITOR_LEADER_FIRST=true
-    - CHAOS_INCLUDE=file_ingestor,file_splitter,q4_filter,q4_joiner,q4_sum,q4_aggregator,q4_deduper
+    - MONKEY_ENABLED=true
+    - MONKEY_INTERVAL=30
+    - MONKEY_INTERVAL_MIN=30
+    - MONKEY_INTERVAL_MAX=180
+    - MONKEY_MAX_KILLS=2
+    - MONKEY_KILL_MONITOR_LEADER_FIRST=true
+    - MONKEY_INCLUDE=file_ingestor,file_splitter,q4_filter,q4_joiner,q4_sum,q4_aggregator,q4_deduper
     volumes:
     - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
