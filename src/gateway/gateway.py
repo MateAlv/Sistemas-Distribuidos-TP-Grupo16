@@ -101,7 +101,7 @@ class Gateway:
         )
         self._start_result_consumer(self._q3_queue_name, self._q3_csv_lines, "Q3|")
         self._start_result_consumer(self._q4_queue_name, self._q4_csv_lines, "Q4|")
-        self._start_result_consumer(self._q5_queue_name, self._q5_csv_lines, "Q5|")
+        self._start_result_consumer(self._q5_queue_name, self._q5_csv_lines, "Q5|", addressed=True)
 
         try:
             self._accept_clients()
