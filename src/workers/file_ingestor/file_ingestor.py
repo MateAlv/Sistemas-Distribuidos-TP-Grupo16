@@ -10,6 +10,7 @@ from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 from common.fault_tolerance.handler import PersistentStateHandler, WorkerRunner
+from common.fault_tolerance.handler.action import Action
 from common.fault_tolerance.handler.sender_sequencer import EdgeSpec
 from common.fault_tolerance.inbox import InboxStatus, MsgKind
 from common.middleware import (
@@ -210,6 +211,8 @@ class FileIngestor:
             self._runner.process(message, ack, nack)
         elif msg_type == MessageType.EOF:
             self._handle_upstream_eof(message, ack, nack)
+        elif msg_type == MessageType.ABORT:
+            self._handle_abort(message, ack, nack)
         else:
             logging.error(
                 "file_ingestor_unknown_message_type | id=%s | type=%s",
@@ -309,6 +312,62 @@ class FileIngestor:
                 self._config.id, e, exc_info=True,
             )
             nack(requeue=True)
+
+    def _handle_abort(self, message: bytes, ack, nack) -> None:
+        """Handle an ABORT tombstone received from file_splitter.
+
+        WAL-tracked via MsgKind.ABORT (its own inbox bucket, sender=splitter_id,
+        seq stamped by the upstream SenderSequencer). On recovery the outbox
+        re-publishes the downstream ABORT packets so the tombstone survives crashes
+        mid-propagation.
+
+        If the client is already closed and the inbox doesn't have an in-progress
+        APPLIED entry, we skip the handler entirely — no need to forward ABORT again.
+        """
+        try:
+            _, client_id, sender_id, seq, _ = (
+                self._internal_protocol.unpack_addressed_packet(message)
+            )
+            msg_id = f"abort:{sender_id}:{client_id}:{seq}"
+
+            with self._lock:
+                status = self._handler.inbox.classify(
+                    client_id, sender_id, seq, MsgKind.ABORT
+                )
+                if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
+                    ack()
+                    return
+
+                abort_outputs = self._downstream_abort_outputs(client_id)
+                instruction = self._handler.handle(
+                    msg_id, client_id, sender_id, seq, b"",
+                    lambda _: (FileIngestorState.abort_change(client_id), abort_outputs),
+                    kind=MsgKind.ABORT,
+                )
+
+            if instruction.action is Action.PUBLISH_THEN_COMMIT:
+                self._publish_outputs(instruction.outputs, self._downstream_senders())
+                with self._lock:
+                    self._handler.commit_done(*instruction.ctx)
+
+            ack()
+            logging.info(
+                "file_ingestor_abort | id=%s | client_id=%s", self._config.id, client_id
+            )
+        except Exception as e:
+            logging.error(
+                "file_ingestor_abort_error | id=%s | error=%s", self._config.id, e, exc_info=True
+            )
+            nack(requeue=True)
+
+    def _downstream_abort_outputs(self, client_id: int) -> list:
+        """One ABORT packet per downstream shard so every worker cleans up."""
+        abort_packet = self._packet(MessageType.ABORT, client_id, b"")
+        return [
+            (output.name, abort_packet, shard)
+            for output in self._config.outputs
+            for shard in range(output.shard_count)
+        ]
 
     # ---------- control path ----------
 
