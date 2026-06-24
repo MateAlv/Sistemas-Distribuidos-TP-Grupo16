@@ -405,6 +405,12 @@ class EofCoordinator:
 
         if client_id not in self._leader_responders:
             self._leader_responders[client_id] = set()
+        if sender_id in self._leader_responders[client_id]:
+            logging.info(
+                "eof_coordinator_answer_duplicate | id=%s | client_id=%s | sender=%s",
+                self._id, client_id, sender_id,
+            )
+            return None
         self._leader_responders[client_id].add(sender_id)
         self._leader_processed[client_id] = (
             self._leader_processed.get(client_id, 0) + ctrl.processed_count
