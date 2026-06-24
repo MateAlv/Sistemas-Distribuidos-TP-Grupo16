@@ -7,6 +7,7 @@ ACK = 4
 # Gateway → file_ingestor message types
 MSG_CHUNK = 1
 MSG_EOF = 2
+MSG_ABORT = 3
 FILE_INGESTOR_ROUTING_KEY_PREFIX = "file_ingestor"
 
 # FileChunk file types
