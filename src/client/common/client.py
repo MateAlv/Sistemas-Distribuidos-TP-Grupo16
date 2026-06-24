@@ -230,51 +230,24 @@ class Client:
             f4.write("Bank,Account\n")
             f5.write("count\n")
 
-            for line in sender.iter_result_lines(config.result_line_max_bytes): #corregir codigo repetido lol
-                if line.startswith("Q2|"):
-                    data = line[3:]
-                    counts["q2"] += 1
-                    f2.write(data + "\n")
-                    if counts["q2"] <= MAX_LOGGED_RESULT_LINES:
-                        logging.info(
-                            "client_result_line | query=q2 | client_id=%s | line_number=%s | data=%s",
-                            config.client_id, counts["q2"], data,
-                        )
-                elif line.startswith("Q3|"):
-                    data = line[3:]
-                    counts["q3"] += 1
-                    f3.write(data + "\n")
-                    if counts["q3"] <= MAX_LOGGED_RESULT_LINES:
-                        logging.info(
-                            "client_result_line | query=q3 | client_id=%s | line_number=%s | data=%s",
-                            config.client_id, counts["q3"], data,
-                        )
-                elif line.startswith("Q4|"):
-                    data = line[3:]
-                    counts["q4"] += 1
-                    f4.write(data + "\n")
-                    if counts["q4"] <= MAX_LOGGED_RESULT_LINES:
-                        logging.info(
-                            "client_result_line | query=q4 | client_id=%s | line_number=%s | data=%s",
-                            config.client_id, counts["q4"], data,
-                        )
-                elif line.startswith("Q5|"):
-                    data = line[3:]
-                    counts["q5"] += 1
-                    f5.write(data + "\n")
-                    if counts["q5"] <= MAX_LOGGED_RESULT_LINES:
-                        logging.info(
-                            "client_result_line | query=q5 | client_id=%s | line_number=%s | data=%s",
-                            config.client_id, counts["q5"], data,
-                        )
+            result_files = {"q1": f1, "q2": f2, "q3": f3, "q4": f4, "q5": f5}
+            query_by_prefix = {"Q2|": "q2", "Q3|": "q3", "Q4|": "q4", "Q5|": "q5"}
+
+            # Q2..Q5 lines carry a "Qn|" prefix; Q1 lines have none.
+            for line in sender.iter_result_lines(config.result_line_max_bytes):
+                query = query_by_prefix.get(line[:3])
+                if query is None:
+                    query, data = "q1", line
                 else:
-                    counts["q1"] += 1
-                    f1.write(line + "\n")
-                    if counts["q1"] <= MAX_LOGGED_RESULT_LINES:
-                        logging.info(
-                            "client_result_line | query=q1 | client_id=%s | line_number=%s | data=%s",
-                            config.client_id, counts["q1"], line,
-                        )
+                    data = line[3:]
+
+                counts[query] += 1
+                result_files[query].write(data + "\n")
+                if counts[query] <= MAX_LOGGED_RESULT_LINES:
+                    logging.info(
+                        "client_result_line | query=%s | client_id=%s | line_number=%s | data=%s",
+                        query, config.client_id, counts[query], data,
+                    )
 
         logging.info(
             "client_results_finished | client_id=%s | q1_lines=%s | q2_lines=%s | q3_lines=%s | q4_lines=%s | q5_lines=%s | q1_file=%s | q2_file=%s | q3_file=%s | q4_file=%s | q5_file=%s",
