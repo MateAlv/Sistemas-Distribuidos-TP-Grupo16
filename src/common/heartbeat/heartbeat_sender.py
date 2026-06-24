@@ -11,8 +11,8 @@ DEFAULT_MONITOR_PORT = 9000
 class HeartbeatSender:
     """Periodically emits this process's node id to every Monitor over UDP.
 
-    Runs on a daemon thread and stops
-    on stop() (wired to SIGTERM by the worker entrypoint).
+    Runs on a daemon thread and stops on stop() (wired to SIGTERM by the worker
+    entrypoint).
     """
 
     def __init__(

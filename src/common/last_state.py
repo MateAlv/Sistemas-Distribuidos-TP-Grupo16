@@ -4,7 +4,7 @@ import pickle
 
 
 class LastStateManager:
-    """Atomic snapshot rotation: write tmp → rename current→previous → rename tmp→current."""
+    """Atomic snapshot rotation: write tmp, rename current to previous, rename tmp to current."""
 
     _TMP = "last_state.tmp"
     _CURRENT = "last_state.current"
