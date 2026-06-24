@@ -11,6 +11,7 @@ from common.message_protocol.external import FileChunk, FileEof
 from common.message_protocol.external.types import (
     MSG_CHUNK,
     MSG_EOF,
+    MSG_ABORT,
     file_ingestor_routing_key,
 )
 from common.message_protocol.internal import InternalProtocol, MessageType
@@ -33,6 +34,9 @@ from workers.file_splitter.file_splitter_state import (
 # Reserved sender bucket for the (dead in the current gateway topology) aggregate
 # client-EOF; distinct from any per-file crc32(rel_path) bucket.
 _CLIENT_EOF_SENDER = 0xFFFFFFFF
+# Fixed sender_id for abort messages (MsgKind.ABORT has its own inbox bucket
+# so there is no collision with real DATA or EOF senders).
+_ABORT_SENDER = 0
 
 
 @dataclass(frozen=True)
@@ -177,6 +181,9 @@ class FileSplitter:
                     self._dispatch_file_eof(eof, ack)
                 else:
                     self._dispatch_client_eof(eof, ack)
+            elif msg_type == MSG_ABORT:
+                client_id = int.from_bytes(payload[:4], "big")
+                self._dispatch_abort(client_id, ack)
             else:
                 raise ValueError(f"unknown file splitter message type: {msg_type}")
         except Exception as e:
@@ -262,6 +269,28 @@ class FileSplitter:
         ack()
         self._eofs_received += 1
 
+    def _dispatch_abort(self, client_id: int, ack) -> None:
+        """Handle an ABORT from the gateway: drop per-client state and propagate
+        MessageType.ABORT to every shard of every downstream edge.
+
+        Uses sender_id=0 / seq=0 under MsgKind.ABORT so the inbox can deduplicate
+        re-deliveries (e.g. from multiple file-splitter instances or RabbitMQ
+        redelivery after a crash) without colliding with real DATA or EOF buckets.
+        """
+        change = FileSplitterState.abort_change(client_id)
+        # Build one ABORT packet per downstream shard; the _business_fn wraps them
+        # as plain (unaddressed) packets so the SenderSequencer stamps sender+seq.
+        self._run(
+            f"abort:{client_id}",
+            client_id,
+            _ABORT_SENDER,
+            0,
+            change,
+            MsgKind.ABORT,
+        )
+        ack()
+        logging.info("file_splitter_abort | id=%s | client_id=%s", self._config.id, client_id)
+
     def _run(
         self,
         msg_id: str,
@@ -285,8 +314,22 @@ class FileSplitter:
             self._handler.commit_done(*instruction.ctx)
 
     def _business_fn(self, change: dict):
-        client_bytes = change["client_id"].to_bytes(16, byteorder="big")
+        client_id = change["client_id"]
+        client_bytes = client_id.to_bytes(16, byteorder="big")
         logical = []
+
+        if change["type"] == "abort":
+            # Fan-out ABORT to every shard of every edge so downstream workers
+            # receive and process the tombstone regardless of which shard holds
+            # state for this client.
+            abort_body = self._internal_protocol.create_packet(
+                msg_type=MessageType.ABORT, client_id_bytes=client_bytes, payload=b""
+            )
+            for edge in self._publishers:
+                for shard in range(self._config.output_shard_count):
+                    logical.append((edge, abort_body, shard))
+            return change, logical
+
         for edge, msg_type, payload in self._state.simulate(change):
             body = self._internal_protocol.create_packet(
                 msg_type=msg_type, client_id_bytes=client_bytes, payload=payload
