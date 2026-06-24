@@ -1,13 +1,6 @@
-"""Per-client state for the q4_aggregator worker, behind the
-snapshot/restore/apply_change contract the durable-state engine expects.
-apply_change runs both live and during WAL replay, so it stays in-memory.
-
-Change types: "data" (a Q4PairPaths batch, payload kept as base64; path counts
-accumulate per (A, B) pair until one reaches Q4_QUALIFY_THRESHOLD, which marks
-it qualified and records its two account candidates by deduper partition),
-"eof" (one upstream Q4Joiner shard reported, advancing the EOF counter;
-idempotent), and "close" (drop the client's maps once every shard's EOF
-arrived). The qualifying account-candidate packets ride the durable outbox.
+"""Per-client state for the q4_aggregator worker: sums path counts per (A, B)
+pair; when a pair reaches Q4_QUALIFY_THRESHOLD it qualifies and its two account
+candidates are recorded by deduper partition.
 """
 
 from __future__ import annotations

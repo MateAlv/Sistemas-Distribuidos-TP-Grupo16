@@ -1,13 +1,8 @@
-"""Per-client state for the q4_filter worker, behind the
-snapshot/restore/apply_change contract the durable-state engine expects.
-apply_change runs both live and during WAL replay, so it stays in-memory and
-does no I/O.
+"""Per-client state for the q4_filter worker.
 
-Change types: "data" (a transaction batch; the payload is kept as base64 so it
-can be replayed), "close" (drop the client's state), and three that replay the
-EOF/flush protocol on the coordinator ("coordinator_upstream_eof",
-"coordinator_msg", "coordinator_cleanup"). The coordinator runs in flush_order
-mode, so each shard reports its EOF straight to the fixed leader.
+Gates each source account: its edges wait until the source has reached 6 distinct
+targets, then qualify and forward as counted edges to Q4Sum partitions.
+predict_data_outputs runs the gate on a copy so its outputs match apply_change.
 """
 
 from __future__ import annotations
@@ -135,9 +130,8 @@ class Q4FilterState:
 
     def predict_data_outputs(self, client_id: int, payload: bytes) -> dict[int, list]:
         """Read-only: the counted edges this batch would emit, grouped by Q4Sum
-        partition, without mutating state. Runs the same gate as apply_change on
-        per-source working copies, so the outbox the worker builds from this
-        matches the state apply_change(data_change) reconstructs."""
+        partition, computed on per-source copies so they match what
+        apply_change(data_change) will produce."""
         if client_id in self._closed_by_client:
             return {}
         transactions = _tx_ser.deserialize_batch(payload)
@@ -254,10 +248,9 @@ class Q4FilterState:
         )
 
     def _gate_emit(self, state: "_SourceState", edge: Q4TransactionEdge) -> list:
-        """Source-gate step shared by apply (real state) and predict (a working
-        copy). Mutates state and returns the Q4CountedEdge records for this edge:
-        two per qualified edge (INCOMING intermediate=target, OUTGOING
-        intermediate=source), or none while the source stays below the threshold."""
+        """Source-gate step shared by apply (real state) and predict (a copy).
+        Returns the two Q4CountedEdge records for a qualified edge (INCOMING at
+        target, OUTGOING at source), or none while the source is below threshold."""
         if state.qualified:
             return _counted_for(edge)
         state.pending.append(edge)
@@ -300,9 +293,8 @@ def _counted_for(edge: Q4TransactionEdge) -> list:
 
 
 def _copy_source_state(state: "_SourceState | None") -> "_SourceState":
-    """Shallow working copy for the read-only predictor: targets/qualified copied,
-    pending list copied (Q4TransactionEdge entries are frozen, so sharing refs is
-    safe). Lets predict run the gate without touching real state."""
+    """Shallow copy for the predictor: targets and pending are copied (edges are
+    frozen, safe to share) so predict can run the gate without touching real state."""
     if state is None:
         return _SourceState()
     return _SourceState(

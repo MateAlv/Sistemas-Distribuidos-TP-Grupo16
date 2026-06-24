@@ -60,14 +60,9 @@ Q4_SUM_HOT_B_BUCKETS = 16
 
 
 class Q4SumWorker:
-    """Aggregates counted Q4 edges for the intermediary shard owned by this worker.
-
-    Durable via PersistentStateHandler: DATA batches only accumulate per-client
-    counts (no output); the join blocks are planned and scattered to the joiners
-    once every upstream Q4Filter shard has sent its EOF (fan-in). A crash at any
-    point recovers the accumulated counts and re-publishes any pending flush
-    output from the outbox, so the emit-on-EOF happens exactly once.
-    """
+    """Aggregates counted Q4 edges for one intermediary shard: plans the join
+    blocks and scatters them to the joiners once every Q4Filter shard's EOF has
+    arrived (fan-in)."""
 
     def __init__(self):
         self._proto = InternalProtocol()
@@ -179,10 +174,8 @@ class Q4SumWorker:
         return max(1, Q4_SUM_HOT_A_BUCKETS), max(1, Q4_SUM_HOT_B_BUCKETS)
 
     def _build_flush_outputs(self, client_id: int) -> list:
-        """Pure: read the accumulated counts and return the logical outputs for
-        this client's end: block-join batches per joiner partition plus one EOF
-        per joiner partition carrying that partition's record count. No mutation
-        and no I/O, so handle()/WAL replay reproduces it exactly."""
+        """Pure: block-join batches per joiner partition plus one EOF per partition
+        (its record count). No mutation or I/O, so WAL replay reproduces it."""
         incoming = self._state.incoming_for(client_id)
         outgoing = self._state.outgoing_for(client_id)
         intermediaries = set(incoming) & set(outgoing)
@@ -249,17 +242,14 @@ class Q4SumWorker:
         return outputs
 
     def _data_process_payload(self, client_id: int, payload: bytes):
-        """business_fn for a DATA batch: accumulate the counted edges into state,
-        emit nothing (the join is planned at EOF). A closed client is ignored by
-        apply_change, so a late straggler is a no-op."""
+        """DATA batch: accumulate the counted edges, emit nothing (the join is
+        planned at EOF). A closed client is a no-op."""
         return Q4SumState.data_change(client_id, payload), []
 
     def _handle_eof(self, raw: bytes, ack, nack) -> None:
-        """Upstream EOF from one Q4Filter shard, routed through the handler as a
-        durable input. Fan-in: the decide step predicts whether this is the last
-        shard; if so business_fn builds the whole flush (block batches + per-
-        partition EOFs) into the outbox and bundles close. The UpstreamEofCounter
-        is idempotent, so apply_change replays safely."""
+        """Upstream EOF from one Q4Filter shard. When it's the last shard's EOF,
+        business_fn builds the whole flush (block batches + per-partition EOFs)
+        and close. UpstreamEofCounter is idempotent, so replay is safe."""
         try:
             _msg_type, client_id, sender_id, seq, payload = (
                 self._proto.unpack_addressed_packet(raw)

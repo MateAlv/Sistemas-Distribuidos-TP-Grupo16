@@ -1,12 +1,6 @@
-"""Per-client state for the q4_sum worker, behind the
-snapshot/restore/apply_change contract the durable-state engine expects.
-apply_change runs both live and during WAL replay, so it stays in-memory.
-
-Change types: "data" (a Q4CountedEdge batch, payload kept as base64; each edge's
-count is accumulated per intermediate on the incoming or outgoing side), "eof"
-(one upstream Q4Filter shard reported, advancing the EOF counter; idempotent),
-and "close" (drop the client's maps once every shard's EOF arrived and the
-block-join edges were emitted).
+"""Per-client state for the q4_sum worker: accumulates counted edges per
+intermediate (incoming and outgoing), ready to emit block-join edges once every
+Q4Filter shard's EOF has arrived.
 """
 
 from __future__ import annotations
@@ -69,8 +63,7 @@ class Q4SumState:
         return self._eof_counter.count(client_id)
 
     def eof_would_complete(self, client_id: int, sender_id: int) -> bool:
-        """Read-only: would this EOF be the last upstream shard (triggering flush)?
-        Used by the decide step before mutating via eof_change."""
+        """Read-only: would this EOF be the last upstream shard (triggering the flush)?"""
         return self._eof_counter.would_flush(client_id, sender_id)
 
     def is_closed(self, client_id: int) -> bool:

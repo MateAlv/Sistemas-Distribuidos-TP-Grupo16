@@ -1,12 +1,6 @@
-"""Per-client state for the q4_joiner worker, behind the
-snapshot/restore/apply_change contract the durable-state engine expects.
-apply_change runs both live and during WAL replay, so it stays in-memory.
-
-Change types: "data" (a Q4BlockJoinEdge batch, payload kept as base64; each
-half-edge is filed under its (intermediate, a_bucket, b_bucket) block on the
-incoming or outgoing side, summing endpoint counts), "eof" (one upstream Q4Sum
-shard reported, advancing the EOF counter; idempotent), and "close" (drop the
-client's maps once every shard's EOF arrived and the joins were emitted).
+"""Per-client state for the q4_joiner worker: files block half-edges by
+(intermediate, a_bucket, b_bucket) on the incoming and outgoing sides, to join
+once every Q4Sum shard's EOF has arrived.
 """
 
 from __future__ import annotations
