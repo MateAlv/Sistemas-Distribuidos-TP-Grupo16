@@ -56,6 +56,7 @@ fault_tolerance/
 
   handler/
     persistent_state_handler.py   the orchestrator the worker loop talks to
+    worker_runner.py              the consume loop that drives the handler
     sender_sequencer.py           stamps durable ids on outgoing messages
     action.py                     Action enum returned to the loop
     worker_loop_instruction.py    what handle() returns: action + outputs + ctx
@@ -63,6 +64,7 @@ fault_tolerance/
   inbox/
     inbox.py                 per-client dedup: NEW / APPLIED / DONE
     inbox_status.py          the InboxStatus enum
+    msg_kind.py              MsgKind enum: separates data and control streams
     deduplication_tracker.py bounded "seen seqs" tracker (biggest + gaps)
 
   outbox/
@@ -113,10 +115,16 @@ Main methods:
 - `outbox_to_republish()` — the outputs to resend after recovery.
 - `handle(msg_id, client_id, sender_id, seq, payload, business_fn)` — process one
   input. Returns a `WorkerLoopInstruction`.
-- `commit_done(msg_id, client_id, sender_id, seq)` — finish an input after its
-  outputs are confirmed: write `INPUT_DONE`, drop the outputs, maybe snapshot.
+- `commit_done(msg_id, client_id, sender_id, seq, kind)` — finish an input after
+  its outputs are confirmed: write `INPUT_DONE`, drop the outputs, maybe snapshot.
 - `maybe_snapshot()` — snapshot + rotate the WAL once enough inputs have been
   applied since the last one.
+- `snapshot_now()` — snapshot + rotate immediately, used to persist state mutated
+  outside the WAL (e.g. the EOF coordinator) before acking its message.
+
+`kind` (a `MsgKind`) tags each message as data or a specific control message, and
+defaults to `DATA`. It is part of the dedup key so a control message can never
+collide with a data message that happens to share the same `(sender_id, seq)`.
 
 `business_fn` is supplied per message and returns
 `(state_change: dict, outputs: list[(destination, body)])`. It returns *logical*
@@ -128,7 +136,7 @@ What `handle()` does for a brand-new input:
 state_change, logical_outputs = business_fn(payload)
 outputs = sequencer.stamp(...)        # assign durable ids
 wal.append(INPUT_APPLIED(...))        # fsync to disk
-sequencer.advance(...)                # memory mutation, after the WAL
+sequencer.observe(outputs)            # memory mutation, after the WAL
 worker_state.apply_change(...)
 inbox.mark_applied(...)
 outbox.add(...)
@@ -145,60 +153,68 @@ snapshot. This is why precise WAL checkpoint offsets are not needed: we rotate
 the WAL after every snapshot (`REPLAY_ALL = -1` replays the whole segment) and
 the inbox guard prevents double-application.
 
+### `WorkerRunner`
+
+The handler owns disk and memory but not the RabbitMQ channel, so `WorkerRunner`
+is the consume loop that drives it. At startup it calls `recover()` and
+re-publishes the outbox. For each message it unpacks the addressed packet, runs
+`handle()`, and then publishes the outputs, calls `commit_done()` and acks. Any
+failure nacks with requeue so RabbitMQ redelivers; recovery makes that safe. It
+shares the worker's lock with other consumers (e.g. an EOF coordinator) and
+publishes outside the lock, since publishing is network I/O.
+
 ### `Action` and `WorkerLoopInstruction`
 
-`handle()`/`commit_done()` return a `WorkerLoopInstruction`, because the handler
-owns disk and memory but **not** the RabbitMQ channel. The instruction tells the
-loop what to do next:
+`handle()`/`commit_done()` return a `WorkerLoopInstruction` that tells the loop
+what to do next:
 
 - `Action.ACK` — nothing to publish, just ack RabbitMQ.
 - `Action.PUBLISH_THEN_COMMIT` — publish `instruction.outputs`, wait for
   confirms, then call `commit_done(*instruction.ctx)`.
 
-`ctx` is the input's `(msg_id, client_id, sender_id, seq)`.
+`ctx` is the input's `(msg_id, client_id, sender_id, seq, kind)`.
 
 ### `SenderSequencer`
 
-Assigns the id every outgoing message carries:
+Assigns the id every outgoing message carries, in one place. There are two modes,
+chosen per destination:
 
-```
-output_id = "{node_id}:{client_id}:{seq}#{index}"
-```
+- **Plain** — for a destination with no `EdgeSpec`. The body is left untouched and
+  the id is `"{node_id}:{client_id}:{seq}#{index}"`, where `seq` is a per-client
+  counter and `index` the output's position within its input's batch.
+- **Addressed** — for a destination with an `EdgeSpec`. The body is rebuilt as an
+  addressed packet carrying `sender_id` and `seq`, so the consumer can deduplicate
+  on `(client, kind, sender_id, seq)`. The id is
+  `"{node_id}:{client_id}:{edge}:{shard}:{seq}#{index}"`.
 
-- `seq` is a per-client counter — the integer a downstream worker deduplicates
-  on. It is persisted in the snapshot, so it never resets to 0 on restart and an
-  id is never reused for different content.
-- `index` is the position of the output within its originating input's batch.
+An `EdgeSpec` holds the producer's `sender_id` and the destination's `shard_count`.
+The addressed `seq` is counted per `(client, edge, shard)`, not per client, because
+the edge shards by payload digest: a single per-client counter would leave each
+shard's dedup tracker full of gaps.
 
-`stamp()` is pure (it builds ids from the current counter without advancing);
-the handler calls `advance()` only after the WAL append, so a crash mid-append
-leaves no gap in the sequence. On recovery, `observe()` rebuilds the counter's
-high-water mark from the ids already stored in replayed records, so freshly
-stamped ids never collide with persisted ones.
-
-Example: client 7, two outputs from one input, on a fresh worker named `agg`:
-
-```
-agg:7:0#0
-agg:7:1#1
-```
+Counters are persisted in the snapshot, so they never reset on restart and an id is
+never reused for different content. `stamp()` builds ids from the current counters
+without advancing them; the handler calls `observe()` only after the WAL append, so
+a crash mid-append leaves no gap. On recovery `observe()` rebuilds the counters from
+the ids in replayed records, so new ids never collide with persisted ones.
 
 ## Inbox — input deduplication
 
 ### `Inbox`
 
-Tracks, per client, the state of every input. `classify(client, sender, seq)`
+Tracks, per client, the state of every input. `classify(client, sender, seq, kind)`
 returns an `InboxStatus`:
 
 - `NEW` — never seen; process it.
 - `APPLIED` — state changed but outputs not yet published and committed.
 - `DONE` — fully finished; drop as a duplicate.
 
-It holds two structures:
+It holds two structures, both keyed with `kind` so data and control messages stay
+separate:
 
-- `applied`: the set of `(sender_id, seq)` pairs currently mid-flight, per
+- `applied`: the set of `(kind, sender_id, seq)` triples currently mid-flight, per
   client. Small — entries move out as inputs commit.
-- `done`: a `DeduplicationTracker` per `(client_id, sender_id)`, the
+- `done`: a `DeduplicationTracker` per `(client_id, kind, sender_id)`, the
   bounded-memory record of everything already finished.
 
 `mark_applied` / `mark_done` drive the transitions; `drop_client` forgets a
@@ -206,8 +222,8 @@ client once it closes.
 
 ### `DeduplicationTracker`
 
-The bounded "have I seen this seq?" structure for one `(client, sender)` pair.
-Instead of storing every seq ever seen, it keeps:
+The bounded "have I seen this seq?" structure for one `(client, kind, sender)`
+key. Instead of storing every seq ever seen, it keeps:
 
 - `biggest` — the highest seq seen so far.
 - `pending` — the gaps below `biggest` that have not arrived yet.
@@ -245,8 +261,10 @@ One outgoing message:
 
 - `output_id` — the deterministic id from the sequencer.
 - `input_id` — the input that produced it.
-- `destination` — queue name or routing key.
+- `destination` — the publisher-registry key (logical edge or queue name).
 - `body` — the fully serialized message, resent byte-for-byte on recovery.
+- `shard` — the destination partition to route to, or `None` to let the publisher
+  route.
 
 It serializes itself to a compact binary form (used inside WAL records).
 
@@ -289,9 +307,9 @@ The facade the handler uses:
 
 ### Records: `InputApplied`, `InputDone`, `WalRecord`
 
-- `InputApplied(msg_id, client_id, sender_id, seq, state_change, outputs)` — the
-  apply step: carries the business change (JSON) and the stamped outputs.
-- `InputDone(msg_id, client_id, sender_id, seq)` — the commit step.
+- `InputApplied(msg_id, client_id, sender_id, seq, state_change, outputs, kind)` —
+  the apply step: carries the business change (JSON) and the stamped outputs.
+- `InputDone(msg_id, client_id, sender_id, seq, kind)` — the commit step.
 - `WalRecord` is the union `InputApplied | InputDone`.
 
 ### `WALWriter` / `WALReader` / `record.py`
