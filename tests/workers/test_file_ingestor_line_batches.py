@@ -39,6 +39,9 @@ class RecordingSender:
     def send(self, message: bytes) -> None:
         self.messages.append(message)
 
+    def send_to_shard(self, message: bytes, shard: int) -> None:
+        self.messages.append(message)
+
     def close(self) -> None:
         pass
 

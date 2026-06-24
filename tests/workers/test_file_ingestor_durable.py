@@ -10,7 +10,6 @@ STATE_DIR (the durable disk survives). These prove the two guarantees:
 
 from common.fault_tolerance.handler import WorkerRunner
 from common.fault_tolerance.inbox import InboxStatus, MsgKind
-from common.routing import routing_key_for_shard
 from common.message_protocol.external.types import FILE_TYPE_TRANSACTIONS
 from common.message_protocol.internal import (
     ControlMessage,
@@ -39,6 +38,9 @@ class RecordingSender:
         self.messages = []
 
     def send(self, message: bytes) -> None:
+        self.messages.append(message)
+
+    def send_to_shard(self, message: bytes, shard: int) -> None:
         self.messages.append(message)
 
     def close(self) -> None:
@@ -297,17 +299,8 @@ def _ingestor(tmp_path, total_instances=1):
             state_dir=str(tmp_path),
         )
     )
-    # Outputs are now addressed and routed per (output, shard) key. One sink per
-    # logical output; every shard routing key for an output maps to that output's
-    # sink. The returned map is keyed by routing key (so it doubles as the publisher
-    # map for the EOF/flush paths); per-output count assertions still hold because
-    # the shared sink records each message once regardless of which shard key it
-    # arrived through.
-    sinks = {"filter_usd": RecordingSender(), "filter_q5_format": RecordingSender()}
     publishers = {
-        routing_key_for_shard(output.routing_prefix, shard): sinks[output.name]
-        for output in output_configs
-        for shard in range(output.shard_count)
+        output.name: RecordingSender() for output in output_configs
     }
     ingestor._downstream_outputs = publishers
     ingestor._data_publishers = dict(publishers)
