@@ -11,18 +11,32 @@ from common.message_protocol.internal.control_message_serializer import ControlM
 
 @dataclass
 class SendAnswerAction:
-    """Enviar PROCESSED_ANSWER a la response_queue del líder."""
+    """
+    Orden dada a un worker no lider para enviar un mensaje de control a la response_queue del líder.
+    El tipo de mensaje es PROCESSED_ANSWER
+
+    En PROCESSED_ANSWER el worker envía su conteo actual de mensajes procesados (que llegaron)
+    y forwardeados (que envió).
+    """
     queue_name: str
     message: bytes
 
 
 @dataclass
 class BroadcastAction:
-    """Enviar un mensaje a todas las control_queues (una cola nombrada por worker).
+    """
+    Orden dada a un worker lider de eviar un mensaje a todas las control_queues.
+
+    Los mensajes posibles son:
+    - EOF_RECEIVED: el líder dinámico de broadcast notifica a todos los workers que recibió EOF upstream.
+    - PROCESSED_REQUEST: el líder solicita a todos los workers que reenvíen su conteo actual 
+    (snapshot) porque el conteo acumulado no alcanzó el esperado.
+    - FLUSH_ORDER: el líder notifica a todos los workers que pueden hacer flush y enviar FLUSH_ACK.
 
     sleep_before > 0: el worker debe dormir ese tiempo ANTES de enviar.
     Usado en retries para que el thread de datos pueda procesar mensajes pendientes
     antes de que el líder solicite nuevos conteos.
+    Esto solo ocurre en PROCESSED_REQUEST, cuando el conteo acumulado no alcanza el esperado.
     """
     queue_names: list  # list[str]
     message: bytes
@@ -31,7 +45,8 @@ class BroadcastAction:
 
 @dataclass
 class FlushAction:
-    """Ejecutar la lógica de flush del cliente.
+    """
+    Orden dada a un worker para ejecutar la lógica de flush del cliente.
 
     is_leader=True : líder — emitir EOF downstream con total_forwarded.
     is_leader=False: no-líder — hacer flush local y luego enviar FLUSH_ACK a ack_queue.
@@ -49,43 +64,44 @@ class EofCoordinator:
     """
     Máquina de estados para el protocolo EOF entre réplicas de un worker.
 
-    Sin threads ni locks propios. El worker es responsable de:
+    El worker es responsable de:
       · Adquirir su propio lock antes de llamar cualquier método de estado
-      · Ejecutar la acción retornada (I/O) FUERA del lock
+      · Ejecutar la acción retornada (I/O) FUERA del lock usado para procesar el mensaje de control
       · Si un SendAnswerAction falla: llamar clear_pending_eof() bajo lock
         y hacer nack(requeue=True) para que el mensaje sea reentregado
 
-    Las colas de control son nombradas (no exchanges anónimos) para que los mensajes
-    persistan ante caídas y reinicios de workers (base para tolerancia a fallos).
+    Dos modos de coordinación: "broadcast" y "flush_order".  El modo se fija al crear el coordinador
+    por variable de entorno.
 
-    ═══════════════════════════════════════════════════════════════════════════════
-    MODO "broadcast"  —  cola de entrada compartida entre réplicas
-    ═══════════════════════════════════════════════════════════════════════════════
+    # MODO "broadcast"  —  cola de entrada compartida entre réplicas
 
+    Este modo es usado por workers que consumen de la misma cola de entrada.
     Una réplica recibe el EOF de upstream (la que desencola primero).
     Esa réplica se convierte en LÍDER DINÁMICO para ese client_id.
 
       Paso 1 · (data thread, bajo lock)  worker recibe EOF upstream
         action = coordinator.on_upstream_eof(client_id, expected_total, count, fwd)
-        retorna → BroadcastAction(EOF_RECEIVED) a todas las control_queues
-        si N==1 → FlushAction(is_leader=True, total_forwarded=fwd)
+        retorna → BroadcastAction(EOF_RECEIVED) a todas las control_queues (todos los otros workers)
+        si N==1 → FlushAction(is_leader=True, total_forwarded=fwd) (worker unico, no hay coordinacion)
 
       Paso 2 · (control thread, bajo lock)  todas las réplicas reciben EOF_RECEIVED
         action = coordinator.process_control_message(EOF_RECEIVED, client_id, ctrl, count, fwd)
-        retorna → SendAnswerAction(PROCESSED_ANSWER) a response_queue del líder
+        retorna → SendAnswerAction(PROCESSED_ANSWER) a response_queue del líder (devolver procesados al lider)
         retorna → None si es EOF_RECEIVED duplicado para este client_id
         Si el envío falla: coordinator.clear_pending_eof(client_id) + nack(requeue=True)
 
       Paso 3 · (response thread, bajo lock)  líder acumula PROCESSED_ANSWERs
         action = coordinator.process_control_message(PROCESSED_ANSWER, client_id, ctrl)
         retorna → None mientras no hayan respondido todos los workers (N total)
+        Cuando llegan todos los PROCESSED_ANSWERs (N):
         retorna → BroadcastAction(FLUSH_ORDER)        si total >= expected
         retorna → BroadcastAction(PROCESSED_REQUEST,  si total < expected (retry)
                     sleep_before=0.5)                  el worker duerme, luego re-broadcast
-
+                    
       Paso 3b · (control thread, bajo lock)  workers reciben PROCESSED_REQUEST (retry)
         action = coordinator.process_control_message(PROCESSED_REQUEST, client_id, ctrl, count, fwd)
         retorna → SendAnswerAction(PROCESSED_ANSWER) con el conteo actual (snapshot fresco)
+        Esto solo ocurre si el conteo acumulado no alcanzó el esperado. El líder solicita reenvío de conteos.
 
       Paso 4 · (control thread, bajo lock)  réplicas reciben FLUSH_ORDER
         action = coordinator.process_control_message(FLUSH_ORDER, client_id, ctrl)
@@ -98,12 +114,11 @@ class EofCoordinator:
       Paso 5 · (response thread, bajo lock)  líder acumula FLUSH_ACKs
         action = coordinator.process_control_message(FLUSH_ACK, client_id, ctrl)
         retorna → None mientras no hayan enviado FLUSH_ACK todos los no-líderes (N-1)
+        Cuando llegan todos los FLUSH_ACKs (N-1):
         retorna → FlushAction(is_leader=True, total_forwarded=total) cuando llegan todos
                   El líder hace su flush y emite EOF downstream con total_forwarded
 
-    ═══════════════════════════════════════════════════════════════════════════════
-    MODO "flush_order"  —  cada réplica tiene su propio shard de entrada
-    ═══════════════════════════════════════════════════════════════════════════════
+    # MODO "flush_order"  —  cada réplica tiene su propio shard de entrada
 
     Cada réplica recibe el EOF de su shard de forma independiente.
     El líder es siempre el worker con instance_id == leader_id (por defecto 0).
