@@ -450,6 +450,10 @@ class FilterQ5UsdWorker:
                         kind=kind,
                     )
 
+                elif msg_type == MessageType.PROCESSED_REQUEST:
+                    _pr_action = self._coordinator.process_control_message(
+                        msg_type, client_id, ctrl, count, fwd
+                    )
                 else:
                     logging.warning(
                         "filter_q5_usd_unexpected_control_type | id=%s | msg_type=%s",
@@ -457,6 +461,12 @@ class FilterQ5UsdWorker:
                     )
                     ack()
                     return
+
+            if msg_type == MessageType.PROCESSED_REQUEST:
+                if isinstance(_pr_action, SendAnswerAction):
+                    response_senders[_pr_action.queue_name].send(_pr_action.message)
+                ack()
+                return
 
             self._publish_commit_ack(instruction, ack)
 
