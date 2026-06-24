@@ -32,7 +32,7 @@ class ChaosManager:
         if excluded_containers is None:
             excluded_containers = list(DEFAULT_EXCLUDED)
         self.excluded_containers = excluded_containers
-        # Allowlist: when non-empty, only containers matching one of these
+        # Kill list: when non-empty, only containers matching one of these
         # substrings are killable. Empty means "any non-excluded container".
         self.included_containers = list(included_containers or [])
 
@@ -80,23 +80,23 @@ class ChaosManager:
         return max(indexed)[1] if indexed else None
 
     def kill_random_container(self):
-        allowlist = ",".join(self.included_containers) or "<any non-excluded>"
+        kill_list = ",".join(self.included_containers) or "<any non-excluded>"
         targets = self.get_valid_targets()
         if not targets:
             logging.warning(
                 "action: kill_random_container | status: no_targets | "
-                "allowlist: %s | message: no running container matched the allowlist",
-                allowlist,
+                "kill_list: %s | message: no running container matched the kill list",
+                kill_list,
             )
             return None
 
         target = random.choice(targets)
         logging.info(
             "action: kill_random_container | target: %s | candidates: %d | "
-            "allowlist: %s | message: randomly chose a worker from the allowlist",
+            "kill_list: %s | message: randomly chose a worker from the kill list",
             target,
             len(targets),
-            allowlist,
+            kill_list,
         )
         return self.kill_container(target, role="worker")
 

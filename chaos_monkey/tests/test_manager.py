@@ -14,7 +14,7 @@ from manager import (
     DEFAULT_EXCLUDED,
 )
 
-DEMO_ALLOWLIST = [
+DEMO_KILL_LIST = [
     "file_ingestor",
     "file_splitter",
     "q4_filter",
@@ -92,10 +92,10 @@ class TestChaosManager(unittest.TestCase):
         self.assertIsNone(result)
 
 
-class TestChaosManagerAllowlist(unittest.TestCase):
+class TestChaosManagerKillList(unittest.TestCase):
     @patch('manager.ChaosManager.get_running_containers')
-    def test_allowlist_kills_only_listed_workers(self, mock_get_containers):
-        manager = ChaosManager(included_containers=DEMO_ALLOWLIST)
+    def test_kill_list_kills_only_listed_workers(self, mock_get_containers):
+        manager = ChaosManager(included_containers=DEMO_KILL_LIST)
         mock_get_containers.return_value = [
             # allowed
             "file_ingestor_4", "file_splitter_0",
@@ -122,19 +122,19 @@ class TestChaosManagerAllowlist(unittest.TestCase):
         )
 
     @patch('manager.ChaosManager.get_running_containers')
-    def test_allowlist_does_not_leak_to_lookalike_services(self, mock_get_containers):
+    def test_kill_list_does_not_leak_to_lookalike_services(self, mock_get_containers):
         # filter_q5_usd must not match filter_usd / filter_q5_format;
         # sum_q2 must not match aggregation_q2; q4_aggregator must not match
         # aggregation_q2.
-        manager = ChaosManager(included_containers=DEMO_ALLOWLIST)
+        manager = ChaosManager(included_containers=DEMO_KILL_LIST)
         mock_get_containers.return_value = [
             "filter_usd_0", "filter_q5_format_0", "aggregation_q2_0",
         ]
         self.assertEqual(manager.get_valid_targets(), [])
 
     @patch('manager.ChaosManager.get_running_containers')
-    def test_empty_allowlist_falls_back_to_exclude_only(self, mock_get_containers):
-        manager = ChaosManager()  # no allowlist
+    def test_empty_kill_list_falls_back_to_exclude_only(self, mock_get_containers):
+        manager = ChaosManager()  # no kill list
         mock_get_containers.return_value = ["filter_usd_0", "rabbitmq"]
         self.assertEqual(manager.get_valid_targets(), ["filter_usd_0"])
 
@@ -157,7 +157,7 @@ class TestMonitorLeader(unittest.TestCase):
     @patch('subprocess.run')
     @patch('manager.ChaosManager.get_running_containers')
     def test_kill_monitor_leader_targets_leader(self, mock_get_containers, mock_run):
-        manager = ChaosManager(included_containers=DEMO_ALLOWLIST)
+        manager = ChaosManager(included_containers=DEMO_KILL_LIST)
         mock_get_containers.return_value = ["monitor_1", "monitor_2", "monitor_3"]
         result = manager.kill_monitor_leader()
         self.assertEqual(result, "monitor_3")

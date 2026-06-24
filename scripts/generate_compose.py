@@ -1570,7 +1570,16 @@ def chaos_monkey_service(settings: dict, client_names: list[str]) -> dict:
         environment.append(f"CHAOS_MAX_KILLS={int(chaos['max_kills'])}")
     if chaos.get("kill_monitor_leader_first"):
         environment.append("CHAOS_KILL_MONITOR_LEADER_FIRST=true")
-    targets = chaos.get("targets") or []
+    # targets may be a per-worker toggle map {name: bool} or a plain list.
+    raw_targets = chaos.get("targets") or []
+    if isinstance(raw_targets, dict):
+        targets = [name for name, enabled in raw_targets.items() if enabled]
+        # An explicit toggle map with everything off means "kill nothing", not
+        # "kill anything"; pin a sentinel that matches no container.
+        if not targets:
+            targets = ["__chaos_none__"]
+    else:
+        targets = list(raw_targets)
     if targets:
         environment.append(f"CHAOS_INCLUDE={','.join(targets)}")
     excludes = chaos.get("exclude") or []

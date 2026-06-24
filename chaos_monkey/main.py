@@ -24,7 +24,7 @@ def main():
     # 0 means unlimited kills; otherwise stop after this many successful kills.
     max_kills = int(os.getenv("CHAOS_MAX_KILLS", "0"))
     # When true, the very first kill targets the current monitor leader (highest
-    # id) to force a failover election; later kills hit allowlisted workers.
+    # id) to force a failover election; later kills hit kill-list workers.
     leader_first = os.getenv("CHAOS_KILL_MONITOR_LEADER_FIRST", "false").lower() == "true"
 
     if not enabled:
@@ -46,7 +46,7 @@ def main():
     cap = str(max_kills) if max_kills else "unlimited"
     logging.info(
         "chaos_monkey_plan | interval=%s-%ss | max_kills=%s | "
-        "first_kill_monitor_leader=%s | allowlist=%s | message=chaos plan ready",
+        "first_kill_monitor_leader=%s | kill_list=%s | message=chaos plan ready",
         interval_min,
         interval_max,
         cap,
