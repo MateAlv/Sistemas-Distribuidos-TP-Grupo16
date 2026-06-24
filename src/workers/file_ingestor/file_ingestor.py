@@ -10,16 +10,18 @@ from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.message_protocol.internal.transaction_serializer import TransactionSerializer
 from common.fault_tolerance.handler import PersistentStateHandler, WorkerRunner
+from common.fault_tolerance.handler.sender_sequencer import EdgeSpec
 from common.fault_tolerance.inbox import InboxStatus, MsgKind
 from common.middleware import (
     LazyQueue,
     MessageMiddlewareQueueRabbitMQ,
+    ShardedPublisher,
 )
 from common.middleware.middleware_rabbitmq import (
     MessageMiddlewareExchangeRabbitMQ,
     ensure_exchange_queue_bindings,
 )
-from common.routing import queue_name_for_worker, routing_key_for_shard, shard_for_key
+from common.routing import queue_name_for_worker
 from workers.file_ingestor.file_ingestor_state import FileIngestorState
 from workers.file_ingestor.line_batch_parser import LineBatchParser
 
@@ -65,14 +67,6 @@ class FileIngestor:
         self._line_batch_serializer = LineBatchSerializer()
         self._control_serializer = ControlMessageSerializer()
 
-        # Monotonic seq per (output, shard, client) for addressed downstream packets.
-        # Assigned in business_fn (NOT at send time) so the bytes in the outbox carry
-        # a stable seq: recovery re-publishes the same bytes, the (WAL-wired) filter
-        # dedups them, and the obj4 duplicates stay gone. In-memory: resets on restart
-        # (the filter ignores already-DONE seqs). Guarded by self._lock (all writers
-        # run inside handle()).
-        self._downstream_seq: dict[tuple[str, int, int], int] = {}
-
         self._input_queue: MessageMiddlewareQueueRabbitMQ | MessageMiddlewareExchangeRabbitMQ | None = None
         self._downstream_outputs: dict | None = None
         # Named control queue senders for the main thread (EOF_RECEIVED broadcast).
@@ -100,8 +94,19 @@ class FileIngestor:
             node_id=f"file_ingestor_{config.id}",
             worker_state=self._state,
             snapshot_every=config.snapshot_interval,
+            output_edges=self._output_edges(),
         )
         self._runner: WorkerRunner | None = None
+
+    def _output_edges(self) -> dict[str, EdgeSpec]:
+        """One addressed edge per filter output. The SenderSequencer assigns the
+        durable per-(client, edge, shard) seq stamped into each packet, so the seq
+        survives a crash/restart and the downstream filter never dedup-drops a
+        post-recovery batch."""
+        return {
+            output.name: EdgeSpec(self._config.id, output.shard_count)
+            for output in self._config.outputs
+        }
 
     # ---------- connection factories ----------
 
@@ -122,17 +127,18 @@ class FileIngestor:
         }
 
     def _new_downstream_senders(self) -> dict:
-        """One exchange publisher per (output, shard) routing key. The destination
-        in the outbox is the routing key, so business_fn picks the shard (by payload
-        digest) and the publisher just routes — no re-sharding/seq at send time."""
-        senders = {}
-        for output in self._config.outputs:
-            for shard in range(output.shard_count):
-                routing_key = routing_key_for_shard(output.routing_prefix, shard)
-                senders[routing_key] = MessageMiddlewareExchangeRabbitMQ(
-                    self._config.mom_host, output.exchange, [routing_key]
-                )
-        return senders
+        """One ShardedPublisher per output edge, keyed by edge name. The
+        SenderSequencer addresses each packet and picks the destination shard; the
+        publisher just routes the already-stamped bytes to that shard."""
+        return {
+            output.name: ShardedPublisher(
+                self._config.mom_host,
+                output.exchange,
+                output.routing_prefix,
+                output.shard_count,
+            )
+            for output in self._config.outputs
+        }
 
     def _downstream_senders(self) -> dict:
         if self._downstream_outputs is None:
@@ -151,30 +157,6 @@ class FileIngestor:
             payload=payload,
         )
 
-    def _next_downstream_seq(self, output_name: str, shard: int, client_id: int) -> int:
-        key = (output_name, shard, client_id)
-        seq = self._downstream_seq.get(key, 0)
-        self._downstream_seq[key] = (seq + 1) & 0xFFFFFFFF
-        return seq
-
-    def _addressed_downstream(self, output, msg_type: MessageType,
-                              client_id: int, payload: bytes) -> tuple[str, bytes]:
-        """(routing_key, addressed packet) for one downstream output. The shard is
-        chosen by the payload digest (so a redelivery lands on the same filter shard
-        and dedups); the seq is per (output, shard, client) so each filter shard sees
-        a dense sequence."""
-        shard = shard_for_key(payload, output.shard_count)
-        routing_key = routing_key_for_shard(output.routing_prefix, shard)
-        seq = self._next_downstream_seq(output.name, shard, client_id)
-        packet = self._internal_protocol.create_addressed_packet(
-            msg_type=msg_type,
-            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-            sender_id=self._config.id,
-            seq=seq,
-            payload=payload,
-        )
-        return routing_key, packet
-
     def _eof_payload(self, expected_total: int) -> bytes:
         return self._control_serializer.serialize(
             ControlMessage(
@@ -185,23 +167,28 @@ class FileIngestor:
         )
 
     def _downstream_eof_outputs(self, client_id: int, total_forwarded: int) -> list:
-        """The single downstream EOF per filter output (addressed), carrying the
-        cross-replica forwarded total. One shard per output (broadcast mode: that
-        filter shard becomes the dynamic leader). Routed through the outbox."""
+        """One logical downstream EOF per filter output, carrying the cross-replica
+        forwarded total. The SenderSequencer addresses it (durable seq) and routes
+        it to the payload-digest shard, which becomes the dynamic leader in
+        broadcast mode. Routed through the outbox, so recovery re-publishes it."""
         eof_payload = self._eof_payload(total_forwarded)
         return [
-            self._addressed_downstream(output, MessageType.EOF, client_id, eof_payload)
+            (output.name, self._packet(MessageType.EOF, client_id, eof_payload))
             for output in self._config.outputs
         ]
 
     def _publish_outputs(self, entries, publishers: dict) -> None:
         """Publish stamped outbox entries, resolving each destination name against
-        the given publishers map (filter exchanges + control/response queues)."""
+        the given publishers map (filter edges + control/response queues). Sharded
+        edge entries route to their assigned shard; plain queue entries send as-is."""
         for entry in entries:
             publisher = publishers.get(entry.destination)
             if publisher is None:
                 raise KeyError(f"no publisher for destination {entry.destination!r}")
-            publisher.send(entry.body)
+            if entry.shard is None:
+                publisher.send(entry.body)
+            else:
+                publisher.send_to_shard(entry.body, entry.shard)
 
     def _do_broadcast(self, action: BroadcastAction, control_senders: dict) -> None:
         if action.sleep_before > 0:
@@ -244,10 +231,8 @@ class FileIngestor:
         outputs = []
         if transactions:
             body = self._transaction_serializer.serialize_batch(transactions)
-            outputs = [
-                self._addressed_downstream(output, MessageType.DATA, client_id, body)
-                for output in self._config.outputs
-            ]
+            packet = self._packet(MessageType.DATA, client_id, body)
+            outputs = [(output.name, packet) for output in self._config.outputs]
 
         if should_log_progress(self._state.batches_consumed()):
             logging.info(
@@ -258,10 +243,11 @@ class FileIngestor:
         return FileIngestorState.data_change(client_id, len(transactions)), outputs
 
     def _handle_upstream_eof(self, message: bytes, ack, nack) -> None:
-        """Upstream EOF (on the input queue) routed through the handler as a
-        durable input (kind=DATA): on_upstream_eof is idempotent, so apply_change
-        replays it safely; the broadcast (or N==1 downstream EOF) rides the outbox
-        and is re-published on recovery."""
+        """Upstream EOF (on the input queue) routed through the handler as a durable
+        input under kind=CTRL_UPSTREAM_EOF (a separate inbox bucket from DATA, so the
+        EOF's (sender, seq) never collides with a real DATA packet's): on_upstream_eof
+        is idempotent, so apply_change replays it safely; the broadcast (or N==1
+        downstream EOF) rides the outbox and is re-published on recovery."""
         try:
             _msg_type, client_id, sender_id, seq, payload = (
                 self._internal_protocol.unpack_addressed_packet(message)
@@ -271,7 +257,9 @@ class FileIngestor:
             msg_id = f"d:{sender_id}:{client_id}:{seq}"
 
             with self._lock:
-                status = self._handler.inbox.classify(client_id, sender_id, seq)
+                status = self._handler.inbox.classify(
+                    client_id, sender_id, seq, MsgKind.CTRL_UPSTREAM_EOF
+                )
                 if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
                     ack()
                     return
@@ -302,7 +290,8 @@ class FileIngestor:
                     return compound, outputs
 
                 instruction = self._handler.handle(
-                    msg_id, client_id, sender_id, seq, payload, bfn
+                    msg_id, client_id, sender_id, seq, payload, bfn,
+                    kind=MsgKind.CTRL_UPSTREAM_EOF,
                 )
 
             self._publish_outputs(instruction.outputs, self._data_publishers)
