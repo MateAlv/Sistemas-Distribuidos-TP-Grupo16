@@ -48,6 +48,7 @@ GATEWAY_Q4_DATA_EDGE = "gateway_q4_data"
 GATEWAY_Q4_EOF_EDGE = "gateway_q4_eof"
 Q4_DEDUPER_LEADER_EDGE = "q4_deduper_leader"
 LEADER_REPORT_KIND = MsgKind.CTRL_FLUSH_ACK
+GATEWAY_EOF_SEQ = 0xFFFFFFFF
 
 
 class Q4DeduperWorker:
@@ -125,6 +126,17 @@ class Q4DeduperWorker:
             payload=payload,
         )
 
+    def _gateway_packet(
+        self, msg_type: MessageType, client_id: int, seq: int, payload: bytes
+    ) -> bytes:
+        return self._proto.create_addressed_packet(
+            msg_type=msg_type,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            sender_id=ID,
+            seq=seq,
+            payload=payload,
+        )
+
     def _control_payload(
         self,
         sender_id: int,
@@ -153,12 +165,12 @@ class Q4DeduperWorker:
         outputs = []
         keys = self._state.accounts_for(client_id)
         accounts = list(self._iter_unique_accounts(keys))
-        for chunk in _chunks(accounts, Q4_DEDUPER_BATCH_MAX_ACCOUNTS):
+        for seq, chunk in enumerate(_chunks(accounts, Q4_DEDUPER_BATCH_MAX_ACCOUNTS)):
             payload = self._account_serializer.serialize_batch(chunk)
             outputs.append(
                 (
                     GATEWAY_Q4_DATA_EDGE,
-                    self._packet(MessageType.DATA, client_id, payload),
+                    self._gateway_packet(MessageType.DATA, client_id, seq, payload),
                 )
             )
         return outputs
@@ -173,9 +185,10 @@ class Q4DeduperWorker:
         )
         return (
             GATEWAY_Q4_EOF_EDGE,
-            self._packet(
+            self._gateway_packet(
                 MessageType.EOF,
                 client_id,
+                GATEWAY_EOF_SEQ,
                 self._control_payload(ID, expected_total, 0),
             ),
         )
