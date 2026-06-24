@@ -1,22 +1,13 @@
 """Bounded dedup tracker for one (client_id, sender_id) pair.
 
-Keeps the highest seq seen (`biggest`) plus the gaps below it that have not
-arrived yet (`pending`). A seq is a duplicate when it is at or below `biggest`
-and not one of the pending gaps. This bounds memory: gaps fill in as messages
-arrive, and the whole tracker is dropped when the client closes.
+Keeps the highest seq seen (biggest) plus the gaps below it not yet arrived
+(pending). A seq is a duplicate when it is at or below biggest and not pending.
 
-For near-sequential message IDs (e.g. worker-assigned 0, 1, 2, …) the gap
-between consecutive calls to observe() is typically 0 or 1 and pending stays
-tiny. For workers that derive the dedup key from a hash (e.g. sha256 of the
-raw message) the sender_id varies per message, so each message gets its own
-fresh tracker and the first observe() call sees a gap of up to 2**32.
-Populating pending for such a huge gap would allocate billions of integers and
-cause an OOM kill. _MAX_SEQUENTIAL_GAP caps the fill: if the gap is larger
-than the cap we only advance `biggest` without pre-populating pending. Any seq
-value in the skipped gap that later arrives will be mis-classified as DONE
-(seq ≤ biggest, not in pending) — this is safe for hash-derived keys because
-the probability of two different messages sharing the same sender_id prefix is
-negligible (~1/2**32 per pair).
+_MAX_SEQUENTIAL_GAP caps how many gap entries observe() pre-fills. Hash-derived
+dedup keys give each message a fresh tracker whose first seq can be near 2**32;
+filling that gap would allocate billions of ints and OOM. Past the cap we just
+advance biggest without filling, which can later mark a skipped seq as a
+duplicate, but for hash-derived keys a colliding sender_id is negligibly rare.
 """
 
 from __future__ import annotations

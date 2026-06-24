@@ -1,44 +1,6 @@
-"""WorkerState adapter for the q4_sum worker.
-
-Wraps the sum worker's per-client state behind the snapshot/restore/apply_change
-contract the durable-state engine expects.
-
-Change types
-------------
-  "data"
-      A Q4CountedEdge batch arrived. Carries the raw payload (base64);
-      apply_change deserializes and accumulates each edge's count into
-      _incoming_by_client or _outgoing_by_client, keyed by the intermediate
-      Q4AccountId. Mirrors the live worker's _accept_counted_edges without I/O.
-  "eof"
-      One upstream Q4Filter shard sent its EOF. Carries sender_id; apply_change
-      advances the UpstreamEofCounter. Idempotent: duplicates are ignored.
-  "close"
-      The client was fully emitted and cleaned up. Drops all per-client maps,
-      closes the EOF counter entry, and marks closed so late messages are
-      ignored on WAL replay.
-
-Caller protocol (one change dict per handle() call to PersistentStateHandler)
-------------------------------------------------------------------------------
-  DATA message
-    → data_change(client_id, payload)
-
-  EOF from one upstream Q4Filter shard:
-    → eof_change(client_id, sender_id)
-    If eof_count(client_id) == filter_amount after applying:
-      Read incoming_for(client_id) + outgoing_for(client_id).
-      Emit block-join edge batches to outbox (per partition to Q4Joiner).
-      → close_change(client_id)
-
-State accessors (read before close_change)
-------------------------------------------
-  incoming_for(client_id) → dict  intermediate → {endpoint: count} (INCOMING)
-  outgoing_for(client_id) → dict  intermediate → {endpoint: count} (OUTGOING)
-  processed_count(client_id) → int
-  eof_count(client_id)        → int  how many Q4Filter shards have sent EOF so far
-
-Note: _forwarded_by_partition_by_client is intentionally omitted — computed fresh
-at emit time (_emit_client_blocks) and not needed between arrivals.
+"""Per-client state for the q4_sum worker: accumulates counted edges per
+intermediate (incoming and outgoing), ready to emit block-join edges once every
+Q4Filter shard's EOF has arrived.
 """
 
 from __future__ import annotations
@@ -59,13 +21,11 @@ _counted_edge_ser = Q4CountedEdgeSerializer()
 class Q4SumState:
     def __init__(self, filter_amount: int) -> None:
         self._eof_counter = UpstreamEofCounter(filter_amount)
-        # intermediate Q4AccountId → endpoint Q4AccountId → accumulated count
+        # intermediate Q4AccountId -> {endpoint Q4AccountId: accumulated count}
         self._incoming_by_client: dict[int, dict] = {}
         self._outgoing_by_client: dict[int, dict] = {}
         self._processed_by_client: dict[int, int] = {}
         self._closed_by_client: set[int] = set()
-
-    # ---------- change constructors ----------
 
     @staticmethod
     def data_change(client_id: int, payload: bytes) -> dict:
@@ -88,8 +48,6 @@ class Q4SumState:
     def compound_change(*changes: dict) -> dict:
         return {"type": "compound", "changes": list(changes)}
 
-    # ---------- state accessors (read before close_change) ----------
-
     def incoming_for(self, client_id: int) -> dict:
         """Accumulated INCOMING counts per intermediate; read at emit time."""
         return self._incoming_by_client.get(client_id, {})
@@ -105,14 +63,11 @@ class Q4SumState:
         return self._eof_counter.count(client_id)
 
     def eof_would_complete(self, client_id: int, sender_id: int) -> bool:
-        """Read-only: would this EOF be the last upstream shard (triggering flush)?
-        Used by the decide step before mutating via eof_change."""
+        """Read-only: would this EOF be the last upstream shard (triggering the flush)?"""
         return self._eof_counter.would_flush(client_id, sender_id)
 
     def is_closed(self, client_id: int) -> bool:
         return client_id in self._closed_by_client
-
-    # ---------- WorkerState protocol ----------
 
     def snapshot(self) -> dict:
         # Q4AccountId frozen dataclasses are picklable and hashable (used as dict keys).
@@ -138,7 +93,7 @@ class Q4SumState:
         self._closed_by_client = set(data["closed_by_client"])
 
     def apply_change(self, change: dict) -> None:
-        # Single mutation path — runs both live and during WAL replay.
+        # Single mutation path: runs both live and during WAL replay.
         kind = change["type"]
         if kind == "compound":
             for sub in change["changes"]:
@@ -153,8 +108,6 @@ class Q4SumState:
             self._apply_close(client_id)
         else:
             raise ValueError(f"unknown change type: {kind}")
-
-    # ---------- private ----------
 
     def _apply_data(self, client_id: int, change: dict) -> None:
         if client_id in self._closed_by_client:
@@ -178,7 +131,7 @@ class Q4SumState:
         )
 
     def _apply_eof(self, client_id: int, change: dict) -> None:
-        # UpstreamEofCounter ignores duplicates — idempotent on WAL replay.
+        # UpstreamEofCounter ignores duplicates: idempotent on WAL replay.
         self._eof_counter.on_eof(client_id, change["sender_id"])
 
     def _apply_close(self, client_id: int) -> None:

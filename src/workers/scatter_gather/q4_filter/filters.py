@@ -99,8 +99,6 @@ class Q4FilterWorker:
         self._handler.recover()
         self._republish_pending()
 
-    # ---------- connection helpers ----------
-
     def _new_input(self):
         if INPUT_EXCHANGE:
             return MessageMiddlewareExchangeRabbitMQ(
@@ -151,8 +149,6 @@ class Q4FilterWorker:
                     ID,
                     entry.destination,
                 )
-
-    # ---------- packet helpers ----------
 
     def _packet(self, msg_type: MessageType, client_id: int, payload: bytes) -> bytes:
         return self._proto.create_packet(
@@ -235,8 +231,6 @@ class Q4FilterWorker:
             time.sleep(action.sleep_before)
         for qname in action.queue_names:
             self._tl_sender(qname).send(action.message)
-
-    # ---------- data path ----------
 
     def _process_data_message(self, raw, ack, nack) -> None:
         try:
@@ -336,8 +330,6 @@ class Q4FilterWorker:
             count,
             forwarded,
         )
-
-    # ---------- control path ----------
 
     def _handle_control(self, message, ack, nack) -> None:
         try:
@@ -439,8 +431,6 @@ class Q4FilterWorker:
                 control_consumer.start_consuming(self._handle_control)
         finally:
             control_consumer.close()
-
-    # ---------- response path (leader only) ----------
 
     def _handle_response(self, message, ack, nack) -> None:
         try:
@@ -588,8 +578,6 @@ class Q4FilterWorker:
                 response_consumer.start_consuming(self._handle_response)
         finally:
             response_consumer.close()
-
-    # ---------- lifecycle ----------
 
     def start(self) -> None:
         self._ensure_output_bindings()

@@ -1,24 +1,9 @@
-"""WorkerState adapter for the file ingestor (broadcast EOF mode).
+"""Per-client state for the file ingestor (broadcast EOF mode).
 
-Mirrors ``aggregator_state``: the EofCoordinator transitions are WAL-tracked via
-``coordinator_*`` change types (decide/apply), so a crash recovers the
-dynamic-leader role and the flush/close decisions, not just the last snapshot.
+The EofCoordinator transitions are recorded as coordinator_* changes, so a crash
+recovers the leader role and flush/close decisions, not just the last snapshot.
 Count-collection messages (EOF_RECEIVED / PROCESSED_ANSWER / PROCESSED_REQUEST)
-stay transient and are rebuilt by RabbitMQ redelivery + the coordinator's retry.
-
-apply_change is the single mutation path, run live and on WAL replay.
-
-Change types
-------------
-  "data"                      one DATA batch processed; carries the forwarded
-                              transaction count (closed clients ignore it).
-  "close"                     the client was flushed; drop its counter and mark
-                              it closed so late stragglers are ignored.
-  "coordinator_upstream_eof"  replay coordinator.on_upstream_eof (idempotent).
-  "coordinator_msg"           replay coordinator.process_control_message
-                              (e.g. FLUSH_ACK on the leader).
-  "coordinator_cleanup"       replay coordinator.cleanup_client (non-leader).
-  "compound"                  apply several of the above atomically.
+are transient and rebuilt by redelivery and the coordinator's retry.
 """
 
 from __future__ import annotations

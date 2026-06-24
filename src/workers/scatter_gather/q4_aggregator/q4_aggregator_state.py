@@ -1,12 +1,6 @@
-"""WorkerState adapter for the q4_aggregator worker.
-
-Wraps the aggregator's per-client state behind the snapshot/restore/apply_change
-contract the durable-state engine expects.
-
-DATA changes replay pair counting and qualification. When a pair reaches
-Q4_QUALIFY_THRESHOLD it is marked qualified and the two account-candidate counts
-are recorded by deduper partition. The actual account-candidate packets are
-created by the worker and stored in the durable outbox.
+"""Per-client state for the q4_aggregator worker: sums path counts per (A, B)
+pair; when a pair reaches Q4_QUALIFY_THRESHOLD it qualifies and its two account
+candidates are recorded by deduper partition.
 """
 
 from __future__ import annotations
@@ -36,8 +30,6 @@ class Q4AggregatorState:
         self._processed_by_client: dict[int, int] = {}
         self._closed_by_client: set[int] = set()
 
-    # ---------- change constructors ----------
-
     @staticmethod
     def data_change(client_id: int, payload: bytes) -> dict:
         return {
@@ -57,8 +49,6 @@ class Q4AggregatorState:
     @staticmethod
     def compound_change(*changes: dict) -> dict:
         return {"type": "compound", "changes": list(changes)}
-
-    # ---------- state accessors ----------
 
     def pair_counts_for(self, client_id: int) -> dict[tuple, int]:
         return self._pair_counts_by_client.get(client_id, {})
@@ -103,8 +93,6 @@ class Q4AggregatorState:
             ),
         )
         return dict(by_partition)
-
-    # ---------- WorkerState protocol ----------
 
     def snapshot(self) -> dict:
         return {
@@ -164,8 +152,6 @@ class Q4AggregatorState:
             self._apply_close(client_id)
         else:
             raise ValueError(f"unknown change type: {kind}")
-
-    # ---------- private ----------
 
     def _apply_data(self, client_id: int, change: dict) -> None:
         if client_id in self._closed_by_client:

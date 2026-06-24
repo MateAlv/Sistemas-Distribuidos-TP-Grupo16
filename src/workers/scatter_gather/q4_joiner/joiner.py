@@ -165,8 +165,6 @@ class Q4JoinerWorker:
                     entry.destination,
                 )
 
-    # ---------- block joining (pure) ----------
-
     def _account_parts(self, account: Q4AccountId):
         return (account.bank_id, account.account)
 
@@ -259,8 +257,6 @@ class Q4JoinerWorker:
                 expected_total,
             )
         return outputs
-
-    # ---------- data path ----------
 
     def _handle_data(self, msg_id, client_id, sender_id, seq, payload, ack) -> None:
         def bfn(data):
