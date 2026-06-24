@@ -1,62 +1,16 @@
-"""WorkerState adapter for the q4_deduper worker.
+"""Per-client state for the q4_deduper worker, behind the
+snapshot/restore/apply_change contract the durable-state engine expects.
+apply_change runs both live and during WAL replay, so it stays in-memory.
 
-Wraps the deduper's per-client state behind the snapshot/restore/apply_change
-contract the durable-state engine expects.
+Change types: "data" (a Q4AccountId batch, payload kept as base64; keys go into
+a per-client set that absorbs duplicates), "eof" (one upstream Q4Aggregator
+shard reported, advancing the EOF counter; idempotent), and "close" (drop the
+client's set once every shard's EOF arrived and the accounts were emitted).
 
-Change types
-------------
-  "data"
-      A Q4AccountId batch arrived. Carries the raw payload (base64);
-      apply_change deserializes and adds each (bank_id, account) tuple to the
-      per-client set. The set deduplicates — repeated keys are absorbed,
-      making replay idempotent.
-  "eof"
-      One upstream Q4Aggregator shard sent its EOF. Carries sender_id;
-      apply_change advances the UpstreamEofCounter. Idempotent: duplicates
-      are ignored.
-  "close"
-      The shard's dedup set + EOF counter are dropped and the client is marked
-      closed. Late DATA messages for that client are ignored on WAL replay.
-  "leader_report"  (shard 0 only, when deduper_amount > 1)
-      One deduper shard's emitted-account count arrived. Records sender_id and
-      accumulates the total. Idempotent: duplicate sender_ids are ignored by
-      set membership. When all deduper_amount shards have reported, the live
-      worker sends the gateway EOF (output lives in the durable outbox).
-  "leader_close"   (shard 0 only, when deduper_amount > 1)
-      All shards have reported; leader drops its accumulator for the client.
-      Emitted immediately after the last "leader_report" in the same message.
-
-When deduper_amount == 1 there are no leader_report / leader_close changes.
-
-Caller protocol (one change dict per handle() call to PersistentStateHandler)
-------------------------------------------------------------------------------
-  DATA message
-    → data_change(client_id, payload)
-
-  EOF from one upstream Q4Aggregator shard:
-    → eof_change(client_id, sender_id)
-    If eof_count(client_id) == aggregator_amount after applying:
-      Read accounts_for(client_id) → emit deduplicated account batch to outbox.
-      → close_change(client_id)
-      If deduper_amount > 1 (not shard 0): send shard-report to shard 0.
-
-  Shard report received (shard 0 only, deduper_amount > 1):
-    shard_report = (sender_id, emitted_count) from a non-zero deduper shard.
-    → leader_report_change(client_id, sender_id, emitted_accounts)
-    If all deduper_amount shards have now reported:
-      emit gateway EOF with leader_total(client_id).
-      → leader_close_change(client_id)
-      Bundle leader_report_change + leader_close_change for the last shard into
-      a single compound change (one change per message).
-
-State accessors (read before close_change / leader_close_change)
-----------------------------------------------------------------
-  accounts_for(client_id)    → set[tuple[str,str]]  deduplicated (bank_id, account) keys
-  processed_count(client_id) → int
-  eof_count(client_id)       → int  how many Q4Aggregator shards have sent EOF
-  leader_total(client_id)    → int  accumulated emitted_accounts from all shards
-  is_closed(client_id)       → bool
-  is_leader_closed(client_id)→ bool
+When deduper_amount > 1, shard 0 also collects per-shard emitted-account counts:
+"leader_report" (records one shard's count, idempotent by sender_id) and
+"leader_close" (drop the accumulator once all shards reported and the gateway
+EOF was sent).
 """
 
 from __future__ import annotations
@@ -75,7 +29,7 @@ class Q4DeduperState:
         self._eof_counter = UpstreamEofCounter(aggregator_amount)
         # deduper_amount is the threshold for leader_report collection.
         self._deduper_amount = deduper_amount
-        # Account keys are (bank_id, account) tuples — picklable and hashable.
+        # Account keys are (bank_id, account) tuples: picklable and hashable.
         self._accounts_by_client: dict[int, set[tuple[str, str]]] = {}
         self._processed_by_client: dict[int, int] = {}
         self._closed_by_client: set[int] = set()
@@ -83,8 +37,6 @@ class Q4DeduperState:
         self._leader_reports_by_client: dict[int, set[int]] = {}
         self._leader_totals_by_client: dict[int, int] = {}
         self._leader_closed_by_client: set[int] = set()
-
-    # ---------- change constructors ----------
 
     @staticmethod
     def data_change(client_id: int, payload: bytes) -> dict:
@@ -120,8 +72,6 @@ class Q4DeduperState:
     def compound_change(*changes: dict) -> dict:
         return {"type": "compound", "changes": list(changes)}
 
-    # ---------- state accessors (read before close_change) ----------
-
     def accounts_for(self, client_id: int) -> set[tuple[str, str]]:
         return self._accounts_by_client.get(client_id, set())
 
@@ -153,8 +103,6 @@ class Q4DeduperState:
 
     def is_leader_closed(self, client_id: int) -> bool:
         return client_id in self._leader_closed_by_client
-
-    # ---------- WorkerState protocol ----------
 
     def snapshot(self) -> dict:
         return {
@@ -195,7 +143,7 @@ class Q4DeduperState:
         self._leader_closed_by_client = set(data["leader_closed_by_client"])
 
     def apply_change(self, change: dict) -> None:
-        # Single mutation path — runs both live and during WAL replay.
+        # Single mutation path: runs both live and during WAL replay.
         kind = change["type"]
         if kind == "compound":
             for sub in change["changes"]:
@@ -215,8 +163,6 @@ class Q4DeduperState:
         else:
             raise ValueError(f"unknown change type: {kind}")
 
-    # ---------- private ----------
-
     def _apply_data(self, client_id: int, change: dict) -> None:
         if client_id in self._closed_by_client:
             return
@@ -230,7 +176,7 @@ class Q4DeduperState:
         )
 
     def _apply_eof(self, client_id: int, change: dict) -> None:
-        # UpstreamEofCounter ignores duplicates — idempotent on WAL replay.
+        # UpstreamEofCounter ignores duplicates: idempotent on WAL replay.
         self._eof_counter.on_eof(client_id, change["sender_id"])
 
     def _apply_close(self, client_id: int) -> None:

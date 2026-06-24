@@ -51,8 +51,8 @@ SNAPSHOT_INTERVAL = int(os.environ.get("SNAPSHOT_INTERVAL", "1000"))
 # Logical name of the downstream edge in the publisher registry / outbox.
 Q4_JOINER_EDGE = "q4_joiner"
 
-# Hot-M planning constants. An intermediary whose incoming×outgoing fan-out
-# exceeds the threshold is split across HOT_A_BUCKETS × HOT_B_BUCKETS join
+# Hot-M planning constants. An intermediary whose incoming x outgoing fan-out
+# exceeds the threshold is split across HOT_A_BUCKETS x HOT_B_BUCKETS join
 # blocks so a hub never lands on a single joiner.
 Q4_SUM_HOT_PAIR_THRESHOLD = 1_000_000
 Q4_SUM_HOT_A_BUCKETS = 16
@@ -129,8 +129,6 @@ class Q4SumWorker:
             },
         )
 
-    # ---------- packet helpers ----------
-
     def _packet(self, msg_type: MessageType, client_id: int, payload: bytes) -> bytes:
         return self._proto.create_packet(
             msg_type=msg_type,
@@ -159,8 +157,6 @@ class Q4SumWorker:
             else:
                 publisher.send_to_shard(entry.body, entry.shard)
 
-    # ---------- block planning (pure) ----------
-
     def _account_parts(self, account: Q4AccountId):
         return (account.bank_id, account.account)
 
@@ -176,15 +172,15 @@ class Q4SumWorker:
         )
 
     def _block_plan(self, incoming_size: int, outgoing_size: int) -> tuple[int, int]:
-        """Small fan-out (incoming x outgoing) → one block (1, 1). Above the
-        hot-pair threshold → a HOT_A_BUCKETS x HOT_B_BUCKETS grid."""
+        """Small fan-out (incoming x outgoing) stays one block (1, 1); above the
+        hot-pair threshold it spreads over a HOT_A_BUCKETS x HOT_B_BUCKETS grid."""
         if incoming_size * outgoing_size <= Q4_SUM_HOT_PAIR_THRESHOLD:
             return 1, 1
         return max(1, Q4_SUM_HOT_A_BUCKETS), max(1, Q4_SUM_HOT_B_BUCKETS)
 
     def _build_flush_outputs(self, client_id: int) -> list:
         """Pure: read the accumulated counts and return the logical outputs for
-        this client's end — block-join batches per joiner partition plus one EOF
+        this client's end: block-join batches per joiner partition plus one EOF
         per joiner partition carrying that partition's record count. No mutation
         and no I/O, so handle()/WAL replay reproduces it exactly."""
         incoming = self._state.incoming_for(client_id)
@@ -251,8 +247,6 @@ class Q4SumWorker:
                 (Q4_JOINER_EDGE, self._packet(MessageType.EOF, client_id, eof_payload), partition)
             )
         return outputs
-
-    # ---------- data path (durable) ----------
 
     def _data_process_payload(self, client_id: int, payload: bytes):
         """business_fn for a DATA batch: accumulate the counted edges into state,
@@ -323,8 +317,6 @@ class Q4SumWorker:
         else:
             logging.error("q4_sum_unknown_message_type | id=%s | type=%s", ID, msg_type)
             nack(requeue=False)
-
-    # ---------- lifecycle ----------
 
     def start(self) -> None:
         self._ensure_output_bindings()

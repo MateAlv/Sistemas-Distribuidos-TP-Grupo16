@@ -1,12 +1,13 @@
-"""WorkerState adapter for the q4_aggregator worker.
+"""Per-client state for the q4_aggregator worker, behind the
+snapshot/restore/apply_change contract the durable-state engine expects.
+apply_change runs both live and during WAL replay, so it stays in-memory.
 
-Wraps the aggregator's per-client state behind the snapshot/restore/apply_change
-contract the durable-state engine expects.
-
-DATA changes replay pair counting and qualification. When a pair reaches
-Q4_QUALIFY_THRESHOLD it is marked qualified and the two account-candidate counts
-are recorded by deduper partition. The actual account-candidate packets are
-created by the worker and stored in the durable outbox.
+Change types: "data" (a Q4PairPaths batch, payload kept as base64; path counts
+accumulate per (A, B) pair until one reaches Q4_QUALIFY_THRESHOLD, which marks
+it qualified and records its two account candidates by deduper partition),
+"eof" (one upstream Q4Joiner shard reported, advancing the EOF counter;
+idempotent), and "close" (drop the client's maps once every shard's EOF
+arrived). The qualifying account-candidate packets ride the durable outbox.
 """
 
 from __future__ import annotations
@@ -36,8 +37,6 @@ class Q4AggregatorState:
         self._processed_by_client: dict[int, int] = {}
         self._closed_by_client: set[int] = set()
 
-    # ---------- change constructors ----------
-
     @staticmethod
     def data_change(client_id: int, payload: bytes) -> dict:
         return {
@@ -57,8 +56,6 @@ class Q4AggregatorState:
     @staticmethod
     def compound_change(*changes: dict) -> dict:
         return {"type": "compound", "changes": list(changes)}
-
-    # ---------- state accessors ----------
 
     def pair_counts_for(self, client_id: int) -> dict[tuple, int]:
         return self._pair_counts_by_client.get(client_id, {})
@@ -103,8 +100,6 @@ class Q4AggregatorState:
             ),
         )
         return dict(by_partition)
-
-    # ---------- WorkerState protocol ----------
 
     def snapshot(self) -> dict:
         return {
@@ -164,8 +159,6 @@ class Q4AggregatorState:
             self._apply_close(client_id)
         else:
             raise ValueError(f"unknown change type: {kind}")
-
-    # ---------- private ----------
 
     def _apply_data(self, client_id: int, change: dict) -> None:
         if client_id in self._closed_by_client:

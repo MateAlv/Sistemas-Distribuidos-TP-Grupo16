@@ -1,88 +1,13 @@
-"""WorkerState adapter for the q4_filter worker.
+"""Per-client state for the q4_filter worker, behind the
+snapshot/restore/apply_change contract the durable-state engine expects.
+apply_change runs both live and during WAL replay, so it stays in-memory and
+does no I/O.
 
-Wraps the filter's per-client state behind the snapshot/restore/apply_change
-contract the durable-state engine expects.
-
-Change types
-------------
-  "data"
-      A transaction batch arrived. Carries the raw payload (base64) so
-      apply_change can replay the source-gate logic identically.
-
-      Source-gate: for each source account, edges accumulate until ≥ 6 distinct
-      targets are seen (notebook-bank qualification rule). Once a source qualifies,
-      pending edges are emitted as two Q4CountedEdge records each (INCOMING with
-      intermediate=target, OUTGOING with intermediate=source), routed to a Q4Sum
-      partition by partition_for_parts. Counts per partition are tracked in
-      _forwarded_by_partition_by_client so the EOF can tell each Q4Sum shard how
-      many records it will receive.
-
-      apply_change replays this entirely in memory (no I/O): updates
-      _states_by_client and _forwarded_by_partition_by_client identically to
-      the live path, without touching the outbox.
-
-  "close"
-      The client was flushed and cleaned up. Drops all per-client maps.
-  "coordinator_upstream_eof"
-      coordinator.on_upstream_eof was called. action discarded on replay.
-      Flush_order mode: updates _seen_eof and, on the leader, _leader_expected.
-  "coordinator_msg"
-      coordinator.process_control_message was called with a state-mutating type:
-      PROCESSED_ANSWER or FLUSH_ACK only. Flush_order mode has no EOF_RECEIVED
-      broadcast — each shard's EOF goes directly to the fixed leader via
-      on_upstream_eof → SendAnswerAction.
-  "coordinator_cleanup"
-      coordinator.cleanup_client was called (non-leader, after FLUSH_ORDER).
-
-Coordinator mode: flush_order
-------------------------------
-Unlike broadcast mode, the flush_order protocol has no EOF_RECEIVED step.
-When a shard receives its upstream EOF, it calls on_upstream_eof which on the
-non-leader returns SendAnswerAction (send a PROCESSED_ANSWER to the leader
-directly). The leader accumulates PROCESSED_ANSWERs until all shards have
-reported, then broadcasts FLUSH_ORDER.
-
-Caller protocol (one change dict per handle() call to PersistentStateHandler)
-------------------------------------------------------------------------------
-  DATA message
-    → data_change(client_id, payload)
-
-  Upstream EOF (data thread):
-    action = coordinator.on_upstream_eof(client_id, expected_total, count, fwd)
-    → coordinator_upstream_eof_change(client_id, expected_total, count, fwd)
-    Execute action outside the lock (SendAnswerAction on non-leader, or
-    FlushOrderAction on leader if N=1).
-
-  Response PROCESSED_ANSWER (leader, from a non-leader shard):
-    action = coordinator.process_control_message(PROCESSED_ANSWER, client_id, ctrl)
-    → coordinator_msg_change(PROCESSED_ANSWER, client_id, ctrl.sender_id,
-                              ctrl.expected_total, ctrl.processed_count)
-    Execute action outside the lock (FlushOrderAction when last answer arrives).
-
-  Non-leader close (FLUSH_ORDER received → FlushAction(is_leader=False)):
-    Read forwarded_by_partition(client_id) → build per-partition EOF batch.
-    coordinator.cleanup_client(client_id)
-    → coordinator_cleanup_change(client_id) + close_change(client_id)
-      Bundle into a single compound change (one change per message).
-
-  Leader close (all FLUSH_ACKs → FlushAction(is_leader=True)):
-    action = coordinator.process_control_message(FLUSH_ACK, client_id, ctrl)
-    → coordinator_msg_change(FLUSH_ACK, client_id, ...)
-    When FlushAction(is_leader=True): emit downstream gateway EOF.
-    → close_change(client_id)
-    (_on_flush_ack already cleaned coordinator state; no coordinator_cleanup needed.)
-
-  N=1 shortcut (on_upstream_eof returns FlushAction directly):
-    → coordinator_upstream_eof_change(...)
-    Emit per-partition EOF using forwarded_by_partition(client_id).
-    → close_change(client_id)
-
-State accessors (read before close_change)
-------------------------------------------
-  forwarded_by_partition(client_id) → dict[int, int]  per-partition send counts
-  source_states_for(client_id)      → dict  per-source qualification state
-  processed_count(client_id)        → int
-  forwarded_total(client_id)        → int  sum of all partition counts
+Change types: "data" (a transaction batch; the payload is kept as base64 so it
+can be replayed), "close" (drop the client's state), and three that replay the
+EOF/flush protocol on the coordinator ("coordinator_upstream_eof",
+"coordinator_msg", "coordinator_cleanup"). The coordinator runs in flush_order
+mode, so each shard reports its EOF straight to the fixed leader.
 """
 
 from __future__ import annotations
@@ -107,36 +32,33 @@ from common.message_protocol.internal import (
 
 _tx_ser = TransactionSerializer()
 
-# Number of distinct targets a source must reach before it qualifies.
-# Matches the threshold in _accept_edge_locked in filters.py.
+# Distinct targets a source must reach before it qualifies (scatter-gather rule).
 _QUALIFY_TARGETS = 6
 
 
 @dataclass
 class _SourceState:
-    """Per-source accumulator for the source-gate. Mirrors filters._SourceState."""
-    # set[Q4AccountId] — Q4AccountId is a frozen dataclass (hashable, picklable)
+    """Per-source accumulator for the source-gate."""
+    # set[Q4AccountId]; frozen dataclass, so hashable and picklable for snapshots
     targets: set = field(default_factory=set)
     qualified: bool = False
-    # list[Q4TransactionEdge] — pending edges waiting for qualification
+    # pending edges waiting for the source to qualify
     pending: list = field(default_factory=list)
 
 
 class Q4FilterState:
     def __init__(self, coordinator: EofCoordinator, sum_amount: int) -> None:
-        # coordinator is shared with the worker; snapshotted here so that
-        # EOF broadcast / flush protocol state survives a restart.
+        # coordinator is shared with the worker; snapshotted here so the
+        # flush protocol state survives a restart.
         self._coordinator = coordinator
         # sum_amount determines partition routing for forwarded counted edges.
         self._sum_amount = sum_amount
-        # source Q4AccountId → _SourceState
+        # client_id -> {source Q4AccountId: _SourceState}
         self._states_by_client: dict[int, dict] = {}
-        # partition index → forwarded count; needed to emit per-partition EOF totals.
+        # client_id -> {partition index: forwarded count}, for per-partition EOF totals
         self._forwarded_by_partition_by_client: dict[int, dict[int, int]] = {}
         self._processed_by_client: dict[int, int] = {}
         self._closed_by_client: set[int] = set()
-
-    # ---------- change constructors ----------
 
     @staticmethod
     def data_change(client_id: int, payload: bytes) -> dict:
@@ -194,8 +116,6 @@ class Q4FilterState:
     def compound_change(*changes: dict) -> dict:
         return {"type": "compound", "changes": list(changes)}
 
-    # ---------- state accessors (read before close_change) ----------
-
     def source_states_for(self, client_id: int) -> dict:
         """Per-source qualification state; live worker reads this at close time."""
         return self._states_by_client.get(client_id, {})
@@ -214,10 +134,10 @@ class Q4FilterState:
         return client_id in self._closed_by_client
 
     def predict_data_outputs(self, client_id: int, payload: bytes) -> dict[int, list]:
-        """Read-only decide step: return the counted edges this batch would emit,
-        grouped by Q4Sum partition, WITHOUT mutating state. Runs the same gate as
-        apply_change on per-source working copies, so the outbox the worker builds
-        from this matches the state apply_change(data_change) will reconstruct."""
+        """Read-only: the counted edges this batch would emit, grouped by Q4Sum
+        partition, without mutating state. Runs the same gate as apply_change on
+        per-source working copies, so the outbox the worker builds from this
+        matches the state apply_change(data_change) reconstructs."""
         if client_id in self._closed_by_client:
             return {}
         transactions = _tx_ser.deserialize_batch(payload)
@@ -234,11 +154,8 @@ class Q4FilterState:
                 by_partition[self._partition_of(counted)].append(counted)
         return dict(by_partition)
 
-    # ---------- WorkerState protocol ----------
-
     def snapshot(self) -> dict:
-        # _SourceState dataclasses are picklable; Q4AccountId / Q4TransactionEdge
-        # are frozen dataclasses with primitive fields — all picklable too.
+        # _SourceState, Q4AccountId and Q4TransactionEdge are all picklable.
         return {
             "states_by_client": {
                 cid: dict(src_states)
@@ -273,7 +190,7 @@ class Q4FilterState:
         self._closed_by_client = set(data["closed_by_client"])
 
     def apply_change(self, change: dict) -> None:
-        # Single mutation path — runs both live and during WAL replay.
+        # Single mutation path: runs both live and during WAL replay.
         kind = change["type"]
         if kind == "compound":
             for sub in change["changes"]:
@@ -302,8 +219,6 @@ class Q4FilterState:
             self._coordinator.cleanup_client(client_id)
         else:
             raise ValueError(f"unknown change type: {kind}")
-
-    # ---------- private ----------
 
     def _apply_data(self, client_id: int, change: dict) -> None:
         if client_id in self._closed_by_client:
@@ -339,11 +254,10 @@ class Q4FilterState:
         )
 
     def _gate_emit(self, state: "_SourceState", edge: Q4TransactionEdge) -> list:
-        """Source-gate step shared by apply (mutates real state) and predict
-        (mutates a working copy). Mutates ``state`` and returns the Q4CountedEdge
-        records emitted for this edge: two per qualified Q4TransactionEdge
-        (INCOMING intermediate=target, OUTGOING intermediate=source). An edge that
-        keeps its source below the qualification threshold emits nothing."""
+        """Source-gate step shared by apply (real state) and predict (a working
+        copy). Mutates state and returns the Q4CountedEdge records for this edge:
+        two per qualified edge (INCOMING intermediate=target, OUTGOING
+        intermediate=source), or none while the source stays below the threshold."""
         if state.qualified:
             return _counted_for(edge)
         state.pending.append(edge)
@@ -351,7 +265,7 @@ class Q4FilterState:
             state.targets.add(edge.target)
         if len(state.targets) < _QUALIFY_TARGETS:
             return []
-        # Source just qualified — flush all pending edges.
+        # Source just qualified: flush all pending edges.
         state.qualified = True
         state.targets.clear()
         emitted: list = []

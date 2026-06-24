@@ -245,8 +245,6 @@ class Q4DeduperWorker:
                     entry.destination,
                 )
 
-    # ---------- data path ----------
-
     def _handle_data(self, msg_id, client_id, sender_id, seq, payload, ack) -> None:
         def bfn(data):
             return Q4DeduperState.data_change(client_id, data), []
@@ -336,8 +334,6 @@ class Q4DeduperWorker:
         except Exception:
             logging.exception("q4_deduper_error | id=%s", ID)
             nack(requeue=True)
-
-    # ---------- leader report path ----------
 
     def _handle_leader_report(
         self,
