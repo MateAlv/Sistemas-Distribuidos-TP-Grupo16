@@ -7,7 +7,22 @@ import os
 # Add parent directory to path to import manager
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from manager import ChaosManager, excluded_from_env, DEFAULT_EXCLUDED
+from manager import (
+    ChaosManager,
+    excluded_from_env,
+    included_from_env,
+    DEFAULT_EXCLUDED,
+)
+
+DEMO_ALLOWLIST = [
+    "file_ingestor",
+    "file_splitter",
+    "q4_filter",
+    "q4_joiner",
+    "q4_sum",
+    "q4_aggregator",
+    "q4_deduper",
+]
 
 class TestChaosManager(unittest.TestCase):
     def setUp(self):
@@ -75,6 +90,95 @@ class TestChaosManager(unittest.TestCase):
         result = self.manager.kill_container("target_container")
 
         self.assertIsNone(result)
+
+
+class TestChaosManagerAllowlist(unittest.TestCase):
+    @patch('manager.ChaosManager.get_running_containers')
+    def test_allowlist_kills_only_listed_workers(self, mock_get_containers):
+        manager = ChaosManager(included_containers=DEMO_ALLOWLIST)
+        mock_get_containers.return_value = [
+            # allowed
+            "file_ingestor_4", "file_splitter_0",
+            "q4_filter_0", "q4_joiner_0", "q4_sum_0", "q4_aggregator_4",
+            "q4_deduper_0",
+            # protected (must survive)
+            "sum_q2_1", "sum_q3_5", "q3_barrier_0", "q2_bank_name_joiner_0",
+            "filter_q5_usd_2", "filter_usd_0", "filter_q1_1", "filter_date_2",
+            "filter_q5_format_0", "aggregation_q2_0", "aggregation_q3_1",
+            "aggregation_q5_0", "join_q2_0", "join_q3_0", "join_q5_0",
+            "gateway", "rabbitmq", "rates_service", "client_0",
+            "monitor_0", "chaos_monkey",
+        ]
+
+        targets = manager.get_valid_targets()
+
+        self.assertEqual(
+            sorted(targets),
+            sorted([
+                "file_ingestor_4", "file_splitter_0",
+                "q4_filter_0", "q4_joiner_0", "q4_sum_0", "q4_aggregator_4",
+                "q4_deduper_0",
+            ]),
+        )
+
+    @patch('manager.ChaosManager.get_running_containers')
+    def test_allowlist_does_not_leak_to_lookalike_services(self, mock_get_containers):
+        # filter_q5_usd must not match filter_usd / filter_q5_format;
+        # sum_q2 must not match aggregation_q2; q4_aggregator must not match
+        # aggregation_q2.
+        manager = ChaosManager(included_containers=DEMO_ALLOWLIST)
+        mock_get_containers.return_value = [
+            "filter_usd_0", "filter_q5_format_0", "aggregation_q2_0",
+        ]
+        self.assertEqual(manager.get_valid_targets(), [])
+
+    @patch('manager.ChaosManager.get_running_containers')
+    def test_empty_allowlist_falls_back_to_exclude_only(self, mock_get_containers):
+        manager = ChaosManager()  # no allowlist
+        mock_get_containers.return_value = ["filter_usd_0", "rabbitmq"]
+        self.assertEqual(manager.get_valid_targets(), ["filter_usd_0"])
+
+
+class TestMonitorLeader(unittest.TestCase):
+    @patch('manager.ChaosManager.get_running_containers')
+    def test_monitor_leader_is_highest_numbered(self, mock_get_containers):
+        manager = ChaosManager()
+        mock_get_containers.return_value = [
+            "monitor_1", "monitor_3", "monitor_2", "q4_sum_0", "gateway",
+        ]
+        self.assertEqual(manager.monitor_leader(), "monitor_3")
+
+    @patch('manager.ChaosManager.get_running_containers')
+    def test_monitor_leader_none_when_absent(self, mock_get_containers):
+        manager = ChaosManager()
+        mock_get_containers.return_value = ["q4_sum_0", "gateway"]
+        self.assertIsNone(manager.monitor_leader())
+
+    @patch('subprocess.run')
+    @patch('manager.ChaosManager.get_running_containers')
+    def test_kill_monitor_leader_targets_leader(self, mock_get_containers, mock_run):
+        manager = ChaosManager(included_containers=DEMO_ALLOWLIST)
+        mock_get_containers.return_value = ["monitor_1", "monitor_2", "monitor_3"]
+        result = manager.kill_monitor_leader()
+        self.assertEqual(result, "monitor_3")
+        mock_run.assert_called_once_with(
+            ["docker", "kill", "monitor_3"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
+class TestIncludedFromEnv(unittest.TestCase):
+    def test_empty_when_unset(self):
+        self.assertEqual(included_from_env({}), [])
+
+    def test_parses_chaos_include(self):
+        result = included_from_env({"CHAOS_INCLUDE": "file_ingestor, q4_sum"})
+        self.assertEqual(result, ["file_ingestor", "q4_sum"])
+
+    def test_ignores_blank_entries(self):
+        self.assertEqual(included_from_env({"CHAOS_INCLUDE": " , ,"}), [])
 
 
 class TestExcludedFromEnv(unittest.TestCase):

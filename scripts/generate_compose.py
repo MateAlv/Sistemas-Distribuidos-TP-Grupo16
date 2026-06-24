@@ -1557,13 +1557,28 @@ def client_service(client_id: int, account: dict, settings: dict, depends_on: li
 
 def chaos_monkey_service(settings: dict, client_names: list[str]) -> dict:
     chaos = settings.get("chaos", {})
+    environment = [
+        "PYTHONUNBUFFERED=1",
+        "CHAOS_ENABLED=true",
+        f"CHAOS_INTERVAL={int(chaos.get('interval', 30))}",
+    ]
+    if chaos.get("interval_min") is not None:
+        environment.append(f"CHAOS_INTERVAL_MIN={int(chaos['interval_min'])}")
+    if chaos.get("interval_max") is not None:
+        environment.append(f"CHAOS_INTERVAL_MAX={int(chaos['interval_max'])}")
+    if chaos.get("max_kills") is not None:
+        environment.append(f"CHAOS_MAX_KILLS={int(chaos['max_kills'])}")
+    if chaos.get("kill_monitor_leader_first"):
+        environment.append("CHAOS_KILL_MONITOR_LEADER_FIRST=true")
+    targets = chaos.get("targets") or []
+    if targets:
+        environment.append(f"CHAOS_INCLUDE={','.join(targets)}")
+    excludes = chaos.get("exclude") or []
+    if excludes:
+        environment.append(f"CHAOS_EXCLUDE={','.join(excludes)}")
     return {
         "build": {"context": "./chaos_monkey", "dockerfile": "Dockerfile"},
-        "environment": [
-            "PYTHONUNBUFFERED=1",
-            "CHAOS_ENABLED=true",
-            f"CHAOS_INTERVAL={int(chaos.get('interval', 30))}",
-        ],
+        "environment": environment,
         "volumes": ["/var/run/docker.sock:/var/run/docker.sock"],
         "depends_on": {name: {"condition": "service_started"} for name in client_names},
     }

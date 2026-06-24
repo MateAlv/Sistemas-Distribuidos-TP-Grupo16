@@ -42,8 +42,6 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
   file_splitter_0:
     build:
       context: ./src/
@@ -77,8 +75,6 @@ services:
     - NODE_NAME=file_splitter_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - file_splitter_0_state:/worker_state
     container_name: file_splitter_0
@@ -115,8 +111,6 @@ services:
     - NODE_NAME=file_splitter_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - file_splitter_1_state:/worker_state
     container_name: file_splitter_1
@@ -153,8 +147,6 @@ services:
     - NODE_NAME=file_splitter_2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - file_splitter_2_state:/worker_state
     container_name: file_splitter_2
@@ -177,7 +169,6 @@ services:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - STATE_DIR=/worker_state
-    - SNAPSHOT_INTERVAL=1000
     - FILTER_USD_AMOUNT=6
     - FILTER_USD_EXCHANGE=filter_usd_exchange
     - FILTER_USD_ROUTING_PREFIX=filter_usd
@@ -192,11 +183,10 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
+    - SNAPSHOT_INTERVAL=1000
     - NODE_NAME=file_ingestor_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - file_ingestor_0_state:/worker_state
     container_name: file_ingestor_0
@@ -219,7 +209,6 @@ services:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - STATE_DIR=/worker_state
-    - SNAPSHOT_INTERVAL=1000
     - FILTER_USD_AMOUNT=6
     - FILTER_USD_EXCHANGE=filter_usd_exchange
     - FILTER_USD_ROUTING_PREFIX=filter_usd
@@ -234,11 +223,10 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
+    - SNAPSHOT_INTERVAL=1000
     - NODE_NAME=file_ingestor_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - file_ingestor_1_state:/worker_state
     container_name: file_ingestor_1
@@ -261,7 +249,6 @@ services:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - STATE_DIR=/worker_state
-    - SNAPSHOT_INTERVAL=1000
     - FILTER_USD_AMOUNT=6
     - FILTER_USD_EXCHANGE=filter_usd_exchange
     - FILTER_USD_ROUTING_PREFIX=filter_usd
@@ -276,11 +263,10 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
+    - SNAPSHOT_INTERVAL=1000
     - NODE_NAME=file_ingestor_2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - file_ingestor_2_state:/worker_state
     container_name: file_ingestor_2
@@ -303,7 +289,6 @@ services:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - STATE_DIR=/worker_state
-    - SNAPSHOT_INTERVAL=1000
     - FILTER_USD_AMOUNT=6
     - FILTER_USD_EXCHANGE=filter_usd_exchange
     - FILTER_USD_ROUTING_PREFIX=filter_usd
@@ -318,11 +303,10 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
+    - SNAPSHOT_INTERVAL=1000
     - NODE_NAME=file_ingestor_3
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - file_ingestor_3_state:/worker_state
     container_name: file_ingestor_3
@@ -345,7 +329,6 @@ services:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - STATE_DIR=/worker_state
-    - SNAPSHOT_INTERVAL=1000
     - FILTER_USD_AMOUNT=6
     - FILTER_USD_EXCHANGE=filter_usd_exchange
     - FILTER_USD_ROUTING_PREFIX=filter_usd
@@ -360,11 +343,10 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
+    - SNAPSHOT_INTERVAL=1000
     - NODE_NAME=file_ingestor_4
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - file_ingestor_4_state:/worker_state
     container_name: file_ingestor_4
@@ -387,7 +369,6 @@ services:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - STATE_DIR=/worker_state
-    - SNAPSHOT_INTERVAL=1000
     - FILTER_USD_AMOUNT=6
     - FILTER_USD_EXCHANGE=filter_usd_exchange
     - FILTER_USD_ROUTING_PREFIX=filter_usd
@@ -402,11 +383,10 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
+    - SNAPSHOT_INTERVAL=1000
     - NODE_NAME=file_ingestor_5
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - file_ingestor_5_state:/worker_state
     container_name: file_ingestor_5
@@ -473,8 +453,6 @@ services:
     - NODE_NAME=filter_usd_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_usd_0_state:/worker_state
     container_name: filter_usd_0
@@ -541,8 +519,6 @@ services:
     - NODE_NAME=filter_usd_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_usd_1_state:/worker_state
     container_name: filter_usd_1
@@ -609,8 +585,6 @@ services:
     - NODE_NAME=filter_usd_2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_usd_2_state:/worker_state
     container_name: filter_usd_2
@@ -677,8 +651,6 @@ services:
     - NODE_NAME=filter_usd_3
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_usd_3_state:/worker_state
     container_name: filter_usd_3
@@ -745,8 +717,6 @@ services:
     - NODE_NAME=filter_usd_4
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_usd_4_state:/worker_state
     container_name: filter_usd_4
@@ -813,8 +783,6 @@ services:
     - NODE_NAME=filter_usd_5
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_usd_5_state:/worker_state
     container_name: filter_usd_5
@@ -875,8 +843,6 @@ services:
     - NODE_NAME=filter_q1_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_q1_0_state:/worker_state
     container_name: filter_q1_0
@@ -937,8 +903,6 @@ services:
     - NODE_NAME=filter_q1_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_q1_1_state:/worker_state
     container_name: filter_q1_1
@@ -999,8 +963,6 @@ services:
     - NODE_NAME=filter_q1_2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_q1_2_state:/worker_state
     container_name: filter_q1_2
@@ -1061,8 +1023,6 @@ services:
     - NODE_NAME=filter_date_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_date_0_state:/worker_state
     container_name: filter_date_0
@@ -1123,8 +1083,6 @@ services:
     - NODE_NAME=filter_date_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_date_1_state:/worker_state
     container_name: filter_date_1
@@ -1185,8 +1143,6 @@ services:
     - NODE_NAME=filter_date_2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_date_2_state:/worker_state
     container_name: filter_date_2
@@ -1247,8 +1203,6 @@ services:
     - NODE_NAME=filter_date_3
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_date_3_state:/worker_state
     container_name: filter_date_3
@@ -1312,8 +1266,6 @@ services:
     - NODE_NAME=filter_q5_format_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_q5_format_0_state:/worker_state
     container_name: filter_q5_format_0
@@ -1377,8 +1329,6 @@ services:
     - NODE_NAME=filter_q5_format_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_q5_format_1_state:/worker_state
     container_name: filter_q5_format_1
@@ -1442,8 +1392,6 @@ services:
     - NODE_NAME=filter_q5_format_2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_q5_format_2_state:/worker_state
     container_name: filter_q5_format_2
@@ -1466,8 +1414,6 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - ./data/rates:/data/rates:rw
   filter_q5_usd_0:
@@ -1503,8 +1449,6 @@ services:
     - NODE_NAME=filter_q5_usd_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_q5_usd_0_state:/worker_state
     container_name: filter_q5_usd_0
@@ -1541,8 +1485,6 @@ services:
     - NODE_NAME=filter_q5_usd_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_q5_usd_1_state:/worker_state
     container_name: filter_q5_usd_1
@@ -1579,8 +1521,6 @@ services:
     - NODE_NAME=filter_q5_usd_2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - filter_q5_usd_2_state:/worker_state
     container_name: filter_q5_usd_2
@@ -1616,8 +1556,6 @@ services:
     - NODE_NAME=sum_q2_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - sum_q2_0_state:/worker_state
     container_name: sum_q2_0
@@ -1653,8 +1591,6 @@ services:
     - NODE_NAME=sum_q2_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - sum_q2_1_state:/worker_state
     container_name: sum_q2_1
@@ -1690,8 +1626,6 @@ services:
     - NODE_NAME=sum_q2_2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - sum_q2_2_state:/worker_state
     container_name: sum_q2_2
@@ -1727,8 +1661,6 @@ services:
     - NODE_NAME=sum_q2_3
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - sum_q2_3_state:/worker_state
     container_name: sum_q2_3
@@ -1764,8 +1696,6 @@ services:
     - NODE_NAME=sum_q3_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - sum_q3_0_state:/worker_state
     container_name: sum_q3_0
@@ -1801,8 +1731,6 @@ services:
     - NODE_NAME=sum_q3_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - sum_q3_1_state:/worker_state
     container_name: sum_q3_1
@@ -1838,8 +1766,6 @@ services:
     - NODE_NAME=sum_q3_2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - sum_q3_2_state:/worker_state
     container_name: sum_q3_2
@@ -1875,8 +1801,6 @@ services:
     - NODE_NAME=sum_q3_3
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - sum_q3_3_state:/worker_state
     container_name: sum_q3_3
@@ -1912,8 +1836,6 @@ services:
     - NODE_NAME=sum_q3_4
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - sum_q3_4_state:/worker_state
     container_name: sum_q3_4
@@ -1949,8 +1871,6 @@ services:
     - NODE_NAME=sum_q3_5
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - sum_q3_5_state:/worker_state
     container_name: sum_q3_5
@@ -1972,7 +1892,6 @@ services:
     - SUM_AMOUNT=4
     - SUM_PREFIX=sum_q2
     - STATE_DIR=/worker_state
-    - SNAPSHOT_INTERVAL=1000
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100000
     - FLOW_LOG_EVERY_BYTES=2147483648
@@ -1981,11 +1900,10 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
+    - SNAPSHOT_INTERVAL=1000
     - NODE_NAME=aggregation_q2_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - aggregation_q2_0_state:/worker_state
     container_name: aggregation_q2_0
@@ -2007,7 +1925,6 @@ services:
     - SUM_AMOUNT=4
     - SUM_PREFIX=sum_q2
     - STATE_DIR=/worker_state
-    - SNAPSHOT_INTERVAL=1000
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100000
     - FLOW_LOG_EVERY_BYTES=2147483648
@@ -2016,11 +1933,10 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
+    - SNAPSHOT_INTERVAL=1000
     - NODE_NAME=aggregation_q2_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - aggregation_q2_1_state:/worker_state
     container_name: aggregation_q2_1
@@ -2042,7 +1958,6 @@ services:
     - SUM_AMOUNT=4
     - SUM_PREFIX=sum_q2
     - STATE_DIR=/worker_state
-    - SNAPSHOT_INTERVAL=1000
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100000
     - FLOW_LOG_EVERY_BYTES=2147483648
@@ -2051,11 +1966,10 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
+    - SNAPSHOT_INTERVAL=1000
     - NODE_NAME=aggregation_q2_2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - aggregation_q2_2_state:/worker_state
     container_name: aggregation_q2_2
@@ -2090,8 +2004,6 @@ services:
     - NODE_NAME=join_q2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - join_q2_state:/worker_state
     container_name: join_q2
@@ -2123,8 +2035,6 @@ services:
     - NODE_NAME=q2_bank_name_joiner
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q2_bank_name_joiner_state:/worker_state
     container_name: q2_bank_name_joiner
@@ -2146,7 +2056,6 @@ services:
     - SUM_AMOUNT=6
     - SUM_PREFIX=sum_q3
     - STATE_DIR=/worker_state
-    - SNAPSHOT_INTERVAL=1000
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100000
     - FLOW_LOG_EVERY_BYTES=2147483648
@@ -2155,11 +2064,10 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
+    - SNAPSHOT_INTERVAL=1000
     - NODE_NAME=aggregation_q3_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - aggregation_q3_0_state:/worker_state
     container_name: aggregation_q3_0
@@ -2181,7 +2089,6 @@ services:
     - SUM_AMOUNT=6
     - SUM_PREFIX=sum_q3
     - STATE_DIR=/worker_state
-    - SNAPSHOT_INTERVAL=1000
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100000
     - FLOW_LOG_EVERY_BYTES=2147483648
@@ -2190,11 +2097,10 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
+    - SNAPSHOT_INTERVAL=1000
     - NODE_NAME=aggregation_q3_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - aggregation_q3_1_state:/worker_state
     container_name: aggregation_q3_1
@@ -2216,7 +2122,6 @@ services:
     - SUM_AMOUNT=6
     - SUM_PREFIX=sum_q3
     - STATE_DIR=/worker_state
-    - SNAPSHOT_INTERVAL=1000
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100000
     - FLOW_LOG_EVERY_BYTES=2147483648
@@ -2225,11 +2130,10 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
+    - SNAPSHOT_INTERVAL=1000
     - NODE_NAME=aggregation_q3_2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - aggregation_q3_2_state:/worker_state
     container_name: aggregation_q3_2
@@ -2267,8 +2171,6 @@ services:
     - NODE_NAME=join_q3
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - join_q3_state:/worker_state
     container_name: join_q3
@@ -2305,8 +2207,6 @@ services:
     - NODE_NAME=q3_barrier_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q3_barrier_0_state:/worker_state
     container_name: q3_barrier_0
@@ -2343,8 +2243,6 @@ services:
     - NODE_NAME=q3_barrier_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q3_barrier_1_state:/worker_state
     container_name: q3_barrier_1
@@ -2366,7 +2264,6 @@ services:
     - SUM_AMOUNT=3
     - SUM_PREFIX=filter_q5_usd
     - STATE_DIR=/worker_state
-    - SNAPSHOT_INTERVAL=1000
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100000
     - FLOW_LOG_EVERY_BYTES=2147483648
@@ -2375,11 +2272,10 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
+    - SNAPSHOT_INTERVAL=1000
     - NODE_NAME=aggregation_q5_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - aggregation_q5_0_state:/worker_state
     container_name: aggregation_q5_0
@@ -2401,7 +2297,6 @@ services:
     - SUM_AMOUNT=3
     - SUM_PREFIX=filter_q5_usd
     - STATE_DIR=/worker_state
-    - SNAPSHOT_INTERVAL=1000
     - FLOW_LOG_ENABLED=1
     - FLOW_LOG_EVERY_MESSAGES=100000
     - FLOW_LOG_EVERY_BYTES=2147483648
@@ -2410,11 +2305,10 @@ services:
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
     - RABBITMQ_DURABLE=true
+    - SNAPSHOT_INTERVAL=1000
     - NODE_NAME=aggregation_q5_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - aggregation_q5_1_state:/worker_state
     container_name: aggregation_q5_1
@@ -2449,8 +2343,6 @@ services:
     - NODE_NAME=join_q5
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - join_q5_state:/worker_state
     container_name: join_q5
@@ -2486,8 +2378,6 @@ services:
     - NODE_NAME=q4_filter_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_filter_0_state:/worker_state
     container_name: q4_filter_0
@@ -2523,8 +2413,6 @@ services:
     - NODE_NAME=q4_filter_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_filter_1_state:/worker_state
     container_name: q4_filter_1
@@ -2560,8 +2448,6 @@ services:
     - NODE_NAME=q4_filter_2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_filter_2_state:/worker_state
     container_name: q4_filter_2
@@ -2597,8 +2483,6 @@ services:
     - NODE_NAME=q4_filter_3
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_filter_3_state:/worker_state
     container_name: q4_filter_3
@@ -2634,8 +2518,6 @@ services:
     - NODE_NAME=q4_filter_4
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_filter_4_state:/worker_state
     container_name: q4_filter_4
@@ -2671,8 +2553,6 @@ services:
     - NODE_NAME=q4_filter_5
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_filter_5_state:/worker_state
     container_name: q4_filter_5
@@ -2707,8 +2587,6 @@ services:
     - NODE_NAME=q4_sum_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_sum_0_state:/worker_state
     container_name: q4_sum_0
@@ -2743,8 +2621,6 @@ services:
     - NODE_NAME=q4_sum_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_sum_1_state:/worker_state
     container_name: q4_sum_1
@@ -2779,8 +2655,6 @@ services:
     - NODE_NAME=q4_sum_2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_sum_2_state:/worker_state
     container_name: q4_sum_2
@@ -2815,8 +2689,6 @@ services:
     - NODE_NAME=q4_sum_3
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_sum_3_state:/worker_state
     container_name: q4_sum_3
@@ -2851,8 +2723,6 @@ services:
     - NODE_NAME=q4_joiner_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_joiner_0_state:/worker_state
     container_name: q4_joiner_0
@@ -2887,8 +2757,6 @@ services:
     - NODE_NAME=q4_joiner_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_joiner_1_state:/worker_state
     container_name: q4_joiner_1
@@ -2923,8 +2791,6 @@ services:
     - NODE_NAME=q4_joiner_2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_joiner_2_state:/worker_state
     container_name: q4_joiner_2
@@ -2959,8 +2825,6 @@ services:
     - NODE_NAME=q4_joiner_3
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_joiner_3_state:/worker_state
     container_name: q4_joiner_3
@@ -2995,8 +2859,6 @@ services:
     - NODE_NAME=q4_joiner_4
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_joiner_4_state:/worker_state
     container_name: q4_joiner_4
@@ -3031,8 +2893,6 @@ services:
     - NODE_NAME=q4_joiner_5
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_joiner_5_state:/worker_state
     container_name: q4_joiner_5
@@ -3067,8 +2927,6 @@ services:
     - NODE_NAME=q4_joiner_6
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_joiner_6_state:/worker_state
     container_name: q4_joiner_6
@@ -3103,8 +2961,6 @@ services:
     - NODE_NAME=q4_joiner_7
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_joiner_7_state:/worker_state
     container_name: q4_joiner_7
@@ -3139,8 +2995,6 @@ services:
     - NODE_NAME=q4_aggregator_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_aggregator_0_state:/worker_state
     container_name: q4_aggregator_0
@@ -3175,8 +3029,6 @@ services:
     - NODE_NAME=q4_aggregator_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_aggregator_1_state:/worker_state
     container_name: q4_aggregator_1
@@ -3211,8 +3063,6 @@ services:
     - NODE_NAME=q4_aggregator_2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_aggregator_2_state:/worker_state
     container_name: q4_aggregator_2
@@ -3247,8 +3097,6 @@ services:
     - NODE_NAME=q4_aggregator_3
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_aggregator_3_state:/worker_state
     container_name: q4_aggregator_3
@@ -3283,8 +3131,6 @@ services:
     - NODE_NAME=q4_aggregator_4
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_aggregator_4_state:/worker_state
     container_name: q4_aggregator_4
@@ -3319,8 +3165,6 @@ services:
     - NODE_NAME=q4_aggregator_5
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_aggregator_5_state:/worker_state
     container_name: q4_aggregator_5
@@ -3355,8 +3199,6 @@ services:
     - NODE_NAME=q4_aggregator_6
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_aggregator_6_state:/worker_state
     container_name: q4_aggregator_6
@@ -3391,8 +3233,6 @@ services:
     - NODE_NAME=q4_aggregator_7
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_aggregator_7_state:/worker_state
     container_name: q4_aggregator_7
@@ -3427,8 +3267,6 @@ services:
     - NODE_NAME=q4_deduper_0
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_deduper_0_state:/worker_state
     container_name: q4_deduper_0
@@ -3463,8 +3301,6 @@ services:
     - NODE_NAME=q4_deduper_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - q4_deduper_1_state:/worker_state
     container_name: q4_deduper_1
@@ -3490,8 +3326,6 @@ services:
     - NODE_NAME=monitor_1
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     expose:
     - 9000/udp
     - '9001'
@@ -3521,8 +3355,6 @@ services:
     - NODE_NAME=monitor_2
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     expose:
     - 9000/udp
     - '9001'
@@ -3552,8 +3384,6 @@ services:
     - NODE_NAME=monitor_3
     - MONITOR_HOSTS=monitor_1,monitor_2,monitor_3
     - MONITOR_PORT=9000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     expose:
     - 9000/udp
     - '9001'
@@ -3672,8 +3502,6 @@ services:
     - WORKER_LOG_EVERY_MESSAGES=100000
     - CHUNK_LOG_EVERY=10000
     - RESULT_LOG_EVERY=100000
-    - RABBITMQ_DURABLE=true
-    - RABBITMQ_PUBLISHER_CONFIRMS=true
     volumes:
     - ./data/datasets/LI-Small:/data/input:ro
     - ./data/output:/data/output:rw
@@ -3684,7 +3512,12 @@ services:
     environment:
     - PYTHONUNBUFFERED=1
     - CHAOS_ENABLED=true
-    - CHAOS_INTERVAL=9999
+    - CHAOS_INTERVAL=30
+    - CHAOS_INTERVAL_MIN=30
+    - CHAOS_INTERVAL_MAX=180
+    - CHAOS_MAX_KILLS=2
+    - CHAOS_KILL_MONITOR_LEADER_FIRST=true
+    - CHAOS_INCLUDE=file_ingestor,file_splitter,q4_filter,q4_joiner,q4_sum,q4_aggregator,q4_deduper
     volumes:
     - /var/run/docker.sock:/var/run/docker.sock
     depends_on:

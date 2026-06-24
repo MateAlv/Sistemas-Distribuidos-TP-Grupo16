@@ -8,11 +8,11 @@ import re
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -438,6 +438,166 @@ def validate_all(client_inputs):
 
 
 # --------------------------------------------------------------------------- #
+# chaos monkey footer
+# --------------------------------------------------------------------------- #
+_MONKEY_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})")
+_MONKEY_KILL_RE = re.compile(
+    r"kill_container \| target: (\S+) \| role: (\S+) \| status: success")
+_MONKEY_OK_RE = re.compile(r"monitor_recovery_success \| node_id=(\S+)")
+_MONKEY_FAIL_RE = re.compile(r"monitor_recovery_failed \| node_id=(\S+)")
+_ELECT_FAIL_RE = re.compile(r"monitor_node_failed \|.*node_id=(monitor_\d+).*is_leader=(\w+)")
+_ELECT_START_RE = re.compile(r"monitor_election_started \| monitor_id=(\d+) \| epoch=(\d+)")
+_ELECT_WON_RE = re.compile(r"monitor_election_won \| monitor_id=(\d+) \| epoch=(\d+)")
+
+
+def _monkey_dt(line):
+    m = _MONKEY_TS_RE.search(line)
+    if not m:
+        return None, "        "
+    return datetime.strptime(f"{m.group(1)}T{m.group(2)}", "%Y-%m-%dT%H:%M:%S"), m.group(2)
+
+
+def print_election_summary(log_path):
+    """Parse the monitor failover election triggered by killing the leader and
+    print a timeline above the Monkey Kill Count."""
+    leader_kill = None
+    events = []  # (dt, hms, text, is_key)
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                dt, hms = _monkey_dt(line)
+                m = _MONKEY_KILL_RE.search(line)
+                if m and m.group(2) == "monitor_leader" and leader_kill is None:
+                    leader_kill = (dt, hms, m.group(1))
+                    continue
+                m = _ELECT_FAIL_RE.search(line)
+                if m and m.group(2).lower() == "true":
+                    events.append((dt, hms,
+                                   f"{m.group(1)} (leader) detected down → failover", False))
+                    continue
+                m = _ELECT_START_RE.search(line)
+                if m:
+                    events.append((dt, hms,
+                                   f"election started by monitor_{m.group(1)} (epoch {m.group(2)})", False))
+                    continue
+                m = _ELECT_WON_RE.search(line)
+                if m:
+                    events.append((dt, hms,
+                                   f"monitor_{m.group(1)} WON election (epoch {m.group(2)}) → new leader", True))
+                    continue
+                m = _MONKEY_OK_RE.search(line)
+                if m and m.group(1).startswith("monitor_"):
+                    events.append((dt, hms,
+                                   f"{m.group(1)} revived (rejoins as follower)", False))
+
+    except OSError:
+        return
+
+    print()
+    print(BAR)
+    print("Monitor Election (leader failover)")
+    print(BAR)
+    if leader_kill is None:
+        print("Monitor leader was not killed this run — no failover election.")
+        print(BAR)
+        return
+
+    kdt, khms, leader = leader_kill
+    print(f"Chaos killed monitor leader: {leader} at {khms}")
+    print()
+    # Only events at/after the leader kill, deduplicated, in time order.
+    seen, won = set(), False
+    for dt, hms, text, key in sorted(events, key=lambda e: e[0] or datetime.min):
+        if kdt is not None and dt is not None and dt < kdt:
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        won = won or key
+        out = f"  {hms}  {text}"
+        print(ref.green(out) if key else out)
+    print()
+    print(ref.green("Result: new leader elected ✓") if won
+          else ref.red("Result: no new leader observed ✗"))
+    print(BAR)
+
+
+def print_monkey_summary(log_path):
+    """Parse the run log for chaos-monkey kills and monitor revivals and print a
+    'Monkey Kill Count' table above the golden pipeline summary."""
+    kills, revives_ok, revives_fail = [], [], []
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                dt, hms = _monkey_dt(line)
+                m = _MONKEY_KILL_RE.search(line)
+                if m:
+                    kills.append((dt, hms, m.group(1), m.group(2)))
+                    continue
+                m = _MONKEY_OK_RE.search(line)
+                if m:
+                    revives_ok.append((dt, hms, m.group(1)))
+                    continue
+                m = _MONKEY_FAIL_RE.search(line)
+                if m:
+                    revives_fail.append((dt, hms, m.group(1)))
+    except OSError:
+        return
+
+    print()
+    print(BAR)
+    print("Monkey Kill Count and its results")
+    print(BAR)
+    if not kills:
+        print("Kills: 0 — no chaos kills during this run "
+              "(it may have finished before the kill interval).")
+        print(BAR)
+        return
+
+    used_ok, used_fail, rows = set(), set(), []
+    revived = not_revived = 0
+    for kdt, khms, container, role in sorted(kills, key=lambda k: k[0] or datetime.min):
+        revival = None
+        for i, (rdt, rhms, rc) in enumerate(revives_ok):
+            if i in used_ok or rc != container:
+                continue
+            if kdt is None or rdt is None or rdt >= kdt:
+                revival = (i, rdt, rhms)
+                break
+        if revival is not None:
+            i, rdt, rhms = revival
+            used_ok.add(i)
+            if kdt and rdt:
+                recov = f"+{(rdt - kdt).total_seconds():.0f}s via monitor (docker start)"
+            else:
+                recov = "via monitor (docker start)"
+            rows.append((container, role, khms, rhms, recov, True))
+            revived += 1
+            continue
+        failed = None
+        for i, (rdt, rhms, rc) in enumerate(revives_fail):
+            if i in used_fail or rc != container:
+                continue
+            if kdt is None or rdt is None or rdt >= kdt:
+                failed = (i, rhms)
+                break
+        if failed is not None:
+            used_fail.add(failed[0])
+            rows.append((container, role, khms, failed[1], "recovery FAILED (monitor)", False))
+        else:
+            rows.append((container, role, khms, "—", "NOT REVIVED", False))
+        not_revived += 1
+
+    print(f"Kills: {len(kills)}   Revived: {revived}   Not revived: {not_revived}")
+    print()
+    print(f"{'Container':<22}{'Role':<16}{'Died':<10}{'Revived':<10}{'Recovery':<34}")
+    for container, role, died, revived_at, recov, ok in rows:
+        line = f"{container:<22}{role:<16}{died:<10}{revived_at:<10}{recov:<34}"
+        print(ref.green(line) if ok else ref.red(line))
+    print(BAR)
+
+
+# --------------------------------------------------------------------------- #
 # summary footer
 # --------------------------------------------------------------------------- #
 def print_summary(results, timings, sampler, wall, timed_out, num_clients, inputs_label):
@@ -486,6 +646,38 @@ def print_summary(results, timings, sampler, wall, timed_out, num_clients, input
 
 
 # --------------------------------------------------------------------------- #
+# persistent log archive
+# --------------------------------------------------------------------------- #
+LOG_ARCHIVE_DIR = ROOT / "data" / "logs"
+# Keep at most this many past runs (0 = unlimited) and cap the total size of the
+# archive (0 = unlimited). Oldest runs are deleted first; the current run is
+# never deleted.
+LOG_KEEP = int(os.environ.get("TEST_LOG_KEEP", "5"))
+LOG_MAX_MB = int(os.environ.get("TEST_LOG_MAX_MB", "1024"))
+
+
+def _archived_logs():
+    return sorted(LOG_ARCHIVE_DIR.glob("test-*.log"), key=lambda p: p.stat().st_mtime)
+
+
+def prune_log_archive():
+    """Bound the archive: keep newest LOG_KEEP runs and stay under LOG_MAX_MB."""
+    logs = _archived_logs()
+    if LOG_KEEP > 0:
+        for old in logs[:-LOG_KEEP]:
+            old.unlink(missing_ok=True)
+    if LOG_MAX_MB > 0:
+        logs = _archived_logs()
+        cap = LOG_MAX_MB * 1024 * 1024
+        total = sum(p.stat().st_size for p in logs)
+        for old in logs[:-1]:  # never delete the most recent run
+            if total <= cap:
+                break
+            total -= old.stat().st_size
+            old.unlink(missing_ok=True)
+
+
+# --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
 def main():
@@ -496,8 +688,10 @@ def main():
         return 2
     inputs_label = dataset_summary(client_inputs)
 
-    log_fd, log_path = tempfile.mkstemp(prefix=f"{TEST_PROJECT}.", suffix=".log")
-    os.close(log_fd)
+    LOG_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    prune_log_archive()  # drop older runs before this one starts
+    log_path = str(LOG_ARCHIVE_DIR / f"test-{datetime.now():%Y%m%d-%H%M%S}.log")
+    open(log_path, "w").close()
     print(f"test_log_file={log_path}")
 
     cleanup_all()
@@ -559,6 +753,8 @@ def main():
     wall = time.monotonic() - start
     print()
     results = validate_all(client_inputs)
+    print_election_summary(log_path)
+    print_monkey_summary(log_path)
     overall = print_summary(
         results, (watcher.done_at if watcher else {}), sampler, wall,
         timed_out, num_clients, inputs_label)
@@ -569,8 +765,11 @@ def main():
     else:
         teardown()
 
+    prune_log_archive()
     try:
-        os.unlink(log_path)
+        size_mb = os.path.getsize(log_path) / (1024 * 1024)
+        print(f"Full run log saved: {log_path} ({size_mb:.1f} MiB) | "
+              f"keeping last {LOG_KEEP} run(s) under {LOG_MAX_MB} MiB in {LOG_ARCHIVE_DIR}")
     except OSError:
         pass
     return 0 if overall else 1

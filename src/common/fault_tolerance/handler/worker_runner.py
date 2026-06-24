@@ -55,7 +55,13 @@ class WorkerRunner:
             self._handler.recover()
             pending = self._handler.outbox_to_republish()
         self._publish(pending)
-        logging.info("worker_runner_recovered | republished=%s", len(pending))
+        logging.info(
+            "worker_runner_recovered | node=%s | republished_outputs=%s | "
+            "message=back online after restart; durable state replayed and "
+            "pending outputs re-published",
+            self._handler.node_id,
+            len(pending),
+        )
 
     def process(self, body: bytes, ack: Callable, nack: Callable) -> None:
         try:

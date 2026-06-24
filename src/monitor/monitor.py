@@ -116,7 +116,20 @@ class Monitor:
             if last_recovery is not None and now - last_recovery <= self._failure_timeout:
                 continue
 
-            logging.warning("monitor_node_failed | node_id=%s", node_id)
+            last_seen = self._heartbeat_receiver.last_seen(node_id)
+            age = f"{now - last_seen:.1f}s" if last_seen is not None else "never"
+            leader_id = self._election_handler.get_leader()
+            is_leader = node_id == f"monitor_{leader_id}"
+            logging.warning(
+                "monitor_node_failed | detector=monitor_%s | node_id=%s | "
+                "is_leader=%s | last_heartbeat_age=%s | failure_timeout=%ss | "
+                "action=recover | message=missed heartbeats; reviving container",
+                self._election_handler.monitor_id,
+                node_id,
+                is_leader,
+                age,
+                self._failure_timeout,
+            )
             try:
                 self._recovery(node_id)
             except Exception:

@@ -19,7 +19,8 @@ TEST_Q1_SUCCESS_PATTERN := Forward pass successful - Mate | filter=Q1
 TEST_CLIENT_DONE_PATTERN := client_results_finished
 TEST_Q2_EOF_PATTERN := gateway_eof | prefix=Q2|
 TEST_Q4_EOF_PATTERN := gateway_eof | prefix=Q4|
-TEST_CLIENT_WAIT_TIMEOUT ?= 4600s
+TEST_CLIENT_WAIT_TIMEOUT ?= 18000s
+TEST_DATASET ?= LI-Small
 TEST_SMOKE_DEADLINE_SECONDS ?= 600
 SCENARIOS_DIR := config/scenarios
 RABBIT_SCREEN_URL ?= http://localhost:15672
@@ -115,7 +116,7 @@ CHAOS_SERVICE := chaos_monkey
 chaos-kill-random:
 	@chaos=$$(docker compose -f $(COMPOSE_FILE) ps --status running --quiet $(CHAOS_SERVICE)); \
 	if [ -z "$$chaos" ]; then echo "chaos monkey not running (enable chaos in config and 'make up')" >&2; exit 1; fi; \
-	docker exec "$$chaos" python3 -c "from manager import ChaosManager, excluded_from_env; result = ChaosManager(excluded_from_env()).kill_random_container(); print(result); raise SystemExit(0 if result else 1)"
+	docker exec "$$chaos" python3 -c "from manager import ChaosManager, excluded_from_env, included_from_env; result = ChaosManager(excluded_from_env(), included_from_env()).kill_random_container(); print(result); raise SystemExit(0 if result else 1)"
 .PHONY: chaos-kill-random
 
 CHAOS_TARGET := $(if $(CONTAINER),$(CONTAINER),$(word 2,$(MAKECMDGOALS)))

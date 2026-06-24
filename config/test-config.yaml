@@ -14,6 +14,29 @@ settings:
   io_timeout_seconds: 3600
   filter_prefetch_count: 50
   snapshot_interval: 1000
+  chaos:
+    enabled: true
+    # Kill at most this many containers, each after a random delay in
+    # [interval_min, interval_max] seconds, so the kills land at random points
+    # across the run. Then the monkey idles.
+    max_kills: 2
+    interval_min: 30
+    interval_max: 180
+    # The first kill targets the current monitor leader to force a failover
+    # election (visible in the logs and the test summary); later kills hit
+    # allowlisted workers.
+    kill_monitor_leader_first: true
+    # Allowlist: the monkey only kills containers whose name contains one of
+    # these substrings. Everything else (other workers, gateway, rabbitmq,
+    # rates_service, clients, monitor, chaos) is protected automatically.
+    targets:
+      - file_ingestor
+      - file_splitter
+      - q4_filter
+      - q4_joiner
+      - q4_sum
+      - q4_aggregator
+      - q4_deduper
 
 monitor:
   enabled: true
@@ -56,8 +79,8 @@ workers:
 clients: 2
 client_accounts:
   - client_id: 0
-    accounts_file: data/datasets/LI-Mini/LI-Mini_accounts.csv
-    transactions_file: data/datasets/LI-Mini/LI-Mini_Trans.csv
+    accounts_file: data/datasets/LI-Small/LI-Small_accounts.csv
+    transactions_file: data/datasets/LI-Small/LI-Small_Trans.csv
   - client_id: 1
-    accounts_file: data/datasets/LI-Mini/LI-Mini_accounts.csv
-    transactions_file: data/datasets/LI-Mini/LI-Mini_Trans.csv
+    accounts_file: data/datasets/LI-Small/LI-Small_accounts.csv
+    transactions_file: data/datasets/LI-Small/LI-Small_Trans.csv
