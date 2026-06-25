@@ -95,6 +95,7 @@ class Q4SumWorker:
             publishers=self._publishers,
             process_payload=self._data_process_payload,
             lock=self._lock,
+            abort_fn=self._abort_fn,
         )
 
         self._closed = False
@@ -241,6 +242,12 @@ class Q4SumWorker:
             )
         return outputs
 
+    def _abort_fn(self, client_id: int):
+        return Q4SumState.abort_change(client_id), [
+            (Q4_JOINER_EDGE, self._packet(MessageType.ABORT, client_id, b""), partition)
+            for partition in range(Q4_JOINER_AMOUNT)
+        ]
+
     def _data_process_payload(self, client_id: int, payload: bytes):
         """DATA batch: accumulate the counted edges, emit nothing (the join is
         planned at EOF). A closed client is a no-op."""
@@ -304,6 +311,8 @@ class Q4SumWorker:
             self._runner.process(raw, ack, nack)
         elif msg_type == MessageType.EOF:
             self._handle_eof(raw, ack, nack)
+        elif msg_type == MessageType.ABORT:
+            self._runner.process(raw, ack, nack)
         else:
             logging.error("q4_sum_unknown_message_type | id=%s | type=%s", ID, msg_type)
             nack(requeue=False)

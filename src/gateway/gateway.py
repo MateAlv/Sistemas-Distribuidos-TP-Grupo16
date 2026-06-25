@@ -12,7 +12,7 @@ from common.message_protocol.external.types import (
     FILE_TYPE_ACCOUNTS,
     FILE_TYPE_TRANSACTIONS,
     HANDSHAKE, FILE_CHUNK, FINISH, ACK,
-    MSG_CHUNK, MSG_EOF,
+    MSG_CHUNK, MSG_EOF, MSG_ABORT,
     file_ingestor_routing_key,
     file_type_name,
 )
@@ -252,14 +252,16 @@ class Gateway:
     def _serve_client(self, client_sock: socket.socket) -> int:
         client_id = self._recv_handshake(client_sock)
         session = ClientSession(client_id=client_id, sock=client_sock)
-        
+
         q = queue.Queue()
         with self._client_queues_lock:
             self._client_queues[client_id] = q
             self._pending_eofs_by_client[client_id] = self._num_result_queues
-        
+
+        chunks_finished = False
         try:
             self._forward_chunks(session)
+            chunks_finished = True
             self._wait_for_results(session, q)
         finally:
             with self._client_queues_lock:
@@ -268,8 +270,34 @@ class Gateway:
                 self._addressed_result_seen = {
                     key for key in self._addressed_result_seen if key[1] != client_id
                 }
+            if not chunks_finished:
+                self._send_abort(session.client_id)
 
         return client_id
+
+    def _send_abort(self, client_id: int) -> None:
+        """Broadcast ABORT to every file-splitter partition so each worker can
+        discard orphaned per-client state. Best-effort: if this send fails the
+        state leaks until the next gateway restart, which is acceptable."""
+        partitions = self._config.file_ingestor_partitions
+        publisher = FileIngestorPublisher(
+            mom_host=self._config.mom_host,
+            exchange_name=self._config.file_ingestor_exchange,
+        )
+        try:
+            abort_msg = _serialize_abort(client_id)
+            for partition in range(partitions):
+                publisher.send(partition, abort_msg)
+            logging.info(
+                "gateway_abort_sent | client_id=%s | partitions=%s",
+                client_id, partitions,
+            )
+        except Exception as e:
+            logging.error(
+                "gateway_abort_error | client_id=%s | error=%s", client_id, e
+            )
+        finally:
+            publisher.close()
 
     def _recv_handshake(self, client_sock: socket.socket) -> int:
         msg_type = int.from_bytes(recv_exact(client_sock, 1), "big")
@@ -576,6 +604,10 @@ def _send_ack(sock: socket.socket) -> None:
 
 def _serialize_chunk(chunk: FileChunk) -> bytes:
     return MSG_CHUNK.to_bytes(1, "big") + chunk.serialize()
+
+
+def _serialize_abort(client_id: int) -> bytes:
+    return MSG_ABORT.to_bytes(1, "big") + client_id.to_bytes(4, "big")
 
 
 def _serialize_file_eof(client_id: int, file_type: int, rel_path: str) -> bytes:
