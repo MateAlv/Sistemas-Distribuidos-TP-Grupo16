@@ -212,8 +212,6 @@ class Q4AggregatorWorker:
                     entry.destination,
                 )
 
-    # ---------- data path ----------
-
     def _handle_data(self, msg_id, client_id, sender_id, seq, payload, ack) -> None:
         def bfn(data):
             return (

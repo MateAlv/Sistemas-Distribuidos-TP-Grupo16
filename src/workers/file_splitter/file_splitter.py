@@ -13,7 +13,7 @@ from common.message_protocol.external.types import (
     MSG_EOF,
     file_ingestor_routing_key,
 )
-from common.message_protocol.internal import InternalProtocol, MessageType
+from common.message_protocol.internal import InternalProtocol
 from common.middleware import (
     MessageMiddlewareQueueRabbitMQ,
     ShardedPublisher,
@@ -30,8 +30,6 @@ from workers.file_splitter.file_splitter_state import (
     FileSplitterState,
 )
 
-# Reserved sender bucket for the (dead in the current gateway topology) aggregate
-# client-EOF; distinct from any per-file crc32(rel_path) bucket.
 _CLIENT_EOF_SENDER = 0xFFFFFFFF
 
 
@@ -68,8 +66,6 @@ class FileSplitter:
         self._publishers: dict[str, object] = {}
         self._chunks_received = 0
         self._eofs_received = 0
-
-    # ---------- lifecycle ----------
 
     def start(self) -> None:
         routing_key = self._input_routing_key()
@@ -159,8 +155,6 @@ class FileSplitter:
                 )
         self._publishers = {}
 
-    # ---------- message dispatch ----------
-
     def _on_message(self, message: bytes, ack, nack) -> None:
         try:
             if not message:
@@ -200,10 +194,8 @@ class FileSplitter:
         if offset == expected:
             seq = self._state.next_ordinal(key)
         elif offset + len(payload) == expected:
-            # Strict in-order delivery (LineSplitter enforces it) means the only
-            # chunk that can be applied-but-not-committed after a crash is the last
-            # applied one; re-drive it (republish pending outputs + commit, or ack
-            # if it was already committed).
+            # Chunks arrive in order, so after a crash only the last applied chunk
+            # can be uncommitted; re-drive it.
             seq = self._state.next_ordinal(key) - 1
         else:
             # offset + len < expected: already committed, nothing to redo.
@@ -248,8 +240,8 @@ class FileSplitter:
         )
 
     def _dispatch_client_eof(self, client_id: int, ack) -> None:
-        # Dead path in the current gateway topology (it emits per-file FileEof);
-        # kept for completeness so an aggregate client EOF still finishes open files.
+        # Dead path now (the gateway emits per-file FileEof); kept so an aggregate
+        # client EOF still finishes open files.
         change = FileSplitterState.client_eof_change(client_id)
         self._run(
             f"c:{client_id}",
@@ -304,8 +296,6 @@ class FileSplitter:
             else:
                 publisher.send_to_shard(entry.body, entry.shard)
 
-    # ---------- topology ----------
-
     def _ensure_line_batch_bindings(self) -> None:
         def queue_name(index: int) -> str:
             return queue_name_for_worker(self._config.output_routing_prefix, index)
@@ -327,9 +317,8 @@ class FileSplitter:
 
 
 class _AccountsQueuePublisher:
-    """Single-queue publisher exposing the (send, send_to_shard) interface the
-    handler's outbox routing expects. The accounts edge has one shard, so
-    send_to_shard ignores the shard index."""
+    """Single-queue publisher with the (send, send_to_shard) interface the outbox
+    expects. The accounts edge has one shard, so send_to_shard ignores the index."""
 
     def __init__(self, mom_host: str, queue_name: str) -> None:
         self._queue = MessageMiddlewareQueueRabbitMQ(mom_host, queue_name)
@@ -345,9 +334,8 @@ class _AccountsQueuePublisher:
 
 
 def _sender_id_for_path(rel_path: str) -> int:
-    # Stable 32-bit per-file sender bucket so a redelivered chunk maps to the same
-    # inbox dedup tracker. crc32 (not hash()) because it must be deterministic
-    # across processes and recovery.
+    # Stable per-file sender bucket so a redelivered chunk hits the same dedup
+    # tracker. crc32, not hash(), so it's deterministic across restarts.
     return zlib.crc32(rel_path.encode("utf-8")) & 0xFFFFFFFF
 
 

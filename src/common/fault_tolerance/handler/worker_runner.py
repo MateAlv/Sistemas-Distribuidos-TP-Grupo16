@@ -1,21 +1,13 @@
-"""Reusable consume loop around PersistentStateHandler.
+"""Consume loop around PersistentStateHandler for the data plane.
 
-The handler owns disk and memory; it does not own the RabbitMQ channel. This
-runner is the worker-agnostic glue that drives it for the **data plane**:
+At startup it recovers and republishes the outbox so nothing confirmed but not
+committed is lost across a crash. Per message it unpacks the addressed packet,
+runs handle(), then publishes the outputs, commit_done()s and acks. Any failure
+nacks with requeue=True; redelivery is safe because recovery is idempotent.
 
-  startup : recover() then re-publish the outbox (so nothing confirmed-but-not-
-            committed is lost across a crash).
-  message : unpack the addressed packet, run it through handle(), and act on the
-            returned instruction — publish the outputs (publisher confirms make
-            send() block until the broker acks), then commit_done(), then ack.
-
-A failure anywhere nacks with requeue=True so RabbitMQ redelivers to the same
-personal queue; recovery then sees the input as APPLIED/NEW and is idempotent.
-
-The runner shares the worker's lock so that callers driving other consumers
-(e.g. an EOF coordinator on its own threads) serialize with handle()/commit.
-Publishing happens outside the lock: it is network I/O and the handler state it
-needs is already captured in the returned instruction.
+The runner shares the worker's lock so callers driving other consumers (e.g. an
+EOF coordinator) serialize with handle()/commit. Publishing stays outside the
+lock since it is network I/O and the instruction already carries what it needs.
 """
 
 from __future__ import annotations

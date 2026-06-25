@@ -561,11 +561,6 @@ class Gateway:
             yield f"{account.bank_id},{account.account}"
 
     @staticmethod
-    def _q4_csv(payload: bytes) -> str:
-        account = Q4AccountIdSerializer.deserialize(payload)
-        return f"{account.bank_id},{account.account}"
-
-    @staticmethod
     def _q5_csv_lines(payload: bytes):
         yield Gateway._q5_csv(payload)
 

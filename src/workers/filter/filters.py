@@ -19,8 +19,8 @@ from common.logging_utils import should_log_progress
 from common.message_protocol.internal import partition_for_parts
 from common.message_protocol.internal.common import MessageType
 from common.middleware.middleware_rabbitmq import ensure_exchange_queue_bindings
-from common.routing import queue_name_for_worker
-from common.fault_tolerance.handler import PersistentStateHandler, WorkerRunner
+from common.routing import queue_name_for_worker, shard_for_client_id
+from common.fault_tolerance.handler import EdgeSpec, PersistentStateHandler, WorkerRunner
 from common.fault_tolerance.handler.action import Action
 from common.fault_tolerance.inbox import InboxStatus, MsgKind
 
@@ -171,11 +171,13 @@ class FilterWorker:
         self._state = FilterState(
             self.coordinator, FILTER_OUTPUT_BATCH_BYTES, FILTER_OUTPUT_BATCH_MAX_TX
         )
+        self._output_edges = self._build_output_edges()
         self._handler = PersistentStateHandler(
             state_dir=STATE_DIR,
             node_id=f"filter_{CONFIGURATION}_{ID}",
             worker_state=self._state,
             snapshot_every=SNAPSHOT_INTERVAL,
+            output_edges=self._output_edges,
         )
         self._runner: WorkerRunner | None = None
         self._data_publishers: dict | None = None
@@ -214,11 +216,31 @@ class FilterWorker:
         # q3_barrier (candidates stream) is WAL-wired and reads addressed packets too.
         if CONFIGURATION == C_DATE and DATE_ENABLE_Q3:
             self._addressed_outputs.add(Q3_CANDIDATES_QUEUE)
-        # Monotonic seq per (output, client). In-memory: resets to 0 on restart.
-        # Safe while only the downstream crashes (it replays its WAL and ignores
-        # already-DONE seqs); a filter crash is the filter's own (future) FT gap.
+
+        # Monotonic seq per (output, client) for legacy addressed edges. Sharded
+        # filter/sum edges are handled by the durable SenderSequencer via
+        # _output_edges.
         self._sum_seq_lock = threading.Lock()
         self._sum_seq_by_output_client: dict[tuple[str, int], int] = {}
+
+    def _build_output_edges(self) -> dict[str, EdgeSpec]:
+        edges: dict[str, EdgeSpec] = {}
+        if CONFIGURATION == C_Q5:
+            edges[FILTER_Q5_USD_QUEUE] = EdgeSpec(ID, FILTER_Q5_USD_AMOUNT)
+        if CONFIGURATION == C_USD:
+            if USD_ENABLE_Q1:
+                edges[FILTER_Q1_QUEUE] = EdgeSpec(ID, FILTER_Q1_AMOUNT)
+            if USD_ENABLE_Q2:
+                edges[SUM_Q2_OUTPUT] = EdgeSpec(ID, SUM_Q2_AMOUNT)
+            if USD_ENABLE_DATE:
+                edges[FILTER_DATE_QUEUE] = EdgeSpec(ID, FILTER_DATE_AMOUNT)
+        if CONFIGURATION == C_DATE and DATE_ENABLE_Q3:
+            edges[SUM_Q3_QUEUE] = EdgeSpec(ID, SUM_Q3_AMOUNT)
+            edges[Q3_CANDIDATES_QUEUE] = EdgeSpec(ID, Q3_BARRIER_AMOUNT)
+        if CONFIGURATION == C_DATE and DATE_ENABLE_Q4:
+            for output_name in self._q4_filter_output_names():
+                edges[output_name] = EdgeSpec(ID, 1)
+        return edges
 
     # ─── connection factories ────────────────────────────────────────────────
 
@@ -436,6 +458,17 @@ class FilterWorker:
             self._sum_seq_by_output_client[key] = (seq + 1) & 0xFFFFFFFF
             return seq
 
+    def _output_shard(self, output_name: str, client_id: int) -> int | None:
+        if output_name not in self._output_edges:
+            return None
+        return shard_for_client_id(client_id, self._output_edges[output_name].shard_count)
+
+    def _logical_output(self, output_name: str, client_id: int, packet: bytes) -> tuple:
+        shard = self._output_shard(output_name, client_id)
+        if shard is None:
+            return (output_name, packet)
+        return (output_name, packet, shard)
+
     def _output_packet(
         self,
         output_name: str,
@@ -443,8 +476,16 @@ class FilterWorker:
         client_id: int,
         payload: bytes,
     ) -> bytes:
-        # q4 filter exchange edges are addressed per (client, partition); SUM edges
-        # per (output, client); every other edge stays basic.
+        # Sharded filter/sum edges are stamped by PersistentStateHandler's durable
+        # SenderSequencer. q4 filter exchange edges are still pre-addressed per
+        # (client, partition); remaining addressed edges keep the existing
+        # in-memory sequence behavior.
+        if output_name in self._output_edges:
+            return self.internal_packet_serializer.create_packet(
+                msg_type=msg_type,
+                client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+                payload=payload,
+            )
         if self._is_q4_filter_exchange_output(output_name):
             return self._q4_addressed_packet(
                 msg_type,
@@ -546,7 +587,11 @@ class FilterWorker:
         # real append under the same lock, matching these batches exactly.
         flushed_by_dest = self._state.plan_data(client_id, appends_by_dest)
         outputs = [
-            (dest, self._output_packet(dest, MessageType.DATA, client_id, batch))
+            self._logical_output(
+                dest,
+                client_id,
+                self._output_packet(dest, MessageType.DATA, client_id, batch),
+            )
             for dest, batches in flushed_by_dest.items()
             for batch in batches
         ]
@@ -571,7 +616,11 @@ class FilterWorker:
             )
             # _output_packet wraps addressed edges (SUM / filter / q5 / q4) with a
             # seq after the data seqs; every other edge stays basic.
-            return (dest, self._output_packet(dest, MessageType.EOF, client_id, payload))
+            return self._logical_output(
+                dest,
+                client_id,
+                self._output_packet(dest, MessageType.EOF, client_id, payload),
+            )
 
         if CONFIGURATION == C_Q1:
             return [eof(GATEWAY_QUEUE, count(GATEWAY_QUEUE))]
@@ -645,7 +694,10 @@ class FilterWorker:
             publisher = publishers.get(entry.destination)
             if publisher is None:
                 raise KeyError(f"no publisher for destination {entry.destination!r}")
-            publisher.send(entry.body)
+            if entry.shard is None:
+                publisher.send(entry.body)
+            else:
+                publisher.send_to_shard(entry.body, entry.shard)
 
     def _publish_commit_ack(self, instruction, ack, publishers: dict) -> bool:
         """Publish outputs, commit, ack. A duplicate/replayed input the inbox
@@ -664,7 +716,11 @@ class FilterWorker:
         """DATA outputs for the buffer's leftover batches per destination (read-only
         plan_drain; the close change discards the buffer in apply_change)."""
         return [
-            (dest, self._output_packet(dest, MessageType.DATA, client_id, batch))
+            self._logical_output(
+                dest,
+                client_id,
+                self._output_packet(dest, MessageType.DATA, client_id, batch),
+            )
             for dest, batch in self._state.plan_drain(client_id).items()
         ]
 

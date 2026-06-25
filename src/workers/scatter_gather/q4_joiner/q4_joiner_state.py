@@ -1,44 +1,6 @@
-"""WorkerState adapter for the q4_joiner worker.
-
-Wraps the joiner's per-client state behind the snapshot/restore/apply_change
-contract the durable-state engine expects.
-
-Change types
-------------
-  "data"
-      A Q4BlockJoinEdge batch arrived. Carries the raw payload (base64);
-      apply_change deserializes and files each half-edge into
-      _incoming_by_client or _outgoing_by_client keyed by
-      (intermediate, a_bucket, b_bucket) block, accumulating endpoint→count
-      sums. Mirrors the live worker's _accept_block_edges without any I/O.
-  "eof"
-      One upstream Q4Sum shard sent its EOF. Carries sender_id; apply_change
-      advances the UpstreamEofCounter. Idempotent: duplicates are ignored.
-  "close"
-      The client was fully emitted and cleaned up. Drops all per-client maps,
-      closes the EOF counter entry, and marks the client closed.
-
-Caller protocol (one change dict per handle() call to PersistentStateHandler)
-------------------------------------------------------------------------------
-  DATA message
-    → data_change(client_id, payload)
-
-  EOF from one upstream Q4Sum shard:
-    → eof_change(client_id, sender_id)
-    If eof_count(client_id) == sum_amount after applying:
-      Read incoming_for(client_id) + outgoing_for(client_id).
-      Emit block-join pair paths to outbox (per partition to Q4Aggregator).
-      → close_change(client_id)
-
-State accessors (read before close_change)
-------------------------------------------
-  incoming_for(client_id) → dict[tuple, dict]  block_key → endpoint → count (INCOMING)
-  outgoing_for(client_id) → dict[tuple, dict]  block_key → endpoint → count (OUTGOING)
-  processed_count(client_id) → int
-  eof_count(client_id)        → int  how many Q4Sum shards have sent EOF so far
-
-Note: _forwarded_by_partition_by_client is intentionally omitted — computed fresh
-at emit time and not needed between arrivals.
+"""Per-client state for the q4_joiner worker: files block half-edges by
+(intermediate, a_bucket, b_bucket) on the incoming and outgoing sides, to join
+once every Q4Sum shard's EOF has arrived.
 """
 
 from __future__ import annotations
@@ -59,14 +21,11 @@ _block_edge_ser = Q4BlockJoinEdgeSerializer()
 class Q4JoinerState:
     def __init__(self, sum_amount: int) -> None:
         self._eof_counter = UpstreamEofCounter(sum_amount)
-        # block key → endpoint → count
-        # block key: (Q4AccountId intermediate, int a_bucket, int b_bucket)
+        # block key (Q4AccountId intermediate, int a_bucket, int b_bucket) -> {endpoint: count}
         self._incoming_by_client: dict[int, dict[tuple, dict]] = {}
         self._outgoing_by_client: dict[int, dict[tuple, dict]] = {}
         self._processed_by_client: dict[int, int] = {}
         self._closed_by_client: set[int] = set()
-
-    # ---------- change constructors ----------
 
     @staticmethod
     def data_change(client_id: int, payload: bytes) -> dict:
@@ -89,8 +48,6 @@ class Q4JoinerState:
     def compound_change(*changes: dict) -> dict:
         return {"type": "compound", "changes": list(changes)}
 
-    # ---------- state accessors (read before close_change) ----------
-
     def incoming_for(self, client_id: int) -> dict[tuple, dict]:
         """Half-edges on the INCOMING side; keyed by (intermediate, a, b) block."""
         return self._incoming_by_client.get(client_id, {})
@@ -110,8 +67,6 @@ class Q4JoinerState:
 
     def is_closed(self, client_id: int) -> bool:
         return client_id in self._closed_by_client
-
-    # ---------- WorkerState protocol ----------
 
     def snapshot(self) -> dict:
         # Q4AccountId frozen dataclasses are picklable; tuple block keys survive too.
@@ -137,7 +92,7 @@ class Q4JoinerState:
         self._closed_by_client = set(data["closed_by_client"])
 
     def apply_change(self, change: dict) -> None:
-        # Single mutation path — runs both live and during WAL replay.
+        # Single mutation path: runs both live and during WAL replay.
         kind = change["type"]
         if kind == "compound":
             for sub in change["changes"]:
@@ -152,8 +107,6 @@ class Q4JoinerState:
             self._apply_close(client_id)
         else:
             raise ValueError(f"unknown change type: {kind}")
-
-    # ---------- private ----------
 
     def _apply_data(self, client_id: int, change: dict) -> None:
         if client_id in self._closed_by_client:
@@ -176,7 +129,7 @@ class Q4JoinerState:
         )
 
     def _apply_eof(self, client_id: int, change: dict) -> None:
-        # UpstreamEofCounter ignores duplicates — idempotent on WAL replay.
+        # UpstreamEofCounter ignores duplicates: idempotent on WAL replay.
         self._eof_counter.on_eof(client_id, change["sender_id"])
 
     def _apply_close(self, client_id: int) -> None:

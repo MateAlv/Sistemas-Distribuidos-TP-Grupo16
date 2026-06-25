@@ -53,12 +53,10 @@ class BatchBuffer:
                 self._buffers.pop(key, None)
                 self._bytes_by_key.pop(key, None)
 
-    # ─── durable (WAL) API: split into a pure planner and a mutator ──────────
-    # A WAL-backed worker needs to know the flushed batches *before* committing
-    # (to stamp them into the outbox in business_fn) and then reproduce the exact
-    # same buffer transition in apply_change — live and on replay. plan_* compute
-    # without mutating; apply_* mutate identically. Both share _simulate_append so
-    # they can never diverge.
+    # WAL API: a worker needs the flushed batches before committing (to stamp
+    # them into the outbox) and must reproduce the same transition in
+    # apply_change, live and on replay. plan_* compute without mutating, apply_*
+    # mutate the same way; both share _simulate_append so they can't diverge.
 
     @staticmethod
     def _simulate_append(
@@ -81,8 +79,8 @@ class BatchBuffer:
         return flushed, cur, cur_bytes
 
     def plan_append(self, key: Hashable, payloads: list[bytes]) -> list[bytes]:
-        """Batches that *would* flush if ``payloads`` were appended under ``key``.
-        Does NOT mutate (read by business_fn to stamp outputs before commit)."""
+        """Batches that would flush if ``payloads`` were appended under ``key``,
+        without mutating (read by business_fn to stamp outputs before commit)."""
         with self._lock:
             flushed, _, _ = self._simulate_append(
                 self._buffers.get(key, []), self._bytes_by_key.get(key, 0),
