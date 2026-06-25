@@ -140,12 +140,16 @@ def test_q5_emits_after_all_eofs():
 
     data_packet, eof_packet = out.sent
 
-    m_type, _, payload = worker.internal_protocol.unpack_packet(data_packet)
+    m_type, _, sender_id, seq, payload = worker.internal_protocol.unpack_addressed_packet(data_packet)
     assert m_type == MessageType.DATA
+    assert sender_id == 0
+    assert seq == 0
     assert AggregationSerializer.deserialize(payload) == 10
 
-    m_type, _, payload = worker.internal_protocol.unpack_packet(eof_packet)
+    m_type, _, sender_id, seq, payload = worker.internal_protocol.unpack_addressed_packet(eof_packet)
     assert m_type == MessageType.EOF
+    assert sender_id == 0
+    assert seq == 1
     ctrl = ControlMessageSerializer().deserialize(payload)
     assert ctrl.expected_total == 1
 

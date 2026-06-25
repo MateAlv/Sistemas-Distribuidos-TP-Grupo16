@@ -5,6 +5,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Keep the src/ dir so both import styles resolve: `common.*` via /app/src and
 # `src.common.*` (used by rates_service) via /app. Mirrors the local test setup.
 COPY src/ ./src/
+COPY scripts/ ./scripts/
 COPY tests/ ./tests/
 ENV PYTHONPATH=/app:/app/src
 CMD ["python", "-m", "pytest", "tests/", "--tb=short"]

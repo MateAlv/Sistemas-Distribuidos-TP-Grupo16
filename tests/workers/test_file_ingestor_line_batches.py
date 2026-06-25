@@ -83,13 +83,15 @@ def test_file_ingestor_emits_transactions_from_line_batch(tmp_path):
     for sender in outputs.values():
         assert len(sender.messages) == 1
 
-    msg_type, client_id, payload = InternalProtocol.unpack_packet(
+    msg_type, client_id, sender_id, seq, payload = InternalProtocol.unpack_addressed_packet(
         outputs["filter_usd"].messages[0]
     )
     txs = TransactionSerializer.deserialize_batch(payload)
 
     assert msg_type == MessageType.DATA
     assert client_id == 9
+    assert sender_id == 1
+    assert seq == 0
     assert len(txs) == 2
     assert txs[0].date == "2022/09/01 00:08"
     assert txs[0].amount == 12.5
@@ -168,12 +170,14 @@ def test_file_ingestor_leader_forwards_eof_when_total_reached(tmp_path):
     assert calls.acks == 2
     for sender in eof_senders.values():
         assert len(sender.messages) == 1
-    msg_type, client_id, payload = InternalProtocol.unpack_packet(
+    msg_type, client_id, sender_id, seq, payload = InternalProtocol.unpack_addressed_packet(
         eof_senders["filter_usd"].messages[0]
     )
     control = ControlMessageSerializer.deserialize(payload)
     assert msg_type == MessageType.EOF
     assert client_id == 9
+    assert sender_id == 1
+    assert seq == 0
     assert control.expected_total == 4
     assert 9 not in ingestor._coordinator._leader_expected
     assert ingestor._state.processed_count(9) == 0  # dropped on flush

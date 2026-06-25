@@ -73,6 +73,9 @@ class FakeChannel:
     def exchange_declare(self, *args, **kwargs):
         pass
 
+    def queue_bind(self, *args, **kwargs):
+        pass
+
     def confirm_delivery(self):
         self.confirm_delivery_calls += 1
 

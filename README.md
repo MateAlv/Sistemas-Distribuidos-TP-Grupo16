@@ -41,7 +41,7 @@ make test
 2. **Precomputa los resultados esperados** del dataset si todavía no existen (referencia contra la que se valida).
 3. **Levanta el stack de test** (`docker compose up --build`) en el proyecto `distribuidos-test`.
 4. **Captura los logs formateados** de toda la corrida en `data/logs/test-<timestamp>.log`, con un puntero estable en `data/logs/latest.log`.
-5. **Espera a que terminen todos los clientes** (hasta `TEST_CLIENT_WAIT_TIMEOUT`).
+5. **Espera a que terminen todos los clientes** (hasta su exit o `TEST_CLIENT_WAIT_TIMEOUT`).
 6. **Valida la salida de cada cliente** contra la referencia, query por query (contemplando clientes abortados, ver abajo).
 7. **Imprime los resúmenes** de la corrida: elección de monitor / failovers, kills del monkey, cleanup por ABORT y un resumen final por query.
 8. **Baja y limpia** los containers, salvo que se use `KEEP_CONTAINERS=1`.
@@ -50,7 +50,7 @@ Al terminar, un test exitoso muestra cada query con `✓ matches reference` y un
 
 ### Elegir el dataset
 
-La fuente de verdad del dataset es `client_accounts` dentro de `config/test-config.yaml`. Para forzar otro dataset en una corrida puntual sin editar el YAML:
+El dataset a usar se define en `client_accounts` dentro de `config/test-config.yaml`. Para forzar otro dataset en una corrida puntual sin editar el YAML:
 
 ```bash
 TEST_DATASET=LI-Small make test
@@ -124,11 +124,21 @@ Ver logs formateados:
 make logs
 ```
 
-Ejecutar tests unitarios dentro de Docker:
+Ejecutar tests unitarios dentro de Docker (corre toda la suite):
 
 ```bash
 make test-unit
 ```
+
+Para correr un subconjunto, usar `make run-tests` con `PYTEST_ARGS` (por default
+corre toda la suite, igual que `make test-unit`):
+
+```bash
+make run-tests PYTEST_ARGS="tests/workers/test_joiner.py -k abort -v"
+```
+
+Ambos construyen la misma imagen desde `Dockerfile.test`; la única diferencia es
+que `run-tests` permite elegir qué tests correr vía `PYTEST_ARGS`.
 
 ## Variables útiles
 

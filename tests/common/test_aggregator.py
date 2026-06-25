@@ -1,225 +1,219 @@
-import os
+import importlib
 
 from common.constants import C_Q2, C_Q3, C_Q5
 from common.domain.partial_result import Q2BankMaxPartial, Q3PaymentFormatPartial
 from common.message_protocol.internal.aggregation_serializer import AggregationSerializer
+from common.message_protocol.internal.common import MessageType
+from common.message_protocol.internal.common.control_message import ControlMessage
+from common.message_protocol.internal.control_message_serializer import (
+    ControlMessageSerializer,
+)
 from common.message_protocol.internal.partial_result_serializer import (
     Q2BankMaxPartialSerializer,
     Q3AverageResultSerializer,
     Q3PaymentFormatPartialSerializer,
 )
-from common import middleware as _middleware
 
 
-os.environ.setdefault("ID", "1")
-os.environ.setdefault("MOM_HOST", "localhost")
-os.environ.setdefault("CONFIGURATION", C_Q5)
-os.environ.setdefault("AGGREGATION_PREFIX", "test_aggregation")
-os.environ.setdefault("OUTPUT_QUEUE", "test_output_queue")
-
-
-# Replace real RabbitMQ middleware with a dummy that doesn't connect
-class _DummyMiddlewareQueue:
-    def __init__(self, host, queue_name):
-        self._host = host
-        self._queue_name = queue_name
-    def start_consuming(self, cb):
-        pass
-    def send(self, msg):
-        pass
-    def stop_consuming(self):
-        pass
-    def close(self):
-        pass
-
-
-class _DummyMiddlewareExchange:
-    def __init__(self, host, exchange_name, routing_keys, exchange_type="direct", queue_name=None, exclusive=True):
-        self._host = host
-        self._exchange_name = exchange_name
-        self._routing_keys = routing_keys
-    def start_consuming(self, cb):
-        pass
-    def send(self, msg):
-        pass
-    def stop_consuming(self):
-        pass
-    def close(self):
-        pass
-
-_middleware.MessageMiddlewareQueueRabbitMQ = _DummyMiddlewareQueue
-_middleware.MessageMiddlewareExchangeRabbitMQ = _DummyMiddlewareExchange
-
-from workers.aggregator.aggregators import AggregatorWorker
-from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
-from common.message_protocol.internal.common import ControlMessage, MessageType
-
-
-class DummyQueue:
+class _Calls:
     def __init__(self):
-        self.sent = []
+        self.acks = 0
+        self.nacks = []
+
+    def ack(self):
+        self.acks += 1
+
+    def nack(self, requeue=False):
+        self.nacks.append(requeue)
+
+
+class _CollectingSender:
+    def __init__(self, destination, sent):
+        self.destination = destination
+        self.sent = sent
 
     def send(self, packet: bytes):
-        self.sent.append(packet)
+        self.sent.append((self.destination, packet))
 
 
-def _send_data(worker, client_id: int, payload: bytes) -> None:
-    packet = worker.internal_protocol.create_packet(
-        msg_type=MessageType.DATA,
+def _aggregator_module(monkeypatch, tmp_path, configuration):
+    monkeypatch.setenv("ID", "1")
+    monkeypatch.setenv("MOM_HOST", "localhost")
+    monkeypatch.setenv("CONFIGURATION", configuration)
+    monkeypatch.setenv("AGGREGATION_PREFIX", "test_aggregation")
+    monkeypatch.setenv("AGGREGATION_AMOUNT", "1")
+    monkeypatch.setenv("OUTPUT_QUEUE", "test_output_queue")
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
+
+    module = importlib.import_module("workers.aggregator.aggregators")
+    return importlib.reload(module)
+
+
+def _worker_with_captured_outputs(module):
+    worker = module.AggregatorWorker()
+    sent = []
+    senders = {}
+
+    def sender_for(destination):
+        if destination not in senders:
+            senders[destination] = _CollectingSender(destination, sent)
+        return senders[destination]
+
+    worker._tl_sender = sender_for
+    return worker, sent
+
+
+def _addressed_packet(worker, msg_type, client_id, sender_id, seq, payload):
+    return worker._internal_protocol.create_addressed_packet(
+        msg_type=msg_type,
         client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        sender_id=sender_id,
+        seq=seq,
         payload=payload,
     )
-    worker._process_data_message(packet)
 
 
-def _send_eof(worker, client_id: int) -> None:
+def _send_data(worker, calls, client_id: int, seq: int, payload: bytes) -> None:
+    packet = _addressed_packet(worker, MessageType.DATA, client_id, 0, seq, payload)
+    worker._process_data_message(packet, calls.ack, calls.nack)
+
+
+def _send_eof(worker, calls, client_id: int, seq: int, expected_total: int) -> None:
     payload = ControlMessageSerializer.serialize(
-        ControlMessage(sender_id=0, expected_total=worker.data_count_by_client.get(client_id, 0), processed_count=0)
+        ControlMessage(sender_id=0, expected_total=expected_total, processed_count=0)
     )
-    packet = worker.internal_protocol.create_packet(
-        msg_type=MessageType.EOF,
-        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-        payload=payload,
-    )
-    worker._process_data_message(packet)
+    packet = _addressed_packet(worker, MessageType.EOF, client_id, 0, seq, payload)
+    worker._process_data_message(packet, calls.ack, calls.nack)
 
 
-def test_q5_counts_each_data_message():
-    import workers.aggregator.aggregators as ag
-
-    ag.CONFIGURATION = C_Q5
-
-    worker = AggregatorWorker()
-    out = DummyQueue()
-    worker.output_queue = out
-
-    client_id = 1
-    # Q5 has no Sum: Filter Q5 USD<1 forwards each filtered Transaction.
-    # The payload content is irrelevant; every DATA counts as one.
-    for _ in range(5):
-        _send_data(worker, client_id, b"any-transaction-payload")
-    _send_eof(worker, client_id)
-
-    # Expect a DATA message with the partial total (5) followed by an EOF.
-    assert len(out.sent) == 2
-    data_packet, eof_packet = out.sent
-
-    m_type, _, payload = worker.internal_protocol.unpack_packet(data_packet)
-    assert m_type == MessageType.DATA
-    assert AggregationSerializer.deserialize(payload) == 5
-
-    m_type, _, payload = worker.internal_protocol.unpack_packet(eof_packet)
-    assert m_type == MessageType.EOF
-    ctrl = ControlMessageSerializer().deserialize(payload)
-    assert ctrl.expected_total == 1
+def _close_worker(worker):
+    worker._handler.wal.close()
 
 
-def test_duplicate_eof_and_late_data_are_ignored():
-    import workers.aggregator.aggregators as ag
-
-    ag.CONFIGURATION = C_Q5
-
-    worker = AggregatorWorker()
-    out = DummyQueue()
-    worker.output_queue = out
-
-    client_id = 7
-    for _ in range(3):
-        _send_data(worker, client_id, b"tx")
-    _send_eof(worker, client_id)
-
-    # First EOF emits exactly: 1 DATA (count=3) + 1 EOF.
-    assert len(out.sent) == 2
-
-    # Duplicate EOF and late DATA for a closed client must be ignored.
-    _send_eof(worker, client_id)
-    _send_data(worker, client_id, b"late-tx")
-    _send_eof(worker, client_id)
-
-    assert len(out.sent) == 2
+def _run_data_then_eof(worker, client_id, payloads):
+    calls = _Calls()
+    for seq, payload in enumerate(payloads):
+        _send_data(worker, calls, client_id, seq, payload)
+    _send_eof(worker, calls, client_id, len(payloads), len(payloads))
+    assert calls.nacks == []
+    assert calls.acks == len(payloads) + 1
 
 
-def test_q2_keeps_max_per_bank():
-    import workers.aggregator.aggregators as ag
-
-    ag.CONFIGURATION = C_Q2
-
-    worker = AggregatorWorker()
-    out = DummyQueue()
-    worker.output_queue = out
-
-    client_id = 2
-    # Partials arriving (possibly out of order) from the Sum workers.
-    partials = [
-        Q2BankMaxPartial(bank_id="X", from_account="a1", amount=10.0),
-        Q2BankMaxPartial(bank_id="X", from_account="a2", amount=30.0),
-        Q2BankMaxPartial(bank_id="Z", from_account="a3", amount=20.0),
-    ]
-    for partial in partials:
-        _send_data(worker, client_id, Q2BankMaxPartialSerializer.serialize(partial))
-    _send_eof(worker, client_id)
-
-    sent = out.sent
-    assert len(sent) == 3  # 2 bank maxima + EOF
-
-    data_packets = sent[:-1]
-    eof_packet = sent[-1]
-
-    max_by_bank = {}
-    for packet in data_packets:
-        m_type, _, payload = worker.internal_protocol.unpack_packet(packet)
-        assert m_type == MessageType.DATA
-        result = Q2BankMaxPartialSerializer.deserialize(payload)
-        max_by_bank[result.bank_id] = result.amount
-
-    assert max_by_bank["X"] == 30.0
-    assert max_by_bank["Z"] == 20.0
-
-    m_type, _, payload = worker.internal_protocol.unpack_packet(eof_packet)
-    assert m_type == MessageType.EOF
-    ctrl = ControlMessageSerializer().deserialize(payload)
-    assert ctrl.expected_total == 2
+def _unpack_output(worker, packet):
+    return worker._internal_protocol.unpack_addressed_packet(packet)
 
 
-def test_q3_averages_per_payment_format():
-    import workers.aggregator.aggregators as ag
-
-    ag.CONFIGURATION = C_Q3
-
-    worker = AggregatorWorker()
-    out = DummyQueue()
-    worker.output_queue = out
-
-    client_id = 3
-    # Two Sum workers each contribute partials for the same payment format.
-    partials = [
-        Q3PaymentFormatPartial(payment_format="Wire", amount_sum=100.0, count=4),
-        Q3PaymentFormatPartial(payment_format="Wire", amount_sum=50.0, count=1),
-        Q3PaymentFormatPartial(payment_format="ACH", amount_sum=30.0, count=3),
-    ]
-    for partial in partials:
-        _send_data(
-            worker, client_id, Q3PaymentFormatPartialSerializer.serialize(partial)
+def test_q5_counts_each_data_message(monkeypatch, tmp_path):
+    module = _aggregator_module(monkeypatch, tmp_path, C_Q5)
+    worker, sent = _worker_with_captured_outputs(module)
+    try:
+        _run_data_then_eof(
+            worker,
+            client_id=1,
+            payloads=[b"any-transaction-payload"] * 5,
         )
-    _send_eof(worker, client_id)
 
-    sent = out.sent
-    assert len(sent) == 3  # 2 payment formats + EOF
+        assert [destination for destination, _ in sent] == ["test_output_queue"] * 2
+        data_packet, eof_packet = [packet for _, packet in sent]
 
-    data_packets = sent[:-1]
-    eof_packet = sent[-1]
+        msg_type, client_id, sender_id, seq, payload = _unpack_output(worker, data_packet)
+        assert (msg_type, client_id, sender_id, seq) == (MessageType.DATA, 1, 1, 0)
+        assert AggregationSerializer.deserialize(payload) == 5
 
-    avg_by_format = {}
-    for packet in data_packets:
-        m_type, _, payload = worker.internal_protocol.unpack_packet(packet)
-        assert m_type == MessageType.DATA
-        result = Q3AverageResultSerializer.deserialize(payload)
-        avg_by_format[result.payment_format] = result.average
+        msg_type, client_id, sender_id, seq, payload = _unpack_output(worker, eof_packet)
+        assert (msg_type, client_id, sender_id, seq) == (MessageType.EOF, 1, 1, 1)
+        ctrl = ControlMessageSerializer.deserialize(payload)
+        assert ctrl.expected_total == 1
+    finally:
+        _close_worker(worker)
 
-    assert avg_by_format["Wire"] == 150.0 / 5
-    assert avg_by_format["ACH"] == 30.0 / 3
 
-    m_type, _, payload = worker.internal_protocol.unpack_packet(eof_packet)
-    assert m_type == MessageType.EOF
-    ctrl = ControlMessageSerializer().deserialize(payload)
-    assert ctrl.expected_total == 2
+def test_duplicate_eof_and_late_data_are_ignored(monkeypatch, tmp_path):
+    module = _aggregator_module(monkeypatch, tmp_path, C_Q5)
+    worker, sent = _worker_with_captured_outputs(module)
+    try:
+        _run_data_then_eof(worker, client_id=7, payloads=[b"tx"] * 3)
+        assert len(sent) == 2
+
+        calls = _Calls()
+        _send_eof(worker, calls, client_id=7, seq=3, expected_total=3)
+        _send_data(worker, calls, client_id=7, seq=4, payload=b"late-tx")
+        _send_eof(worker, calls, client_id=7, seq=5, expected_total=3)
+
+        assert calls.nacks == []
+        assert calls.acks == 3
+        assert len(sent) == 2
+    finally:
+        _close_worker(worker)
+
+
+def test_q2_keeps_max_per_bank(monkeypatch, tmp_path):
+    module = _aggregator_module(monkeypatch, tmp_path, C_Q2)
+    worker, sent = _worker_with_captured_outputs(module)
+    try:
+        partials = [
+            Q2BankMaxPartial(bank_id="X", from_account="a1", amount=10.0),
+            Q2BankMaxPartial(bank_id="X", from_account="a2", amount=30.0),
+            Q2BankMaxPartial(bank_id="Z", from_account="a3", amount=20.0),
+        ]
+        _run_data_then_eof(
+            worker,
+            client_id=2,
+            payloads=[Q2BankMaxPartialSerializer.serialize(p) for p in partials],
+        )
+
+        assert [destination for destination, _ in sent] == ["test_output_queue"] * 3
+        data_packets = [packet for _, packet in sent[:-1]]
+        eof_packet = sent[-1][1]
+
+        max_by_bank = {}
+        for packet in data_packets:
+            msg_type, client_id, sender_id, _seq, payload = _unpack_output(worker, packet)
+            assert (msg_type, client_id, sender_id) == (MessageType.DATA, 2, 1)
+            result = Q2BankMaxPartialSerializer.deserialize(payload)
+            max_by_bank[result.bank_id] = result.amount
+
+        assert max_by_bank == {"X": 30.0, "Z": 20.0}
+
+        msg_type, client_id, sender_id, seq, payload = _unpack_output(worker, eof_packet)
+        assert (msg_type, client_id, sender_id, seq) == (MessageType.EOF, 2, 1, 2)
+        ctrl = ControlMessageSerializer.deserialize(payload)
+        assert ctrl.expected_total == 2
+    finally:
+        _close_worker(worker)
+
+
+def test_q3_averages_per_payment_format(monkeypatch, tmp_path):
+    module = _aggregator_module(monkeypatch, tmp_path, C_Q3)
+    worker, sent = _worker_with_captured_outputs(module)
+    try:
+        partials = [
+            Q3PaymentFormatPartial(payment_format="Wire", amount_sum=100.0, count=4),
+            Q3PaymentFormatPartial(payment_format="Wire", amount_sum=50.0, count=1),
+            Q3PaymentFormatPartial(payment_format="ACH", amount_sum=30.0, count=3),
+        ]
+        _run_data_then_eof(
+            worker,
+            client_id=3,
+            payloads=[Q3PaymentFormatPartialSerializer.serialize(p) for p in partials],
+        )
+
+        assert [destination for destination, _ in sent] == ["test_output_queue"] * 3
+        data_packets = [packet for _, packet in sent[:-1]]
+        eof_packet = sent[-1][1]
+
+        avg_by_format = {}
+        for packet in data_packets:
+            msg_type, client_id, sender_id, _seq, payload = _unpack_output(worker, packet)
+            assert (msg_type, client_id, sender_id) == (MessageType.DATA, 3, 1)
+            result = Q3AverageResultSerializer.deserialize(payload)
+            avg_by_format[result.payment_format] = result.average
+
+        assert avg_by_format == {"Wire": 150.0 / 5, "ACH": 30.0 / 3}
+
+        msg_type, client_id, sender_id, seq, payload = _unpack_output(worker, eof_packet)
+        assert (msg_type, client_id, sender_id, seq) == (MessageType.EOF, 3, 1, 2)
+        ctrl = ControlMessageSerializer.deserialize(payload)
+        assert ctrl.expected_total == 2
+    finally:
+        _close_worker(worker)

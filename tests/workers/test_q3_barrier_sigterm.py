@@ -25,11 +25,16 @@ def _setup(pika_env, monkeypatch):
 
     module = pika_env.import_fresh("workers.q3_barrier.q3_barrier")
 
+    created = []
+
     def factory(*args, **kwargs):
-        return pika_env.BlockingFakeConsumer(block_timeout=30)
+        endpoint = pika_env.BlockingFakeConsumer(block_timeout=30)
+        created.append(endpoint)
+        return endpoint
 
     monkeypatch.setattr(module.middleware, "MessageMiddlewareQueueRabbitMQ", factory)
     monkeypatch.setattr(module.middleware, "MessageMiddlewareExchangeRabbitMQ", factory)
+    module._test_created_endpoints = created
     return module
 
 
@@ -60,10 +65,7 @@ def test_q3_barrier_sigterm_stops_both_consumers_and_closes(pika_env, monkeypatc
     assert not runner.is_alive()
     assert worker.averages_input.stop_calls == 1
     assert worker.candidates_input.stop_calls == 1
-    # Each connection closed by its owning thread.
-    assert worker.averages_input.closed          # close() (main)
-    assert worker.averages_output_queue.closed    # close() (main)
-    assert worker.candidates_input.closed         # candidates thread finally
+    assert all(endpoint.closed for endpoint in module._test_created_endpoints)
 
 
 def test_q3_barrier_handle_sigterm_is_idempotent(pika_env, monkeypatch):
