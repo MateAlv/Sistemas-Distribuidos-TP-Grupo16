@@ -151,6 +151,13 @@ class AggregatorState:
         }
 
     @staticmethod
+    def abort_change(client_id: int) -> dict:
+        return AggregatorState.compound_change(
+            AggregatorState.coordinator_cleanup_change(client_id),
+            AggregatorState.close_change(client_id),
+        )
+
+    @staticmethod
     def coordinator_cleanup_change(client_id: int) -> dict:
         # Non-leader cleanup after FlushAction(is_leader=False).
         return {"type": "coordinator_cleanup", "client_id": client_id}

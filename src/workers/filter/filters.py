@@ -553,6 +553,22 @@ class FilterWorker:
             return outs
         return []
 
+    def _abort_fn(self, client_id: int) -> tuple[dict, list]:
+        change = FilterState.abort_change(client_id)
+        return change, self._downstream_abort_outputs(client_id)
+
+    def _downstream_abort_outputs(self, client_id: int) -> list:
+        packet = self.internal_packet_serializer.create_packet(
+            msg_type=MessageType.ABORT,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            payload=b"",
+        )
+        return [
+            (edge, packet, shard)
+            for edge, spec in self._output_edges.items()
+            for shard in range(spec.shard_count)
+        ]
+
     def _data_process_payload(self, client_id: int, payload: bytes):
         """business_fn for a DATA batch (runs inside the durable handler, NEW only):
         filter + route each transaction, append the passing ones to the durable
@@ -736,6 +752,8 @@ class FilterWorker:
             self._runner.process(message, ack, nack)
         elif msg_type == MessageType.EOF:
             self._handle_upstream_eof(message, ack, nack)
+        elif msg_type == MessageType.ABORT:
+            self._runner.process(message, ack, nack)
         else:
             logging.warning(
                 "filter_unknown_message_type | filter=%s | id=%s | type=%s",
@@ -1135,6 +1153,7 @@ class FilterWorker:
             publishers=self._data_publishers,
             process_payload=self._data_process_payload,
             lock=self.lock,
+            abort_fn=self._abort_fn,
         )
         self._runner.recover_and_republish()
 

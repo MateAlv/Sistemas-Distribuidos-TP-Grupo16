@@ -159,6 +159,13 @@ class FilterState:
         return {"type": "close", "client_id": client_id}
 
     @staticmethod
+    def abort_change(client_id: int) -> dict:
+        return FilterState.compound_change(
+            FilterState.coordinator_cleanup_change(client_id),
+            FilterState.close_change(client_id),
+        )
+
+    @staticmethod
     def coordinator_upstream_eof_change(
         client_id: int, expected_total: int, count: int, forwarded: int
     ) -> dict:

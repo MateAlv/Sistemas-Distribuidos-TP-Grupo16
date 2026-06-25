@@ -232,6 +232,8 @@ class SumWorker:
                 self._handle_data(client_id, sender_id, seq, payload, ack)
             elif msg_type == MessageType.EOF:
                 self._handle_upstream_eof(client_id, sender_id, seq, payload, ack)
+            elif msg_type == MessageType.ABORT:
+                self._handle_abort(client_id, sender_id, seq, ack, nack)
             else:
                 raise ValueError(f"Unexpected sum data message type: {msg_type}")
         except Exception:
@@ -307,6 +309,46 @@ class SumWorker:
             "local_count=%s | expected_total=%s",
             CONFIGURATION, ID, client_id, count, expected_total,
         )
+
+    def _downstream_abort_outputs(self, client_id: int) -> list:
+        outputs = []
+        for index in range(AGGREGATION_AMOUNT):
+            seq = self._next_agg_seq(client_id)
+            routing_key = f"{AGGREGATION_PREFIX}_{index}"
+            outputs.append(
+                (routing_key, self._addressed_packet(MessageType.ABORT, client_id, seq, b""))
+            )
+        return outputs
+
+    def _handle_abort(self, client_id: int, sender_id: int, seq: int, ack, nack) -> None:
+        msg_id = f"abort:{sender_id}:{client_id}:{seq}"
+        try:
+            with self._lock:
+                if self._state.is_closed(client_id):
+                    ack()
+                    return
+
+                def bfn(_pl):
+                    return (
+                        SumState.abort_change(client_id),
+                        self._downstream_abort_outputs(client_id),
+                    )
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, sender_id, seq, b"", bfn,
+                    kind=MsgKind.ABORT,
+                )
+            self._publish_commit_ack(instruction, ack)
+            logging.info(
+                "sum_abort | configuration=%s | id=%s | client_id=%s",
+                CONFIGURATION, ID, client_id,
+            )
+        except Exception:
+            logging.exception(
+                "sum_abort_error | configuration=%s | id=%s | client_id=%s",
+                CONFIGURATION, ID, client_id,
+            )
+            nack(requeue=True)
 
     # ---------- control path ----------
 
