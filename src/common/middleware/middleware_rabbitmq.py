@@ -162,6 +162,13 @@ class LazyQueue:
             self._queue = MessageMiddlewareQueueRabbitMQ(self._host, self._queue_name)
         self._queue.send(message, routing_key)
 
+    def send_to_shard(self, message, shard):
+        if int(shard) != 0:
+            raise MessageMiddlewareMessageError(
+                f"queue publisher only supports shard 0, got {shard}"
+            )
+        self.send(message)
+
     def close(self):
         if self._queue is not None:
             self._queue.close()
@@ -199,6 +206,13 @@ class MessageMiddlewareQueueRabbitMQ(_RabbitMQBase, MessageMiddlewareQueue):
             raise
         except Exception as e:
             raise MessageMiddlewareMessageError(e)
+
+    def send_to_shard(self, message, shard):
+        if int(shard) != 0:
+            raise MessageMiddlewareMessageError(
+                f"queue publisher only supports shard 0, got {shard}"
+            )
+        self.send(message)
 
 
 
@@ -266,6 +280,13 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
             raise
         except Exception as e:
             raise MessageMiddlewareMessageError(e)
+
+    def send_to_shard(self, message, shard):
+        if int(shard) != 0:
+            raise MessageMiddlewareMessageError(
+                f"fixed-routing exchange publisher only supports shard 0, got {shard}"
+            )
+        self.send(message)
 
 
     def start_consuming(self, on_message_callback):

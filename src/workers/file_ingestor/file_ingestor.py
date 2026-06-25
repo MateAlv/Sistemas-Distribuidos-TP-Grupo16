@@ -100,16 +100,13 @@ class FileIngestor:
         self._runner: WorkerRunner | None = None
 
     def _output_edges(self) -> dict[str, EdgeSpec]:
-        """One addressed edge per filter output. The SenderSequencer assigns the
-        durable per-(client, edge, shard) seq stamped into each packet, so the seq
-        survives a crash/restart and the downstream filter never dedup-drops a
-        post-recovery batch."""
+        """One addressed edge per filter output. The SenderSequencer stamps a
+        durable per-(client, edge, shard) seq, so a downstream filter won't
+        dedup-drop a batch after recovery."""
         return {
             output.name: EdgeSpec(self._config.id, output.shard_count)
             for output in self._config.outputs
         }
-
-    # ---------- connection factories ----------
 
     def _new_control_senders(self) -> dict:
         return {
@@ -128,9 +125,8 @@ class FileIngestor:
         }
 
     def _new_downstream_senders(self) -> dict:
-        """One ShardedPublisher per output edge, keyed by edge name. The
-        SenderSequencer addresses each packet and picks the destination shard; the
-        publisher just routes the already-stamped bytes to that shard."""
+        """One ShardedPublisher per output edge. The SenderSequencer already
+        addressed each packet and picked its shard; the publisher just sends it."""
         return {
             output.name: ShardedPublisher(
                 self._config.mom_host,
@@ -149,8 +145,6 @@ class FileIngestor:
     def _input_routing_key(self) -> str:
         return queue_name_for_worker(self._config.input_routing_prefix, self._config.id)
 
-    # ---------- helpers ----------
-
     def _packet(self, msg_type: MessageType, client_id: int, payload: bytes) -> bytes:
         return self._internal_protocol.create_packet(
             msg_type=msg_type,
@@ -168,10 +162,8 @@ class FileIngestor:
         )
 
     def _downstream_eof_outputs(self, client_id: int, total_forwarded: int) -> list:
-        """One logical downstream EOF per filter output, carrying the cross-replica
-        forwarded total. The SenderSequencer addresses it (durable seq) and routes
-        it to the payload-digest shard, which becomes the dynamic leader in
-        broadcast mode. Routed through the outbox, so recovery re-publishes it."""
+        """One downstream EOF per filter output, carrying the cross-replica
+        forwarded total. Goes through the outbox, so recovery re-publishes it."""
         eof_payload = self._eof_payload(total_forwarded)
         return [
             (output.name, self._packet(MessageType.EOF, client_id, eof_payload))
@@ -179,9 +171,8 @@ class FileIngestor:
         ]
 
     def _publish_outputs(self, entries, publishers: dict) -> None:
-        """Publish stamped outbox entries, resolving each destination name against
-        the given publishers map (filter edges + control/response queues). Sharded
-        edge entries route to their assigned shard; plain queue entries send as-is."""
+        """Publish outbox entries, resolving each destination against the publishers
+        map. Sharded entries go to their shard; plain queue entries send as-is."""
         for entry in entries:
             publisher = publishers.get(entry.destination)
             if publisher is None:
@@ -196,8 +187,6 @@ class FileIngestor:
             time.sleep(action.sleep_before)
         for qname in action.queue_names:
             control_senders[qname].send(action.message)
-
-    # ---------- data path ----------
 
     def _on_input_message(self, message: bytes, ack, nack) -> None:
         """Dispatch by type: DATA goes through the durable handler (runner);
@@ -221,10 +210,9 @@ class FileIngestor:
             nack(requeue=False)
 
     def _data_process_payload(self, client_id: int, payload: bytes):
-        """business_fn for a DATA line batch: parse it, return the forwarded count
-        as the state change and one transaction batch per downstream output. Pure
-        w.r.t. worker state (the handler applies the change), so WAL replay
-        reproduces it exactly. A closed client (late straggler) yields nothing."""
+        """Parse a DATA line batch: return the forwarded count (the state change)
+        and one transaction batch per output. No state mutation here, so replay
+        reproduces it. A closed client yields nothing."""
         if self._state.is_closed(client_id):
             return FileIngestorState.data_change(client_id, 0), []
 
@@ -246,11 +234,10 @@ class FileIngestor:
         return FileIngestorState.data_change(client_id, len(transactions)), outputs
 
     def _handle_upstream_eof(self, message: bytes, ack, nack) -> None:
-        """Upstream EOF (on the input queue) routed through the handler as a durable
-        input under kind=CTRL_UPSTREAM_EOF (a separate inbox bucket from DATA, so the
-        EOF's (sender, seq) never collides with a real DATA packet's): on_upstream_eof
-        is idempotent, so apply_change replays it safely; the broadcast (or N==1
-        downstream EOF) rides the outbox and is re-published on recovery."""
+        """Upstream EOF, handled as a durable input under CTRL_UPSTREAM_EOF (a
+        separate inbox bucket so its (sender, seq) can't collide with a DATA
+        packet). on_upstream_eof is idempotent, so replay is safe; the broadcast
+        (or the N==1 downstream EOF) rides the outbox and is re-published on recovery."""
         try:
             _msg_type, client_id, sender_id, seq, payload = (
                 self._internal_protocol.unpack_addressed_packet(message)
@@ -383,9 +370,8 @@ class FileIngestor:
             self._handle_flush_order(message, client_id, ctrl, ack, nack, response_senders)
             return
 
-        # EOF_RECEIVED / PROCESSED_REQUEST: transient count-collection. Direct
-        # coordinator call (idempotent / retriable), not WAL-tracked. A leader
-        # crash here is rebuilt by RabbitMQ redelivery + the coordinator retry.
+        # EOF_RECEIVED / PROCESSED_REQUEST: transient count-collection, not
+        # WAL-tracked. A leader crash here is rebuilt by redelivery + coordinator retry.
         with self._lock:
             count = self._state.processed_count(client_id)
             action = self._coordinator.process_control_message(
@@ -416,9 +402,9 @@ class FileIngestor:
             ack()
 
     def _handle_flush_order(self, message, client_id, ctrl, ack, nack, response_senders) -> None:
-        """Non-leader receives FLUSH_ORDER: WAL-track the close (cleanup + drop)
-        and send FLUSH_ACK with the forwarded count, all via the handler so a
-        crash never double-flushes. The leader ignores its own FLUSH_ORDER."""
+        """Non-leader handles FLUSH_ORDER: close (cleanup + drop) and send FLUSH_ACK
+        with the forwarded count, all through the handler so a crash never
+        double-flushes. The leader ignores its own FLUSH_ORDER."""
         leader_id = ctrl.sender_id
         msg_id = f"fo:{client_id}:{leader_id}"
         try:
@@ -503,8 +489,6 @@ class FileIngestor:
             except Exception:
                 pass
 
-    # ---------- response path (líder) ----------
-
     def _handle_response(
         self, message: bytes, ack, nack, control_senders: dict, eof_senders
     ) -> None:
@@ -546,10 +530,9 @@ class FileIngestor:
             ack()
 
     def _handle_flush_ack(self, message, client_id, ctrl, ack, nack, eof_senders) -> None:
-        """Leader accumulates FLUSH_ACKs via the handler (decide/apply): business_fn
-        predicts the last ack with read-only accessors and emits the single
-        downstream EOF (with the cross-replica forwarded total) to the outbox; the
-        coordinator mutation + close happen in apply_change."""
+        """Leader accumulates FLUSH_ACKs through the handler. business_fn predicts
+        the last ack and emits the single downstream EOF (cross-replica total) to
+        the outbox; the coordinator update and close happen in apply_change."""
         sender_id = ctrl.sender_id
         msg_id = f"fa:{client_id}:{sender_id}"
         try:
@@ -663,8 +646,6 @@ class FileIngestor:
             except Exception:
                 pass
 
-    # ---------- lifecycle ----------
-
     def start(self) -> None:
         self._ensure_output_bindings()
         logging.info(
@@ -680,11 +661,10 @@ class FileIngestor:
             self._config.total_instances,
         )
 
-        # Build the data-thread publishers and runner, then recover (restoring the
-        # coordinator) BEFORE spawning the control/response threads, so they never
-        # touch coordinator state mid-recovery. The map is combined (filter
-        # exchanges + control + response queues) because recovery re-publishes any
-        # pending EOF output, whose destination may be any of those.
+        # Recover (restoring the coordinator) before starting the control/response
+        # threads, so they don't touch coordinator state mid-recovery. The publisher
+        # map covers filter exchanges + control + response queues because recovery
+        # may re-publish a pending EOF to any of them.
         self._data_publishers = {
             **self._downstream_senders(),
             **self._main_control_senders,

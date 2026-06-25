@@ -1,37 +1,10 @@
-"""Assigns durable, deterministic ids to outgoing messages.
+"""Assigns durable ids to outgoing messages, in one place.
 
-Business code returns plain ``(destination, body)`` outputs; the handler routes
-them through here so id assignment lives in exactly one place.
-
-Two stamping modes coexist, chosen per destination:
-
-* **Plain (legacy)** — when the destination has no edge spec. The body is left
-  untouched and the id is
-
-      output_id = "{node_id}:{client_id}:{seq}#{index}"
-
-  where ``seq`` is a per-client counter and ``index`` the output's position in
-  its originating input. Used for control/response queues and for any data edge
-  whose consumer still reads plain packets.
-
-* **Addressed** — when the destination has an :class:`EdgeSpec`. The body is
-  rebuilt as an *addressed* packet carrying ``sender_id`` and ``seq`` so the
-  downstream worker can dedup on ``(client, kind, sender_id, seq)``. The ``seq``
-  is kept dense per ``(client_id, edge, shard)``: the edge shards by payload
-  digest, so a per-client counter would leave each shard seeing ~1/N of the seqs
-  (unbounded gaps in the consumer's dedup tracker). The id is
-
-      output_id = "{node_id}:{client_id}:{edge}:{shard}:{seq}#{index}"
-
-The shard is whatever the worker passes in the logical output (semantic
-partitioning, the Q4 case); if it passes none, it falls back to
-``shard_for_key(payload, shard_count)`` (digest sharding). Either way the chosen
-shard is recorded on the OutboxEntry so the publisher routes to the exact shard
-the seq was assigned for.
-
-Determinism on recovery does not come from recomputing ids: the stamped outputs
-are persisted in the WAL/outbox and resent verbatim. The sequencer only needs to
-restore its high-water marks, which ``observe`` rebuilds from replayed outputs.
+Addressed edges (those with an EdgeSpec) rebuild the body so the consumer can
+dedup on (client, kind, sender_id, seq); that seq is counted per
+(client, edge, shard) so digest sharding doesn't leave gaps in the consumer's
+dedup tracker. Plain edges leave the body untouched. On recovery the persisted
+ids are resent as-is, not recomputed.
 """
 
 from __future__ import annotations
@@ -42,9 +15,9 @@ from common.fault_tolerance.outbox.outbox_entry import OutboxEntry
 from common.message_protocol.internal.protocol import InternalProtocol
 from common.routing import shard_for_key
 
-# A logical output is (destination, body) or (destination, body, shard); shard is
-# the explicit destination partition (None → digest sharding for addressed edges,
-# or let the publisher route for plain edges).
+# A logical output is (destination, body) or (destination, body, shard). A None
+# shard means digest sharding for addressed edges, or let the publisher route for
+# plain edges.
 LogicalOutput = tuple[str, bytes] | tuple[str, bytes, "int | None"]
 
 
@@ -58,16 +31,8 @@ def _normalize(output: LogicalOutput) -> tuple[str, bytes, "int | None"]:
 
 @dataclass(frozen=True)
 class EdgeSpec:
-    """Addressing config for one logical output edge.
-
-    sender_id    this producer's stable instance id, stamped into every packet.
-    shard_count  destination shard count; the seq is kept dense per
-                 (client, edge, shard) so the consumer's dedup tracker stays
-                 bounded.
-    """
-
-    sender_id: int
-    shard_count: int
+    sender_id: int    # this producer's stable instance id, stamped into every packet
+    shard_count: int  # destination shard count, used to digest-shard the seq
 
 
 class SenderSequencer:
@@ -82,9 +47,9 @@ class SenderSequencer:
     def stamp(
         self, client_id: int, input_id: str, outputs: list[LogicalOutput]
     ) -> list[OutboxEntry]:
-        """Turn logical outputs into OutboxEntries using the current counters,
-        without advancing them (the counter is a memory mutation, so it only
-        commits after the WAL append, via observe)."""
+        """Turn logical outputs into OutboxEntries using the current counters
+        without advancing them; the counters only commit after the WAL append,
+        via observe()."""
         local_plain: dict[int, int] = {}
         local_addr: dict[tuple[int, str, int], int] = {}
         entries: list[OutboxEntry] = []
@@ -137,14 +102,13 @@ class SenderSequencer:
         return entries
 
     def advance(self, client_id: int, count: int) -> None:
-        """Bump the legacy per-client counter. Kept for plain-only callers; the
-        handler uses observe() so mixed plain/addressed inputs advance correctly."""
+        """Bump the plain per-client seq counter by count."""
         self._next_seq[client_id] = self._next_seq.get(client_id, 0) + count
 
     def observe(self, outputs: list[OutboxEntry]) -> None:
-        """Restore high-water marks from already-stamped outputs, so freshly
-        stamped ids never collide with persisted ones. Drives both the live
-        advance (after a WAL append) and the replay advance (during recovery)."""
+        """Advance the counters past already-stamped outputs so new ids never
+        collide with persisted ones. Used both live (after a WAL append) and on
+        recovery (replaying persisted outputs)."""
         for entry in outputs:
             parsed = self._parse(entry.output_id)
             if parsed is None:

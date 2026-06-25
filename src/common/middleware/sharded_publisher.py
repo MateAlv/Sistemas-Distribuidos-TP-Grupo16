@@ -1,15 +1,11 @@
-"""
-Publisher que rutea mensajes a N shards eligiendo la routing key por mensaje.
+"""Publisher that routes messages to N shards, choosing the routing key per message.
 
-Un exchange direct rutea por routing key, así que un solo publisher (una sola
-conexión AMQP) alcanza para llegar a cualquier shard: elegimos la routing key por
-mensaje. Antes abríamos una conexión por shard, lo que multiplicaba las conexiones
-a RabbitMQ por cada edge sharded.
-
-La shard se deriva de una clave determinística extraída del mensaje (`key_fn`).
-Por defecto se usa el client_id del header, pero las etapas stateless/combiner
-rutean por digest del cuerpo para repartir la carga entre todos los workers sin
-importar cuántos clientes haya (mismo cuerpo → misma shard → reentrega estable).
+A direct exchange routes by routing key, so one publisher (one AMQP connection) can
+reach any shard by picking the routing key per message. The shard comes from a
+deterministic key extracted from the message (key_fn): by default the header's
+client_id, but stateless and combiner stages route by body digest so load spreads
+across all workers regardless of client count (same body, same shard, so redelivery
+is stable).
 """
 from typing import Callable, Union
 
@@ -20,7 +16,7 @@ from common.message_protocol.internal.protocol import InternalProtocol
 from common.routing import routing_key_for_shard, shard_for_key
 
 
-_CLIENT_ID_OFFSET = 1   # 1 byte de msg_type antes del client_id
+_CLIENT_ID_OFFSET = 1   # 1 byte of msg_type before the client_id
 _CLIENT_ID_SIZE = 16    # InternalProtocol.HEADER_FORMAT = "!B 16s"
 _HEADER_SIZE = _CLIENT_ID_OFFSET + _CLIENT_ID_SIZE
 
@@ -29,7 +25,7 @@ KeyFn = Callable[[bytes], ShardKey]
 
 
 def client_id_key(message: bytes) -> int:
-    """Shard key = client_id del header. Co-loca todo un cliente en una shard."""
+    """Shard key is the header's client_id, co-locating a client on one shard."""
     return int.from_bytes(
         message[_CLIENT_ID_OFFSET:_CLIENT_ID_OFFSET + _CLIENT_ID_SIZE],
         "big",
@@ -37,22 +33,22 @@ def client_id_key(message: bytes) -> int:
 
 
 def body_digest_key(message: bytes) -> bytes:
-    """Shard key = cuerpo del mensaje (payload tras el header).
+    """Shard key is the message body (payload after the header).
 
-    Determinística y de alta cardinalidad: reparte batches entre todas las shards
-    aunque haya pocos clientes. El mismo cuerpo siempre cae en la misma shard, así
-    que una reentrega tras una caída vuelve al mismo worker (necesario para dedup).
+    High-cardinality, so it spreads batches across all shards even with few
+    clients. The same body always lands on the same shard, so a redelivery after a
+    crash returns to the same worker (needed for dedup).
     """
     return message[_HEADER_SIZE:]
 
 
 def addressed_body_digest_key(message: bytes) -> bytes:
-    """Igual que ``body_digest_key`` pero para paquetes *direccionados*.
+    """Like body_digest_key but for addressed packets.
 
-    El payload empieza tras el header direccionado (más ancho que el plano por
-    los campos sender_id+seq). Devuelve exactamente los mismos bytes que el
-    SenderSequencer hashea al asignar el seq por (client, edge, shard), de modo
-    que la shard elegida aquí coincide con aquella para la que se reservó el seq.
+    The payload starts after the wider addressed header (it adds sender_id and
+    seq). Returns the same bytes the SenderSequencer hashes when assigning the seq
+    per (client, edge, shard), so the shard chosen here matches the one the seq was
+    reserved for.
     """
     return message[InternalProtocol.ADDRESSED_HEADER_SIZE:]
 
@@ -93,10 +89,8 @@ class ShardedPublisher:
         self._publisher.send(message, routing_key=routing_key)
 
     def send_to_all(self, message: bytes) -> None:
-        """Enviar el mismo mensaje a TODAS las shards (fan-out por routing key).
-
-        Útil para EOF en modo flush_order, donde cada shard recibe su propio EOF.
-        """
+        """Send the same message to every shard (fan-out by routing key), used for
+        EOF in flush_order mode where each shard receives its own EOF."""
         for shard in range(self._shard_count):
             routing_key = routing_key_for_shard(self._routing_key_prefix, shard)
             self._publisher.send(message, routing_key=routing_key)
@@ -109,18 +103,11 @@ class ShardedPublisher:
 
 
 class SequencedShardedPublisher:
-    """Publica paquetes *direccionados* (con sender_id y seq) sobre un edge sharded.
+    """Publishes addressed packets (sender_id + seq) over a sharded edge, with a
+    dense seq per (client_id, destination shard) so the consumer's dedup tracker
+    stays bounded.
 
-    Cada salida lleva un ``seq`` por ``(client_id, shard de destino)``: como el
-    sharding por digest reparte un cliente entre todas las shards, un ``seq`` por
-    cliente dejaría a cada shard viendo ~1/N de los seqs (huecos sin fin en el
-    DeduplicationTracker del consumidor). Con seq por (client, shard) cada shard
-    recibe una secuencia densa y el dedup queda acotado.
-
-    La shard se deriva del *payload* (mismo digest que ``body_digest_key``), así
-    que coincide con la asignación del publisher plano. El seq es en memoria: con
-    el handler durable este rol pasa al ``SenderSequencer`` (que deberá adoptar la
-    misma clave (client, shard) antes de dedup-ar un edge sharded aguas abajo).
+    Unused in production: the durable handler's SenderSequencer does this now.
     """
 
     def __init__(
@@ -166,7 +153,7 @@ class SequencedShardedPublisher:
 
 
 class ShardedByClientPublisher(ShardedPublisher):
-    """Variante que rutea por client_id (compatibilidad con llamadores existentes)."""
+    """Routes by client_id."""
 
     def __init__(
         self,
