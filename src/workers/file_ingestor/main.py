@@ -2,16 +2,17 @@ import logging
 import os
 import signal
 
-from file_ingestor import FileIngestor, FileIngestorConfig
+from common.heartbeat import HeartbeatSender
+from file_ingestor import FileIngestor, FileIngestorConfig, FileIngestorOutputConfig
 
 
 DEFAULT_ID = 0
 DEFAULT_MOM_HOST = "rabbitmq"
-DEFAULT_LINE_BATCH_INPUT_QUEUE = "line_batch_queue"
-DEFAULT_TRANSACTION_OUTPUT_EXCHANGE = "transaction_fanout_exchange"
-DEFAULT_CONTROL_EXCHANGE = "file_ingestor_control"
+DEFAULT_CONTROL_QUEUE_PREFIX = "file_ingestor_control"
 DEFAULT_RESPONSE_QUEUE_PREFIX = "file_ingestor_response"
 DEFAULT_LOGGING_LEVEL = "INFO"
+DEFAULT_STATE_DIR = ""
+DEFAULT_SNAPSHOT_INTERVAL = 1000
 
 
 def main() -> int:
@@ -24,7 +25,14 @@ def main() -> int:
 
     initialize_log(config.logging_level)
     ingestor = FileIngestor(config)
-    signal.signal(signal.SIGTERM, lambda *_: ingestor.stop())
+    heartbeat = HeartbeatSender()
+    heartbeat.start()
+
+    def shutdown(*_):
+        heartbeat.stop()
+        ingestor.stop()
+
+    signal.signal(signal.SIGTERM, shutdown)
     ingestor.start()
     return 0
 
@@ -34,23 +42,29 @@ def load_config() -> FileIngestorConfig:
     if ingestor_id < 0:
         raise ValueError("ID must be greater than or equal to 0")
 
+    total_instances = get_int("FILE_INGESTOR_AMOUNT", None)
+    if total_instances <= 0:
+        raise ValueError("FILE_INGESTOR_AMOUNT must be greater than 0")
+
     return FileIngestorConfig(
         id=ingestor_id,
+        total_instances=total_instances,
         mom_host=os.getenv("MOM_HOST", DEFAULT_MOM_HOST),
-        queue_name=os.getenv("LINE_BATCH_INPUT_QUEUE", DEFAULT_LINE_BATCH_INPUT_QUEUE),
-        transaction_output_exchange=os.getenv(
-            "TRANSACTION_OUTPUT_EXCHANGE",
-            DEFAULT_TRANSACTION_OUTPUT_EXCHANGE,
-        ),
-        control_exchange=os.getenv(
-            "FILE_INGESTOR_CONTROL_EXCHANGE",
-            DEFAULT_CONTROL_EXCHANGE,
+        queue_name=require_env("LINE_BATCH_INPUT_QUEUE"),
+        input_exchange=require_env("LINE_BATCH_INPUT_EXCHANGE"),
+        input_routing_prefix=require_env("LINE_BATCH_INPUT_ROUTING_PREFIX"),
+        outputs=load_outputs(),
+        control_queue_prefix=os.getenv(
+            "FILE_INGESTOR_CONTROL_QUEUE_PREFIX",
+            DEFAULT_CONTROL_QUEUE_PREFIX,
         ),
         response_queue_prefix=os.getenv(
             "FILE_INGESTOR_RESPONSE_QUEUE_PREFIX",
             DEFAULT_RESPONSE_QUEUE_PREFIX,
         ),
         logging_level=os.getenv("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
+        state_dir=os.getenv("STATE_DIR", DEFAULT_STATE_DIR),
+        snapshot_interval=get_int("SNAPSHOT_INTERVAL", DEFAULT_SNAPSHOT_INTERVAL),
     )
 
 
@@ -63,14 +77,59 @@ def initialize_log(level_name: str) -> None:
     )
 
 
-def get_int(name: str, default: int) -> int:
+def get_int(name: str, default: int | None) -> int:
     value = os.getenv(name)
     if value is None:
+        if default is None:
+            raise ValueError(f"{name} is required")
         return default
     try:
         return int(value)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer") from exc
+
+
+def load_outputs() -> tuple[FileIngestorOutputConfig, ...]:
+    outputs = []
+    for name, env_prefix in (
+        ("filter_usd", "FILTER_USD"),
+        ("filter_q5_format", "FILTER_Q5_FORMAT"),
+    ):
+        exchange = os.getenv(f"{env_prefix}_EXCHANGE")
+        routing_prefix = os.getenv(f"{env_prefix}_ROUTING_PREFIX")
+        amount = os.getenv(f"{env_prefix}_AMOUNT")
+        values = (exchange, routing_prefix, amount)
+        if not any(values):
+            continue
+        if not all(values):
+            raise ValueError(
+                f"{env_prefix}_EXCHANGE, {env_prefix}_ROUTING_PREFIX and "
+                f"{env_prefix}_AMOUNT must be set together"
+            )
+        try:
+            shard_count = int(amount)
+        except ValueError as exc:
+            raise ValueError(f"{env_prefix}_AMOUNT must be an integer") from exc
+        if shard_count <= 0:
+            raise ValueError(f"{env_prefix}_AMOUNT must be greater than 0")
+        outputs.append(
+            FileIngestorOutputConfig(
+                name=name,
+                exchange=exchange,
+                routing_prefix=routing_prefix,
+                shard_count=shard_count,
+            )
+        )
+    if not outputs:
+        raise ValueError("at least one downstream filter output is required")
+    return tuple(outputs)
+
+
+def require_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"{name} is required")
+    return value
 
 
 if __name__ == "__main__":

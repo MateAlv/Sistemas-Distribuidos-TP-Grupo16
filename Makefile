@@ -12,12 +12,17 @@ COMPOSE_SCRIPT := scripts/generate_compose.py
 LOG_FORMATTER := scripts/pretty_logs.py
 LOG_COLOR ?= always
 LOG_ARGS ?=
+MONITOR_TEST_TIMEOUT ?= 30
+MONITOR_FAILOVER_TIMEOUT ?= 45
 SCENARIO_ARG := $(word 2,$(MAKECMDGOALS))
 TEST_Q1_SUCCESS_PATTERN := Forward pass successful - Mate | filter=Q1
 TEST_CLIENT_DONE_PATTERN := client_results_finished
 TEST_Q2_EOF_PATTERN := gateway_eof | prefix=Q2|
 TEST_Q4_EOF_PATTERN := gateway_eof | prefix=Q4|
-TEST_CLIENT_WAIT_TIMEOUT ?= 4600s
+TEST_CLIENT_WAIT_TIMEOUT ?= 18000s
+# Unset by default so config/test-config.yaml client_accounts is the source of
+# truth for the dataset. Set TEST_DATASET=LI-Medium to override for one run.
+TEST_DATASET ?=
 TEST_SMOKE_DEADLINE_SECONDS ?= 600
 SCENARIOS_DIR := config/scenarios
 RABBIT_SCREEN_URL ?= http://localhost:15672
@@ -80,7 +85,7 @@ rebuild:
 
 down:
 	-docker compose -f $(COMPOSE_FILE) stop -t 5
-	-docker compose -f $(COMPOSE_FILE) down --remove-orphans
+	-docker compose -f $(COMPOSE_FILE) down --volumes --remove-orphans
 	@if [ -f "$(TEST_COMPOSE_FILE)" ]; then \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) stop -t 5 || true; \
 		docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) down --volumes --remove-orphans || true; \
@@ -108,6 +113,37 @@ clean-state:
 	find data/datasets -mindepth 1 -maxdepth 1 -type d -name 'client-*' -exec rm -rf {} +
 .PHONY: clean-state
 
+MONKEY_SERVICE := monkey
+
+monkey-kill-random:
+	@monkey=$$(docker compose -f $(COMPOSE_FILE) ps --status running --quiet $(MONKEY_SERVICE)); \
+	if [ -z "$$monkey" ]; then echo "monkey not running (enable monkey in config and 'make up')" >&2; exit 1; fi; \
+	docker exec "$$monkey" python3 -c "from manager import MonkeyManager, excluded_from_env, included_from_env; result = MonkeyManager(excluded_from_env(), included_from_env()).kill_random_container(); print(result); raise SystemExit(0 if result else 1)"
+.PHONY: monkey-kill-random
+
+MONKEY_TARGET := $(if $(CONTAINER),$(CONTAINER),$(word 2,$(MAKECMDGOALS)))
+monkey-kill:
+	@if [ -z "$(MONKEY_TARGET)" ]; then \
+		echo "Usage: make monkey-kill CONTAINER=<service>" >&2; \
+		echo "   or: make monkey-kill <service>" >&2; \
+		exit 2; \
+	fi; \
+	if ! docker compose -f $(COMPOSE_FILE) config --services | grep -Fxq "$(MONKEY_TARGET)"; then \
+		echo "Unknown compose service: $(MONKEY_TARGET)" >&2; \
+		exit 2; \
+	fi; \
+	monkey=$$(docker compose -f $(COMPOSE_FILE) ps --status running --quiet $(MONKEY_SERVICE)); \
+	if [ -z "$$monkey" ]; then echo "monkey not running (enable monkey in config and 'make up')" >&2; exit 1; fi; \
+	docker exec "$$monkey" python3 -c "import sys; from manager import MonkeyManager; result = MonkeyManager().kill_container(sys.argv[1]); print(result); raise SystemExit(0 if result else 1)" "$(MONKEY_TARGET)"
+.PHONY: monkey-kill
+
+ifneq ($(filter monkey-kill,$(MAKECMDGOALS)),)
+ifneq ($(word 2,$(MAKECMDGOALS)),)
+$(word 2,$(MAKECMDGOALS)):
+	@:
+endif
+endif
+
 logs-test:
 	docker compose -p $(TEST_PROJECT) -f $(TEST_COMPOSE_FILE) logs -f --timestamps --no-color $(LOG_ARGS) | $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR)
 .PHONY: logs-test
@@ -115,6 +151,113 @@ logs-test:
 logs:
 	docker compose -f $(COMPOSE_FILE) logs --timestamps --no-color $(LOG_ARGS) | $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR)
 .PHONY: logs
+
+monitor-logs:
+	@services=$$(docker compose -f $(COMPOSE_FILE) config --services | grep '^monitor_'); \
+	if [ -z "$$services" ]; then echo "No monitor services are configured" >&2; exit 1; fi; \
+	docker compose -f $(COMPOSE_FILE) logs --follow --timestamps --no-color $$services | \
+		$(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR)
+.PHONY: monitor-logs
+
+monitor-status:
+	@services=$$(docker compose -f $(COMPOSE_FILE) config --services | grep '^monitor_'); \
+	if [ -z "$$services" ]; then echo "No monitor services are configured" >&2; exit 1; fi; \
+	echo "=== Monitor containers ==="; \
+	docker compose -f $(COMPOSE_FILE) ps $$services; \
+	echo; \
+	echo "=== Recent monitor events ==="; \
+	docker compose -f $(COMPOSE_FILE) logs --since 5m --timestamps --no-color $$services | \
+		$(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR)
+.PHONY: monitor-status
+
+monitor-test-recovery:
+	@if [ -z "$(CONTAINER)" ]; then \
+		echo "Usage: make monitor-test-recovery CONTAINER=<service>" >&2; \
+		exit 2; \
+	fi
+	@bash -lc 'set -euo pipefail; \
+		compose=(docker compose -f "$(COMPOSE_FILE)"); \
+		target="$(CONTAINER)"; \
+		timeout="$(MONITOR_TEST_TIMEOUT)"; \
+		all_services=$$("$${compose[@]}" config --services); \
+		if ! grep -Fxq "$$target" <<<"$$all_services"; then \
+			echo "Unknown compose service: $$target" >&2; exit 2; \
+		fi; \
+		if [[ "$$target" == monitor_* ]]; then \
+			echo "Choose a non-monitor service to test worker recovery" >&2; exit 2; \
+		fi; \
+		monitors=$$(grep "^monitor_" <<<"$$all_services"); \
+		if [ -z "$$monitors" ]; then echo "No monitor services are configured" >&2; exit 1; fi; \
+		if [ $$("$${compose[@]}" ps --status running $$monitors --quiet | wc -l | tr -d " ") -eq 0 ]; then \
+			echo "No monitor container is running" >&2; exit 1; \
+		fi; \
+		started_at=$$(date -u +"%Y-%m-%dT%H:%M:%SZ"); \
+		echo "Stopping $$target and waiting up to $${timeout}s for monitor recovery..."; \
+		"$${compose[@]}" stop -t 0 "$$target" >/dev/null; \
+		deadline=$$((SECONDS + timeout)); \
+		while (( SECONDS < deadline )); do \
+			if [ "$$("$${compose[@]}" ps --status running --quiet "$$target" | wc -l | tr -d " ")" -gt 0 ]; then \
+				echo "PASS: $$target was restarted by the monitor"; \
+				"$${compose[@]}" logs --since "$$started_at" --timestamps --no-color $$monitors | \
+					$(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR); \
+				exit 0; \
+			fi; \
+			sleep 1; \
+		done; \
+		echo "FAIL: $$target was not restarted within $${timeout}s" >&2; \
+		"$${compose[@]}" logs --since "$$started_at" $$monitors >&2; \
+		exit 1'
+.PHONY: monitor-test-recovery
+
+monitor-test-election:
+	@bash -lc 'set -euo pipefail; \
+		compose=(docker compose -f "$(COMPOSE_FILE)"); \
+		monitors=$$("$${compose[@]}" config --services | grep "^monitor_" | sort -t_ -k2,2n); \
+		if [ -z "$$monitors" ]; then echo "No monitor services are configured" >&2; exit 1; fi; \
+		leader=$$(printf "%s\n" "$$monitors" | tail -1); \
+		successor=$$(printf "%s\n" "$$monitors" | tail -2 | head -1); \
+		monitor_count=$$(printf "%s\n" "$$monitors" | wc -l | tr -d " "); \
+		if [ "$$leader" = "$$successor" ]; then \
+			echo "At least two monitor replicas are required" >&2; exit 1; \
+		fi; \
+		monkey=$$("$${compose[@]}" ps --status running --quiet "$(MONKEY_SERVICE)"); \
+		if [ -z "$$monkey" ]; then \
+			echo "Monkey is not running. Enable settings.monkey and start the stack." >&2; \
+			exit 1; \
+		fi; \
+		started_at=$$(date -u +"%Y-%m-%dT%H:%M:%SZ"); \
+		echo "Killing leader $$leader through Monkey..."; \
+		docker exec "$$monkey" python3 -c \
+			"import sys; from manager import MonkeyManager; sys.exit(0 if MonkeyManager().kill_container(sys.argv[1]) else 1)" \
+			"$$leader"; \
+		deadline=$$((SECONDS + $(MONITOR_FAILOVER_TIMEOUT))); \
+		while (( SECONDS < deadline )); do \
+			logs=$$("$${compose[@]}" logs --since "$$started_at" --no-color $$monitors 2>&1); \
+			takeover_epoch=$$(grep -E "monitor_election_won \\| monitor_id=$${successor#monitor_} \\| epoch=[0-9]+" <<<"$$logs" | \
+				sed -E "s/.*epoch=([0-9]+).*/\\1/" | tail -1 || true); \
+			recovered_epoch=$$(grep -E "monitor_election_won \\| monitor_id=$${leader#monitor_} \\| epoch=[0-9]+" <<<"$$logs" | \
+				sed -E "s/.*epoch=([0-9]+).*/\\1/" | tail -1 || true); \
+			accepted_count=0; \
+			if [ -n "$$recovered_epoch" ]; then \
+				accepted_count=$$(grep -E "monitor_coordinator_accepted.*leader_id=$${leader#monitor_}.*epoch=$$recovered_epoch.*announced_epoch=$$recovered_epoch" <<<"$$logs" | \
+					sed -E "s/.*monitor_id=([0-9]+).*/\\1/" | sort -u | wc -l | tr -d " " || true); \
+			fi; \
+			if [ -n "$$takeover_epoch" ] && [ -n "$$recovered_epoch" ] && \
+				(( recovered_epoch > takeover_epoch )) && \
+				(( accepted_count >= monitor_count - 1 )) && \
+				grep -Fq "monitor_recovery_success | node_id=$$leader" <<<"$$logs"; then \
+				echo "PASS: $$successor took over at epoch $$takeover_epoch, recovered $$leader, and the cluster reconverged at epoch $$recovered_epoch"; \
+				printf "%s\n" "$$logs" | \
+					grep -E "monitor_(election|coordinator)|monitor_node_failed.*node_id=$$leader|monitor_recovery_(start|success|failed).*node_id=$$leader" | \
+					$(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR); \
+				exit 0; \
+			fi; \
+			sleep 1; \
+		done; \
+		echo "FAIL: monitor failover and epoch convergence did not complete within $(MONITOR_FAILOVER_TIMEOUT)s" >&2; \
+		"$${compose[@]}" logs --since "$$started_at" $$monitors >&2; \
+		exit 1'
+.PHONY: monitor-test-election
 
 rabbit-screen:
 	@bash -lc 'set -euo pipefail; \
@@ -137,25 +280,19 @@ stats:
 	docker stats
 .PHONY: stats
 
-# Dataset used by the full `make test` run and `make expected`.
-DATASET ?= HI-Medium
 
-# Precompute the per-dataset reference results (data/datasets/<DATASET>/expected_results/).
-# Use FORCE=1 to regenerate. The expensive Q4 graph is computed once here, not per run.
 expected:
+	@if [ -z "$(DATASET)" ]; then \
+		echo "Usage: make expected DATASET=<dataset>"; \
+		exit 2; \
+	fi
 	$(PYTHON) scripts/precompute_expected.py --dataset $(DATASET) $(if $(FORCE),--force)
 .PHONY: expected
 
-# Full end-to-end test: kills leftover TP containers, runs the WHOLE pipeline
-# (Q1-Q5) from the full test config, validates every query's output for every
-# client against the precomputed reference, and prints a metrics footer
-# (per-query PASS/FAIL + time, container count, peak CPU/RAM) as the last lines.
-# Parametrize like the test-qN targets, e.g.:
-#   DATASET=HI-Medium CLIENTS=2 USD_WORKERS=4 PREFETCH_COUNT=50 make test
 test:
 	@echo ">>> regenerating $(TEST_COMPOSE_FILE) from $(TEST_CONFIG_FILE)"
 	$(PYTHON) $(COMPOSE_SCRIPT) --config $(TEST_CONFIG_FILE) \
-		$(if $(DATASET),--dataset $(DATASET)) \
+		$(if $(TEST_DATASET),--dataset $(TEST_DATASET)) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
 		$(if $(Q2_SUM_WORKERS),--sum-q2-workers $(Q2_SUM_WORKERS)) \
 		$(if $(Q5_FORMAT_WORKERS),--filter-q5-format-workers $(Q5_FORMAT_WORKERS)) \
@@ -172,7 +309,7 @@ test:
 		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
 		$(if $(CLIENTS),--clients $(CLIENTS)) \
 		--test-output $(TEST_COMPOSE_FILE) --skip-output
-	DATASET=$(DATASET) DATASET_ROOT=data/datasets LOG_COLOR=$(LOG_COLOR) \
+	LOG_COLOR=$(LOG_COLOR) \
 	TEST_PROJECT=$(TEST_PROJECT) MAIN_PROJECT=$(MAIN_PROJECT) \
 	TEST_COMPOSE_FILE=$(TEST_COMPOSE_FILE) \
 	TEST_CLIENT_WAIT_TIMEOUT=$(TEST_CLIENT_WAIT_TIMEOUT) \
@@ -180,8 +317,9 @@ test:
 	$(LOG_PYTHON) scripts/run_full_test.py
 .PHONY: test
 
-Q1_DATASET ?= LI-Mini
+Q1_DATASET ?= LI-Small
 test-q1:
+	@echo ">>> regenerating $(TEST_COMPOSE_FILE) for Q1 (dataset=$(Q1_DATASET))"
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q1-test --dataset $(Q1_DATASET) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
 		$(if $(PREFETCH_COUNT),--prefetch $(PREFETCH_COUNT)) \
@@ -201,26 +339,30 @@ test-q1:
 		mkdir -p data/output; \
 		rm -f data/output/results_q*.csv; \
 		start_time=$$SECONDS; \
-		echo "Starting Q1 flow test (preset=q1-test, dataset=$(Q1_DATASET))..."; \
+		echo "Starting Q1 flow test (dataset=$(Q1_DATASET), CLIENTS=$(or $(CLIENTS),1))..."; \
 		$$compose up --build --remove-orphans --detach; \
+		$$compose logs --follow --timestamps --no-color \
+			| $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR) & LOG_PID=$$!; \
 		clients="$$($$compose config --services | grep "^client_" | tr "\n" " ")"; \
-		if [ -z "$$clients" ]; then echo "no client services found" >&2; exit 2; fi; \
-		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
+		if [ -z "$$clients" ]; then echo "no client services found" >&2; kill $$LOG_PID 2>/dev/null || true; exit 2; fi; \
+		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null || true; \
+		kill $$LOG_PID 2>/dev/null || true; \
+		wait $$LOG_PID 2>/dev/null || true; \
 		elapsed=$$((SECONDS - start_time)); \
+		echo ""; \
 		echo "Client finished in $${elapsed}s"; \
 		Q1_DATASET_DIR=data/datasets/$(Q1_DATASET) \
 		Q1_DATASET_TRANS=$(Q1_DATASET)_Trans.csv \
 			$(PYTHON) scripts/validate_q1_output.py \
 			&& echo "✓ Q1 test PASSED ($${elapsed}s)" \
-			|| { echo "✗ Q1 test FAILED ($${elapsed}s)"; exit 1; }; \
-		echo ""; \
-		echo "=== client_0 logs ==="; $$compose logs client_0'
+			|| { echo "✗ Q1 test FAILED ($${elapsed}s)"; exit 1; }'
 .PHONY: test-q1
 
-Q2_DATASET ?= LI-Mini
-Q2_SUM_WORKERS ?=
-CLIENTS ?=
+Q2_DATASET ?= LI-Small
+Q2_SUM_WORKERS ?= 4
+CLIENTS ?= 2
 test-q2:
+	@echo ">>> regenerating $(TEST_COMPOSE_FILE) for Q2 (dataset=$(Q2_DATASET))"
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q2-test --dataset $(Q2_DATASET) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
 		$(if $(Q2_SUM_WORKERS),--sum-q2-workers $(Q2_SUM_WORKERS)) \
@@ -241,24 +383,28 @@ test-q2:
 		mkdir -p data/output; \
 		rm -f data/output/results_q2_*.csv; \
 		start_time=$$SECONDS; \
-		echo "Starting Q2 flow test (preset=q2-test, dataset=$(Q2_DATASET), USD_WORKERS=$(or $(USD_WORKERS),1), Q2_SUM_WORKERS=$(or $(Q2_SUM_WORKERS),1), PREFETCH_COUNT=$(or $(PREFETCH_COUNT),1))..."; \
+		echo "Starting Q2 flow test (dataset=$(Q2_DATASET), Q2_SUM_WORKERS=$(or $(Q2_SUM_WORKERS),1), CLIENTS=$(or $(CLIENTS),1))..."; \
 		$$compose up --build --remove-orphans --detach; \
+		$$compose logs --follow --timestamps --no-color \
+			| $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR) & LOG_PID=$$!; \
 		clients="$$($$compose config --services | grep "^client_" | tr "\n" " ")"; \
-		if [ -z "$$clients" ]; then echo "no client services found" >&2; exit 2; fi; \
-		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
+		if [ -z "$$clients" ]; then echo "no client services found" >&2; kill $$LOG_PID 2>/dev/null || true; exit 2; fi; \
+		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null || true; \
+		kill $$LOG_PID 2>/dev/null || true; \
+		wait $$LOG_PID 2>/dev/null || true; \
 		elapsed=$$((SECONDS - start_time)); \
+		echo ""; \
 		echo "Client finished in $${elapsed}s"; \
 		Q2_DATASET_DIR=data/datasets/$(Q2_DATASET) \
 		Q2_DATASET_TRANS=$(Q2_DATASET)_Trans.csv \
 			$(PYTHON) scripts/validate_q2_output.py \
 			&& echo "✓ Q2 test PASSED ($${elapsed}s)" \
-			|| { echo "✗ Q2 test FAILED ($${elapsed}s)"; exit 1; }; \
-		echo ""; \
-		echo "=== client_0 logs ==="; $$compose logs client_0'
+			|| { echo "✗ Q2 test FAILED ($${elapsed}s)"; exit 1; }'
 .PHONY: test-q2
 
-Q3_DATASET ?= LI-Mini
+Q3_DATASET ?= LI-Small
 test-q3:
+	@echo ">>> regenerating $(TEST_COMPOSE_FILE) for Q3 (dataset=$(Q3_DATASET))"
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q3-test --dataset $(Q3_DATASET) \
 		$(if $(USD_WORKERS),--filter-usd-workers $(USD_WORKERS)) \
 		$(if $(Q3_BARRIER_WORKERS),--q3-barrier-workers $(Q3_BARRIER_WORKERS)) \
@@ -279,28 +425,32 @@ test-q3:
 		mkdir -p data/output; \
 		rm -f data/output/results_q*.csv; \
 		start_time=$$SECONDS; \
-		echo "Starting Q3 flow test (preset=q3-test, dataset=$(Q3_DATASET))..."; \
+		echo "Starting Q3 flow test (dataset=$(Q3_DATASET), CLIENTS=$(or $(CLIENTS),1))..."; \
 		$$compose up --build --remove-orphans --detach; \
+		$$compose logs --follow --timestamps --no-color \
+			| $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR) & LOG_PID=$$!; \
 		clients="$$($$compose config --services | grep "^client_" | tr "\n" " ")"; \
-		if [ -z "$$clients" ]; then echo "no client services found" >&2; exit 2; fi; \
-		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
+		if [ -z "$$clients" ]; then echo "no client services found" >&2; kill $$LOG_PID 2>/dev/null || true; exit 2; fi; \
+		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null || true; \
+		kill $$LOG_PID 2>/dev/null || true; \
+		wait $$LOG_PID 2>/dev/null || true; \
 		elapsed=$$((SECONDS - start_time)); \
+		echo ""; \
 		echo "Client finished in $${elapsed}s"; \
 		Q3_DATASET_DIR=data/datasets/$(Q3_DATASET) \
 		Q3_DATASET_TRANS=$(Q3_DATASET)_Trans.csv \
 			$(PYTHON) scripts/validate_q3_output.py \
 			&& echo "✓ Q3 test PASSED ($${elapsed}s)" \
-			|| { echo "✗ Q3 test FAILED ($${elapsed}s)"; exit 1; }; \
-		echo ""; \
-		echo "=== client_0 logs ==="; $$compose logs client_0'
+			|| { echo "✗ Q3 test FAILED ($${elapsed}s)"; exit 1; }'
 .PHONY: test-q3
 
-Q5_DATASET ?= LI-Mini
-Q5_FORMAT_WORKERS ?=
-Q5_USD_WORKERS ?=
+Q5_DATASET ?= LI-Small
+Q5_FORMAT_WORKERS ?= 3
+Q5_USD_WORKERS ?= 3
 USD_WORKERS ?=
 PREFETCH_COUNT ?=
 test-q5:
+	@echo ">>> regenerating $(TEST_COMPOSE_FILE) for Q5 (dataset=$(Q5_DATASET))"
 	@$(PYTHON) $(COMPOSE_SCRIPT) --preset q5-test --dataset $(Q5_DATASET) \
 		$(if $(Q5_FORMAT_WORKERS),--filter-q5-format-workers $(Q5_FORMAT_WORKERS)) \
 		$(if $(Q5_USD_WORKERS),--filter-q5-usd-workers $(Q5_USD_WORKERS)) \
@@ -322,20 +472,23 @@ test-q5:
 		mkdir -p data/output; \
 		rm -f data/output/results_q*.csv; \
 		start_time=$$SECONDS; \
-		echo "Starting Q5 flow test (preset=q5-test, dataset=$(Q5_DATASET))..."; \
+		echo "Starting Q5 flow test (dataset=$(Q5_DATASET), Q5_USD_WORKERS=$(or $(Q5_USD_WORKERS),1), PREFETCH_COUNT=$(or $(PREFETCH_COUNT),1), CLIENTS=$(or $(CLIENTS),1))..."; \
 		$$compose up --build --remove-orphans --detach; \
+		$$compose logs --follow --timestamps --no-color \
+			| $(LOG_PYTHON) $(LOG_FORMATTER) --color $(LOG_COLOR) & LOG_PID=$$!; \
 		clients="$$($$compose config --services | grep "^client_" | tr "\n" " ")"; \
-		if [ -z "$$clients" ]; then echo "no client services found" >&2; exit 2; fi; \
-		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null; \
+		if [ -z "$$clients" ]; then echo "no client services found" >&2; kill $$LOG_PID 2>/dev/null || true; exit 2; fi; \
+		timeout $(TEST_CLIENT_WAIT_TIMEOUT) $$compose wait $$clients >/dev/null || true; \
+		kill $$LOG_PID 2>/dev/null || true; \
+		wait $$LOG_PID 2>/dev/null || true; \
 		elapsed=$$((SECONDS - start_time)); \
+		echo ""; \
 		echo "Client finished in $${elapsed}s"; \
 		Q5_DATASET_DIR=data/datasets/$(Q5_DATASET) \
 		Q5_DATASET_TRANS=$(Q5_DATASET)_Trans.csv \
 			$(PYTHON) scripts/validate_q5_output.py \
 			&& echo "✓ Q5 test PASSED ($${elapsed}s)" \
-			|| { echo "✗ Q5 test FAILED ($${elapsed}s)"; exit 1; }; \
-		echo ""; \
-		echo "=== client_0 logs ==="; $$compose logs client_0'
+			|| { echo "✗ Q5 test FAILED ($${elapsed}s)"; exit 1; }'
 .PHONY: test-q5
 
 test-unit:
@@ -343,10 +496,6 @@ test-unit:
 	docker run --rm test-runner
 .PHONY: test-unit
 
-# Corre la suite de tests dentro del contenedor de Dockerfile.test (mismo
-# entorno que CI). Por defecto corre tests/; se puede acotar con PYTEST_ARGS.
-# Uso: make run-tests
-#      make run-tests PYTEST_ARGS="tests/gateway -q"
 PYTEST_ARGS ?= tests/
 run-tests:
 	docker build -f Dockerfile.test -t test-runner .

@@ -2,6 +2,7 @@ import logging
 import os
 import signal
 
+from common.heartbeat import HeartbeatSender
 from file_splitter import FileSplitter, FileSplitterConfig
 
 
@@ -9,10 +10,11 @@ DEFAULT_ID = 0
 DEFAULT_MOM_HOST = "rabbitmq"
 DEFAULT_INPUT_EXCHANGE = "file_ingestor_exchange"
 DEFAULT_QUEUE_PREFIX = "file_splitter"
-DEFAULT_OUTPUT_QUEUE = "line_batch_queue"
 DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024
 DEFAULT_MAX_BATCH_BYTES = 64 * 1024
 DEFAULT_LOGGING_LEVEL = "INFO"
+DEFAULT_STATE_DIR = "/worker_state"
+DEFAULT_SNAPSHOT_INTERVAL = 1000
 
 
 def main() -> int:
@@ -25,7 +27,14 @@ def main() -> int:
 
     initialize_log(config.logging_level)
     splitter = FileSplitter(config)
-    signal.signal(signal.SIGTERM, lambda *_: splitter.stop())
+    heartbeat = HeartbeatSender()
+    heartbeat.start()
+
+    def shutdown(*_):
+        heartbeat.stop()
+        splitter.stop()
+
+    signal.signal(signal.SIGTERM, shutdown)
     splitter.start()
     return 0
 
@@ -43,17 +52,29 @@ def load_config() -> FileSplitterConfig:
     if max_batch_bytes <= 0:
         raise ValueError("MAX_BATCH_BYTES must be greater than 0")
 
+    output_shard_count = get_int("FILE_INGESTOR_AMOUNT", None)
+    if output_shard_count <= 0:
+        raise ValueError("FILE_INGESTOR_AMOUNT must be greater than 0")
+
+    snapshot_interval = get_int("SNAPSHOT_INTERVAL", DEFAULT_SNAPSHOT_INTERVAL)
+    if snapshot_interval <= 0:
+        raise ValueError("SNAPSHOT_INTERVAL must be greater than 0")
+
     return FileSplitterConfig(
         id=splitter_id,
         mom_host=os.getenv("MOM_HOST", DEFAULT_MOM_HOST),
         input_exchange=os.getenv("FILE_SPLITTER_INPUT_EXCHANGE", DEFAULT_INPUT_EXCHANGE),
         queue_name=file_splitter_queue_name(splitter_id),
-        output_queue=os.getenv("LINE_BATCH_OUTPUT_QUEUE", DEFAULT_OUTPUT_QUEUE),
+        output_exchange=require_env("LINE_BATCH_OUTPUT_EXCHANGE"),
+        output_routing_prefix=require_env("LINE_BATCH_OUTPUT_ROUTING_PREFIX"),
+        output_shard_count=output_shard_count,
         max_line_bytes=max_line_bytes,
         max_batch_bytes=max_batch_bytes,
         logging_level=os.getenv("LOGGING_LEVEL", DEFAULT_LOGGING_LEVEL),
         input_routing_key=os.getenv("FILE_SPLITTER_INPUT_ROUTING_KEY"),
         accounts_output_queue=os.getenv("ACCOUNTS_LINE_BATCH_OUTPUT_QUEUE"),
+        state_dir=os.getenv("STATE_DIR", DEFAULT_STATE_DIR),
+        snapshot_interval=snapshot_interval,
     )
 
 
@@ -66,14 +87,23 @@ def initialize_log(level_name: str) -> None:
     )
 
 
-def get_int(name: str, default: int) -> int:
+def get_int(name: str, default: int | None) -> int:
     value = os.getenv(name)
     if value is None:
+        if default is None:
+            raise ValueError(f"{name} is required")
         return default
     try:
         return int(value)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer") from exc
+
+
+def require_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"{name} is required")
+    return value
 
 
 def file_splitter_queue_name(splitter_id: int) -> str:

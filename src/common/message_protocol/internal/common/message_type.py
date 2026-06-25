@@ -9,3 +9,4 @@ class MessageType(IntEnum):
     FLUSH_ACK = 5
     AGGREGATED_COUNT = 6
     EOF_RECEIVED = 7
+    ABORT = 8

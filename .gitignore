@@ -6,6 +6,9 @@ __pycache__/
 *.log
 
 docker-compose.test.yaml
+docker-compose.yaml
+docker-compose.crash-test.yaml
+tmp/crash-tests/
 
 data/datasets/**/*
 !data/datasets/.gitkeep
@@ -23,5 +26,9 @@ output/*
 
 
 /venv
+.venv/
+.venv-test/
 
 data/rates/
+data/monitor/
+data/logs/

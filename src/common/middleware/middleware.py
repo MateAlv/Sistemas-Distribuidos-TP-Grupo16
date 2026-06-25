@@ -19,35 +19,30 @@ class MessageMiddlewareDeleteError(Exception):
 
 class MessageMiddleware(ABC):
 
-    # Comienza a escuchar a la cola/exchange e invoca a on_message_callback tras
-    # cada mensaje de datos o de control con el cuerpo del mensaje.
-    # on_message_callback tiene como parámetros:
-    # message - El valor tal y como lo recibe el método send de esta clase.
-    # ack - Función que al invocarse realiza ack al mensaje que se está consumiendo.
-    # nack - Función que al invocarse realiza nack al mensaje que se está consumiendo.
-    # Si se pierde la conexión con el middleware eleva MessageMiddlewareDisconnectedError.
-    # Si ocurre un error interno que no puede resolverse eleva MessageMiddlewareMessageError.
+    # Start listening on the queue/exchange and call on_message_callback(message,
+    # ack, nack) for each data or control message, where message is the body as
+    # passed to send() and ack/nack acknowledge the message being consumed.
+    # Raises MessageMiddlewareDisconnectedError if the connection is lost,
+    # MessageMiddlewareMessageError on an unrecoverable internal error.
     @abstractmethod
     def start_consuming(self, on_message_callback):
         pass
 
-    # Si se estaba consumiendo desde la cola/exchange, se detiene la escucha. Si
-    # no se estaba consumiendo de la cola/exchange, no tiene efecto, ni levanta
-    # excepciones.
-    # Si se pierde la conexión con el middleware eleva MessageMiddlewareDisconnectedError.
+    # Stop listening on the queue/exchange; a no-op if not consuming. Raises
+    # MessageMiddlewareDisconnectedError if the connection is lost.
     @abstractmethod
     def stop_consuming(self):
         pass
 
-    # Envía un mensaje a la cola o al tópico con el que se inicializó el exchange.
-    # Si se pierde la conexión con el middleware eleva MessageMiddlewareDisconnectedError.
-    # Si ocurre un error interno que no puede resolverse eleva MessageMiddlewareMessageError.
+    # Send a message to the queue or to the exchange topic. Raises
+    # MessageMiddlewareDisconnectedError if the connection is lost,
+    # MessageMiddlewareMessageError on an unrecoverable internal error.
     @abstractmethod
     def send(self, message, routing_key=None):
         pass
 
-    # Se desconecta de la cola o exchange al que estaba conectado.
-    # Si ocurre un error interno que no puede resolverse eleva MessageMiddlewareCloseError.
+    # Disconnect from the queue or exchange. Raises MessageMiddlewareCloseError
+    # on an unrecoverable internal error.
     @abstractmethod
     def close(self):
         pass

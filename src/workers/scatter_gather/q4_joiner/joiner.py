@@ -1,9 +1,10 @@
 import logging
 import os
 import threading
-from collections import Counter, defaultdict
+from collections import defaultdict
 
-from common.batch_buffer import BatchBuffer
+from common.fault_tolerance.handler import Action, EdgeSpec, PersistentStateHandler
+from common.fault_tolerance.inbox import InboxStatus, MsgKind
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal import (
     InternalProtocol,
@@ -20,7 +21,17 @@ from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import (
     ControlMessageSerializer,
 )
-from common.middleware.middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
+from common.middleware import ShardedPublisher
+from common.middleware.middleware_rabbitmq import (
+    ensure_exchange_queue_bindings,
+    MessageMiddlewareExchangeRabbitMQ,
+)
+from common.routing import queue_name_for_worker
+
+try:
+    from q4_joiner_state import Q4JoinerState
+except ImportError:
+    from workers.scatter_gather.q4_joiner.q4_joiner_state import Q4JoinerState
 
 
 ID = int(os.environ["ID"])
@@ -35,18 +46,37 @@ Q4_AGGREGATOR_AMOUNT = int(os.environ["Q4_AGGREGATOR_AMOUNT"])
 Q4_AGGREGATOR_ROUTING_PREFIX = os.environ.get(
     "Q4_AGGREGATOR_ROUTING_PREFIX", "q4_aggregator"
 )
-Q4_JOINER_BATCH_BYTES = int(
-    os.environ.get("Q4_JOINER_BATCH_BYTES", str(1024 * 1024))
-)
 Q4_JOINER_BATCH_MAX_DELTAS = int(
     os.environ.get("Q4_JOINER_BATCH_MAX_DELTAS", "5000")
 )
+STATE_DIR = os.environ.get("STATE_DIR", "")
+SNAPSHOT_INTERVAL = int(os.environ.get("SNAPSHOT_INTERVAL", "1000"))
+Q4_AGGREGATOR_EDGE = "q4_aggregator"
 
 
 class Q4JoinerWorker:
     """Computes weighted A->M->B contributions for one salted block shard."""
 
     def __init__(self):
+        self._proto = InternalProtocol()
+        self._pair_paths_serializer = Q4PairPathsSerializer()
+        self._control_serializer = ControlMessageSerializer()
+
+        self._lock = threading.Lock()
+        self._state = Q4JoinerState(Q4_SUM_AMOUNT)
+        self._handler = PersistentStateHandler(
+            state_dir=STATE_DIR,
+            node_id=f"q4_joiner_{ID}",
+            worker_state=self._state,
+            snapshot_every=SNAPSHOT_INTERVAL,
+            output_edges={
+                Q4_AGGREGATOR_EDGE: EdgeSpec(
+                    sender_id=ID,
+                    shard_count=Q4_AGGREGATOR_AMOUNT,
+                )
+            },
+        )
+
         self._input = MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST,
             Q4_JOINER_EXCHANGE,
@@ -55,36 +85,36 @@ class Q4JoinerWorker:
             exclusive=False,
         )
         self._pair_reducer_output = self._new_pair_reducer_output()
-
-        self._proto = InternalProtocol()
-        self._block_edge_serializer = Q4BlockJoinEdgeSerializer()
-        self._pair_paths_serializer = Q4PairPathsSerializer()
-        self._control_serializer = ControlMessageSerializer()
-        self._batcher = BatchBuffer(
-            Q4_JOINER_BATCH_BYTES,
-            Q4_JOINER_BATCH_MAX_DELTAS,
-        )
-
-        self._lock = threading.Lock()
-        self._incoming_by_client = defaultdict(lambda: defaultdict(Counter))
-        self._outgoing_by_client = defaultdict(lambda: defaultdict(Counter))
-        self._processed_by_client: dict[int, int] = {}
-        self._eofs_by_client: dict[int, set[int]] = defaultdict(set)
-        self._forwarded_by_partition_by_client: dict[int, dict[int, int]] = {}
-        self._closed_by_client: set[int] = set()
+        self._publishers = {Q4_AGGREGATOR_EDGE: self._pair_reducer_output}
 
         self._closed = False
         self._stopped = False
         self._blocks_emitted = 0
 
-    def _input_routing_key(self) -> str:
-        return f"{Q4_JOINER_ROUTING_PREFIX}_{ID}"
+        self._handler.recover()
+        self._republish_pending()
 
-    def _new_pair_reducer_output(self):
-        return MessageMiddlewareExchangeRabbitMQ(
+    def _input_routing_key(self) -> str:
+        return queue_name_for_worker(Q4_JOINER_ROUTING_PREFIX, ID)
+
+    def _new_pair_reducer_output(self) -> ShardedPublisher:
+        return ShardedPublisher(
             MOM_HOST,
             Q4_AGGREGATOR_EXCHANGE,
-            [],
+            Q4_AGGREGATOR_ROUTING_PREFIX,
+            Q4_AGGREGATOR_AMOUNT,
+        )
+
+    def _ensure_output_bindings(self) -> None:
+        ensure_exchange_queue_bindings(
+            MOM_HOST,
+            Q4_AGGREGATOR_EXCHANGE,
+            {
+                queue_name_for_worker(Q4_AGGREGATOR_ROUTING_PREFIX, index): (
+                    queue_name_for_worker(Q4_AGGREGATOR_ROUTING_PREFIX, index)
+                )
+                for index in range(Q4_AGGREGATOR_AMOUNT)
+            },
         )
 
     def _packet(self, msg_type: MessageType, client_id: int, payload: bytes) -> bytes:
@@ -108,15 +138,35 @@ class Q4JoinerWorker:
             )
         )
 
+    def _publish(self, entries) -> None:
+        for entry in entries:
+            publisher = self._publishers.get(entry.destination)
+            if publisher is None:
+                raise KeyError(f"no publisher for destination {entry.destination!r}")
+            if entry.shard is None:
+                publisher.send(entry.body)
+            else:
+                publisher.send_to_shard(entry.body, entry.shard)
+
+    def _publish_then_commit(self, instruction) -> None:
+        if instruction.action is Action.PUBLISH_THEN_COMMIT:
+            self._publish(instruction.outputs)
+            with self._lock:
+                self._handler.commit_done(*instruction.ctx)
+
+    def _republish_pending(self) -> None:
+        for entry in self._handler.outbox_to_republish():
+            try:
+                self._publish([entry])
+            except Exception:
+                logging.exception(
+                    "q4_joiner_republish_error | id=%s | destination=%s",
+                    ID,
+                    entry.destination,
+                )
+
     def _account_parts(self, account: Q4AccountId):
         return (account.bank_id, account.account)
-
-    def _block_key(self, edge):
-        return (
-            edge.intermediate,
-            edge.a_bucket,
-            edge.b_bucket,
-        )
 
     def _pair_partition(self, source: Q4AccountId, target: Q4AccountId) -> int:
         return partition_for_parts(
@@ -124,138 +174,12 @@ class Q4JoinerWorker:
             Q4_AGGREGATOR_AMOUNT,
         )
 
-    def _pair_routing_key(self, partition: int) -> str:
-        return f"{Q4_AGGREGATOR_ROUTING_PREFIX}_{partition}"
-
-    def _send_batch(
-        self,
-        client_id: int,
-        partition: int,
-        batch_payload: bytes,
-        output=None,
-    ) -> None:
-        output = output or self._pair_reducer_output
-        output.send(
-            self._packet(MessageType.DATA, client_id, batch_payload),
-            routing_key=self._pair_routing_key(partition),
-        )
-
-    def _append_pair_paths(
-        self,
-        client_id: int,
-        pair_paths: Q4PairPaths,
-        output=None,
-    ) -> None:
-        partition = self._pair_partition(pair_paths.source, pair_paths.target)
-        payload = self._pair_paths_serializer.serialize(pair_paths)
-        batch_payload = self._batcher.append((client_id, partition), payload)
-        counts = self._forwarded_by_partition_by_client.setdefault(client_id, {})
-        counts[partition] = counts.get(partition, 0) + 1
-        if batch_payload is not None:
-            self._send_batch(client_id, partition, batch_payload, output)
-
-    def _flush_client_buffers(self, client_id: int, output=None) -> None:
-        for (_, partition), batch_payload in self._batcher.flush(
-            lambda k: k[0] == client_id
-        ):
-            self._send_batch(client_id, partition, batch_payload, output)
-
-    def _accept_block_edges(self, client_id: int, payload: bytes) -> int:
-        """Main data path. For each half-edge, file it into its block's incoming
-        or outgoing dict by role. Nothing is paired yet — only sorting and counting."""
-        edges = self._block_edge_serializer.deserialize_batch(payload)
-        if not edges:
-            return 0
-
-        with self._lock:
-            if client_id in self._closed_by_client:
-                logging.info(
-                    "q4_joiner_message_for_closed_client | id=%s | "
-                    "client_id=%s",
-                    ID,
-                    client_id,
-                )
-                return 0
-
-            for edge in edges:
-                block = self._block_key(edge)
-                if edge.role == Q4_EDGE_INCOMING:
-                    self._incoming_by_client[client_id][block][edge.endpoint] += (
-                        edge.count
-                    )
-                elif edge.role == Q4_EDGE_OUTGOING:
-                    self._outgoing_by_client[client_id][block][edge.endpoint] += (
-                        edge.count
-                    )
-                else:
-                    raise ValueError(f"unexpected Q4 block edge role: {edge.role}")
-
-            self._processed_by_client[client_id] = (
-                self._processed_by_client.get(client_id, 0) + len(edges)
-            )
-            processed_total = self._processed_by_client[client_id]
-
-        if should_log_progress(processed_total):
-            logging.info(
-                "q4_joiner_data_batch | id=%s | client_id=%s | "
-                "batch_size=%s | processed_total=%s",
-                ID,
-                client_id,
-                len(edges),
-                processed_total,
-            )
-        return len(edges)
-
-    def _handle_eof(self, client_id: int, payload: bytes) -> None:
-        """Count one EOF from one q4_sum shard. Once every q4_sum shard has sent
-        us its EOF for this client, all the block data is in → run the join."""
-        control = self._control_serializer.deserialize(payload)
-        should_emit = False
-
-        with self._lock:
-            if client_id in self._closed_by_client:
-                return
-            if control.sender_id in self._eofs_by_client[client_id]:
-                logging.info(
-                    "q4_joiner_duplicate_eof | id=%s | client_id=%s | "
-                    "edge_store_id=%s",
-                    ID,
-                    client_id,
-                    control.sender_id,
-                )
-                return
-
-            self._eofs_by_client[client_id].add(control.sender_id)
-            eof_count = len(self._eofs_by_client[client_id])
-            processed_total = self._processed_by_client.get(client_id, 0)
-            if eof_count >= Q4_SUM_AMOUNT:
-                should_emit = True
-
-        logging.info(
-            "q4_joiner_eof_received | id=%s | client_id=%s | "
-            "edge_store_id=%s | eof_count=%s | expected_eofs=%s | "
-            "sender_expected_total=%s | processed_total=%s",
-            ID,
-            client_id,
-            control.sender_id,
-            eof_count,
-            Q4_SUM_AMOUNT,
-            control.expected_total,
-            processed_total,
-        )
-
-        if should_emit:
-            self._emit_and_close_client(client_id)
-
-    def _emit_client_pairs(self, client_id: int, output=None) -> None:
-        """The actual A->M->B join. For every block that has both incoming and
-        outgoing records, do the cartesian product, multiply the counts to get
-        the block's path_count for (A, B), skip A == B, cap at the threshold,
-        and emit one Q4PairPaths per pair, routed by hash(A, B) to an aggregator."""
-        incoming = self._incoming_by_client.get(client_id, {})
-        outgoing = self._outgoing_by_client.get(client_id, {})
+    def _build_flush_outputs(self, client_id: int) -> list:
+        incoming = self._state.incoming_for(client_id)
+        outgoing = self._state.outgoing_for(client_id)
         blocks = set(incoming) & set(outgoing)
 
+        pairs_by_partition: dict[int, list] = defaultdict(list)
         for block in blocks:
             incoming_counts = incoming[block]
             outgoing_counts = outgoing[block]
@@ -270,15 +194,14 @@ class Q4JoinerWorker:
                     path_count = incoming_count * outgoing_count
                     if path_count <= 0:
                         continue
-                    self._append_pair_paths(
-                        client_id,
-                        Q4PairPaths(
-                            source=source,
-                            target=target,
-                            path_count=min(path_count, Q4_QUALIFY_THRESHOLD),
-                        ),
-                        output,
+                    pair_paths = Q4PairPaths(
+                        source=source,
+                        target=target,
+                        path_count=min(path_count, Q4_QUALIFY_THRESHOLD),
                     )
+                    pairs_by_partition[
+                        self._pair_partition(pair_paths.source, pair_paths.target)
+                    ].append(pair_paths)
                     emitted_for_block += 1
 
             self._blocks_emitted += 1
@@ -288,7 +211,7 @@ class Q4JoinerWorker:
                     "q4_joiner_emit_block | id=%s | client_id=%s | "
                     "intermediate_bank=%s | intermediate_account=%s | "
                     "a_bucket=%s | b_bucket=%s | incoming_endpoints=%s | "
-                    "outgoing_endpoints=%s | pair_pathss=%s",
+                    "outgoing_endpoints=%s | pair_paths=%s",
                     ID,
                     client_id,
                     intermediate.bank_id,
@@ -300,28 +223,30 @@ class Q4JoinerWorker:
                     emitted_for_block,
                 )
 
-    def _forward_eof_to_aggregators(
-        self,
-        client_id: int,
-        counts_by_partition: dict[int, int],
-        output=None,
-    ) -> None:
-        """Send one EOF to every aggregator partition, each carrying how many
-        Q4PairPaths we sent that aggregator so it knows when we're done."""
-        output = output or self._pair_reducer_output
+        outputs = []
+        for partition in sorted(pairs_by_partition):
+            for chunk in _chunks(pairs_by_partition[partition], Q4_JOINER_BATCH_MAX_DELTAS):
+                payload = self._pair_paths_serializer.serialize_batch(chunk)
+                outputs.append(
+                    (
+                        Q4_AGGREGATOR_EDGE,
+                        self._packet(MessageType.DATA, client_id, payload),
+                        partition,
+                    )
+                )
+
         for partition in range(Q4_AGGREGATOR_AMOUNT):
-            expected_total = int(counts_by_partition.get(partition, 0))
-            output.send(
-                self._packet(
-                    MessageType.EOF,
-                    client_id,
-                    self._control_payload(
-                        sender_id=ID,
-                        expected_total=expected_total,
-                        processed_count=0,
+            expected_total = len(pairs_by_partition.get(partition, ()))
+            outputs.append(
+                (
+                    Q4_AGGREGATOR_EDGE,
+                    self._packet(
+                        MessageType.EOF,
+                        client_id,
+                        self._control_payload(ID, expected_total, 0),
                     ),
-                ),
-                routing_key=self._pair_routing_key(partition),
+                    partition,
+                )
             )
             logging.info(
                 "q4_joiner_forward_eof | id=%s | client_id=%s | "
@@ -331,45 +256,113 @@ class Q4JoinerWorker:
                 partition,
                 expected_total,
             )
+        return outputs
 
-    def _emit_and_close_client(self, client_id: int, output=None) -> None:
-        """End-of-client. Run the per-block joins, flush batched buffers, drop
-        per-client state, then forward EOF to every aggregator partition."""
+    def _handle_abort(self, msg_id, client_id, sender_id, seq, ack) -> None:
         with self._lock:
-            if client_id in self._closed_by_client:
+            if self._state.is_closed(client_id):
+                ack()
                 return
+            instruction = self._handler.handle(
+                msg_id, client_id, sender_id, seq, b"",
+                lambda _: (
+                    Q4JoinerState.abort_change(client_id),
+                    [
+                        (Q4_AGGREGATOR_EDGE, self._packet(MessageType.ABORT, client_id, b""), partition)
+                        for partition in range(Q4_AGGREGATOR_AMOUNT)
+                    ],
+                ),
+                kind=MsgKind.ABORT,
+            )
+        self._publish_then_commit(instruction)
+        ack()
+        logging.info("q4_joiner_abort | id=%s | client_id=%s", ID, client_id)
 
-        self._emit_client_pairs(client_id, output)
-        self._flush_client_buffers(client_id, output)
+    def _handle_data(self, msg_id, client_id, sender_id, seq, payload, ack) -> None:
+        def bfn(data):
+            return Q4JoinerState.data_change(client_id, data), []
 
         with self._lock:
-            counts_by_partition = dict(
-                self._forwarded_by_partition_by_client.get(client_id, {})
+            instruction = self._handler.handle(
+                msg_id, client_id, sender_id, seq, payload, bfn
             )
-            self._incoming_by_client.pop(client_id, None)
-            self._outgoing_by_client.pop(client_id, None)
-            self._processed_by_client.pop(client_id, None)
-            self._eofs_by_client.pop(client_id, None)
-            self._forwarded_by_partition_by_client.pop(client_id, None)
-            self._closed_by_client.add(client_id)
+        self._publish_then_commit(instruction)
+        ack()
 
-        self._forward_eof_to_aggregators(client_id, counts_by_partition, output)
+        processed = self._state.processed_count(client_id)
+        if should_log_progress(processed):
+            logging.info(
+                "q4_joiner_data_batch | id=%s | client_id=%s | processed_total=%s",
+                ID,
+                client_id,
+                processed,
+            )
+
+    def _handle_eof(self, msg_id, client_id, sender_id, seq, payload, ack) -> None:
+        control = self._control_serializer.deserialize(payload)
+        upstream_id = control.sender_id
+
+        with self._lock:
+            status = self._handler.inbox.classify(client_id, sender_id, seq)
+            if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
+                ack()
+                return
+            completes = self._state.eof_would_complete(client_id, upstream_id)
+            eof_count = self._state.eof_count(client_id)
+            processed_total = self._state.processed_count(client_id)
+
+            def bfn(_data):
+                eof_change = Q4JoinerState.eof_change(client_id, upstream_id)
+                if completes:
+                    return (
+                        Q4JoinerState.compound_change(
+                            eof_change, Q4JoinerState.close_change(client_id)
+                        ),
+                        self._build_flush_outputs(client_id),
+                    )
+                return eof_change, []
+
+            instruction = self._handler.handle(
+                msg_id, client_id, sender_id, seq, payload, bfn
+            )
+
+        self._publish_then_commit(instruction)
+        ack()
+        logging.info(
+            "q4_joiner_eof_received | id=%s | client_id=%s | "
+            "edge_store_id=%s | eof_count=%s | expected_eofs=%s | "
+            "sender_expected_total=%s | processed_total=%s | flushed=%s",
+            ID,
+            client_id,
+            upstream_id,
+            eof_count + 1,
+            Q4_SUM_AMOUNT,
+            control.expected_total,
+            processed_total,
+            completes,
+        )
 
     def _on_message(self, raw, ack, nack):
         try:
-            msg_type, client_id, payload = self._proto.unpack_packet(raw)
+            msg_type, client_id, sender_id, seq, payload = (
+                self._proto.unpack_addressed_packet(raw)
+            )
+            msg_id = f"{sender_id}:{seq}"
             if msg_type == MessageType.DATA:
-                self._accept_block_edges(client_id, payload)
+                self._handle_data(msg_id, client_id, sender_id, seq, payload, ack)
             elif msg_type == MessageType.EOF:
-                self._handle_eof(client_id, payload)
+                self._handle_eof(msg_id, client_id, sender_id, seq, payload, ack)
+            elif msg_type == MessageType.ABORT:
+                self._handle_abort(f"abort:{sender_id}:{client_id}:{seq}", client_id, sender_id, seq, ack)
             else:
                 raise ValueError(f"unexpected q4 block joiner message type: {msg_type}")
-            ack()
         except Exception:
             logging.exception("q4_joiner_error | id=%s", ID)
-            nack()
+            nack(requeue=True)
 
     def start(self) -> None:
+        self._ensure_output_bindings()
+        self._republish_pending()
         logging.info(
             "q4_joiner_start | id=%s | input_exchange=%s | input_key=%s | "
             "sum_amount=%s | pair_reducer_exchange=%s | "
@@ -408,3 +401,8 @@ class Q4JoinerWorker:
                     ID,
                     e,
                 )
+
+
+def _chunks(items: list, size: int):
+    for i in range(0, len(items), size):
+        yield items[i : i + size]

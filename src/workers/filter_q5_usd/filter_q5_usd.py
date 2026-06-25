@@ -1,17 +1,28 @@
 import logging
 import os
 import threading
+import time
 
+from common.eof_coordinator import EofCoordinator, BroadcastAction, FlushAction, SendAnswerAction
+from common.fault_tolerance.handler.action import Action
+from common.fault_tolerance.handler.persistent_state_handler import PersistentStateHandler
+from common.fault_tolerance.inbox import MsgKind
 from common.middleware import (
+    LazyQueue,
     MessageMiddlewareQueueRabbitMQ,
     MessageMiddlewareExchangeRabbitMQ,
     MessageMiddlewareRpcClientRabbitMQ,
 )
-from common.logging_utils import should_log_progress
 from common.message_protocol.internal import InternalProtocol, TransactionSerializer
 from common.message_protocol.internal.common import ControlMessage, MessageType
 from common.message_protocol.internal.control_message_serializer import ControlMessageSerializer
 from common.rates.rates_manager import RatesManager
+from common.routing import queue_name_for_worker
+
+try:
+    from filter_q5_usd_state import FilterQ5UsdState
+except ImportError:
+    from workers.filter_q5_usd.filter_q5_usd_state import FilterQ5UsdState
 
 CURRENCY_NAME_TO_ISO = {
     "US Dollar": "USD",
@@ -54,88 +65,121 @@ CURRENCY_NAME_TO_ISO = {
 ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
+INPUT_EXCHANGE = os.environ["INPUT_EXCHANGE"]
+INPUT_ROUTING_PREFIX = os.environ["INPUT_ROUTING_PREFIX"]
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 RATES_REQUEST_QUEUE = os.environ.get("RATES_REQUEST_QUEUE", "rates_requests")
 START_DATE = os.environ.get("Q5_START_DATE", "2022-09-01")
 END_DATE = os.environ.get("Q5_END_DATE", "2022-09-05")
-# Tamaño del cluster de filter_q5_usd. Cuando es 1 se atajan los broadcasts
-# (cierre directo). Con N>1 se usa el protocolo de líder ocasional: el worker
-# que recibe el EOF coordina con sus pares para totalizar processed/forwarded
-# antes de emitir el EOF al aggregator.
 FILTER_Q5_USD_AMOUNT = int(os.environ.get("FILTER_Q5_USD_AMOUNT", "1"))
 FILTER_Q5_USD_PREFIX = os.environ.get("FILTER_Q5_USD_PREFIX", "filter_q5_usd")
-CONTROL_EXCHANGE = f"{FILTER_Q5_USD_PREFIX}_control"
-RESPONSE_QUEUE_PREFIX = f"{FILTER_Q5_USD_PREFIX}_response"
+STATE_DIR = os.environ.get("STATE_DIR", "/tmp/filter_q5_usd_state")
+SNAPSHOT_INTERVAL = int(os.environ.get("SNAPSHOT_INTERVAL", "1000"))
+MODE = "broadcast"
 
 
 class FilterQ5UsdWorker:
     def __init__(self):
-        self.input_queue = MessageMiddlewareQueueRabbitMQ(MOM_HOST, INPUT_QUEUE)
-
-        self.control_sender = MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, CONTROL_EXCHANGE, [CONTROL_EXCHANGE]
+        self._coordinator = EofCoordinator(
+            instance_id=ID,
+            total_instances=FILTER_Q5_USD_AMOUNT,
+            control_queue_prefix=f"{FILTER_Q5_USD_PREFIX}_control",
+            response_queue_prefix=f"{FILTER_Q5_USD_PREFIX}_response",
+            mode=MODE,
         )
-        self.response_queue_name = f"{RESPONSE_QUEUE_PREFIX}_{ID}"
 
-        self.output_exchanges = self._new_output_exchanges()
+        self._state = FilterQ5UsdState(self._coordinator)
 
-        self.internal_protocol = InternalProtocol()
-        self.transaction_serializer = TransactionSerializer()
-        self.control_serializer = ControlMessageSerializer()
+        self._handler = PersistentStateHandler(
+            state_dir=STATE_DIR,
+            node_id=f"filter_q5_usd_{ID}",
+            worker_state=self._state,
+            snapshot_every=SNAPSHOT_INTERVAL,
+        )
+
+        self.input_queue = MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST,
+            INPUT_EXCHANGE,
+            [self._input_routing_key()],
+            queue_name=INPUT_QUEUE,
+            exclusive=False,
+        )
+
+        self._main_control_senders = self._new_control_senders()
+
+        self._ctrl_ser = ControlMessageSerializer()
+        self._proto = InternalProtocol()
+        self._tx_ser = TransactionSerializer()
 
         self.rates_manager = RatesManager(cache_path="")
         self.rates_loaded = False
         self.rates_lock = threading.Lock()
 
-        self.lock = threading.Lock()
-        self.processed_by_client: dict[int, int] = {}
-        self.forwarded_by_client: dict[int, int] = {}
-        # (expected_total, leader_id): EOF visto para ese cliente. Mientras esté
-        # presente, todo DATA que llegue se reporta como delta al líder.
-        self.pending_eof_by_client: dict[int, tuple[int, int]] = {}
-        # Estado del líder: agregados de processed/forwarded reportados por
-        # los demás workers + el expected_total guardado al recibir el EOF
-        # de upstream.
-        self.leader_processed_by_client: dict[int, int] = {}
-        self.leader_forwarded_by_client: dict[int, int] = {}
-        self.leader_expected_by_client: dict[int, int] = {}
+        self._lock = threading.Lock()
+        self._tls = threading.local()
 
-        self.control_consumer: MessageMiddlewareExchangeRabbitMQ | None = None
+        self.control_consumer: MessageMiddlewareQueueRabbitMQ | None = None
         self.response_consumer: MessageMiddlewareQueueRabbitMQ | None = None
         self.control_thread: threading.Thread | None = None
         self.response_thread: threading.Thread | None = None
         self.closed = False
-        # Aborts an in-flight rates RPC on SIGTERM.
         self._shutdown = threading.Event()
 
-    # ---------- helpers ----------
+        self._handler.recover()
+        self._republish_pending()
 
-    def _new_output_exchanges(self):
-        return [
-            MessageMiddlewareExchangeRabbitMQ(
-                MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
+    # ---------- connection helpers ----------
+
+    def _input_routing_key(self) -> str:
+        return queue_name_for_worker(INPUT_ROUTING_PREFIX, ID)
+
+    def _tl_sender(self, destination: str) -> LazyQueue:
+        if not hasattr(self._tls, "senders"):
+            self._tls.senders = {}
+        if destination not in self._tls.senders:
+            self._tls.senders[destination] = LazyQueue(MOM_HOST, destination)
+        return self._tls.senders[destination]
+
+    def _new_control_senders(self) -> dict:
+        return {
+            self._coordinator.control_queue_for(i): LazyQueue(
+                MOM_HOST, self._coordinator.control_queue_for(i)
             )
-            for i in range(AGGREGATION_AMOUNT)
-        ]
+            for i in range(FILTER_Q5_USD_AMOUNT)
+        }
 
-    def _packet(self, msg_type: MessageType, client_id: int, payload: bytes) -> bytes:
-        return self.internal_protocol.create_packet(
-            msg_type=msg_type,
-            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-            payload=payload,
-        )
-
-    def _control_payload(
-        self, sender_id: int, expected_total: int, processed_count: int
-    ) -> bytes:
-        return self.control_serializer.serialize(
-            ControlMessage(
-                sender_id=sender_id,
-                expected_total=expected_total,
-                processed_count=processed_count,
+    def _new_response_senders(self) -> dict:
+        return {
+            self._coordinator.response_queue_for(i): LazyQueue(
+                MOM_HOST, self._coordinator.response_queue_for(i)
             )
-        )
+            for i in range(FILTER_Q5_USD_AMOUNT)
+        }
+
+    def _republish_pending(self) -> None:
+        for entry in self._handler.outbox_to_republish():
+            try:
+                self._tl_sender(entry.destination).send(entry.body)
+            except Exception:
+                logging.exception(
+                    "filter_q5_usd_republish_error | id=%s | destination=%s",
+                    ID, entry.destination,
+                )
+                raise
+
+    def _publish_commit_ack(self, instruction, ack) -> bool:
+        if instruction.action is Action.ACK:
+            ack()
+            return False
+        for entry in instruction.outputs:
+            self._tl_sender(entry.destination).send(entry.body)
+        with self._lock:
+            self._handler.commit_done(*instruction.ctx)
+        ack()
+        return True
+
+    # ---------- packet helpers ----------
 
     def _load_rates(self):
         with self.rates_lock:
@@ -164,295 +208,328 @@ class FilterQ5UsdWorker:
         normalized = date[:10].replace("/", "-")
         return START_DATE <= normalized <= END_DATE
 
-    def _forward_transaction(self, payload: bytes, client_id: int):
-        shard = client_id % AGGREGATION_AMOUNT
-        self.output_exchanges[shard].send(
-            self._packet(MessageType.DATA, client_id, payload)
+    def _addressed_packet(
+        self, msg_type: MessageType, client_id: int, seq: int, payload: bytes
+    ) -> bytes:
+        return self._proto.create_addressed_packet(
+            msg_type=msg_type,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            sender_id=ID,
+            seq=seq,
+            payload=payload,
         )
 
-    def _forward_eof_to_aggregators(
-        self, client_id: int, expected_total: int, exchanges
-    ):
-        payload = self._control_payload(
-            sender_id=ID, expected_total=expected_total, processed_count=0
-        )
-        for index, exchange in enumerate(exchanges):
-            exchange.send(self._packet(MessageType.EOF, client_id, payload))
-            logging.info(
-                "filter_q5_usd_forward_eof_to_aggregator | id=%s | client_id=%s | "
-                "aggregation_index=%s | expected_total=%s",
-                ID, client_id, index, expected_total,
-            )
-
-    def _broadcast_eof(self, client_id: int, expected_total: int):
-        self.control_sender.send(
-            self._packet(
-                MessageType.EOF_RECEIVED,
-                client_id,
-                self._control_payload(ID, expected_total, 0),
-            )
+    def _eof_payload(self, expected_total: int) -> bytes:
+        return self._ctrl_ser.serialize(
+            ControlMessage(sender_id=ID, expected_total=expected_total, processed_count=0)
         )
 
-    def _report_to_leader(
-        self,
-        client_id: int,
-        leader_id: int,
-        processed_count: int,
-        forwarded_count: int,
-    ):
-        response_queue = MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST, f"{RESPONSE_QUEUE_PREFIX}_{leader_id}"
-        )
-        try:
-            response_queue.send(
-                self._packet(
-                    MessageType.PROCESSED_ANSWER,
-                    client_id,
-                    self._control_payload(
-                        sender_id=ID,
-                        expected_total=forwarded_count,
-                        processed_count=processed_count,
-                    ),
-                )
-            )
-        finally:
-            response_queue.close()
-
-    def _cleanup_client(self, client_id: int):
-        self.processed_by_client.pop(client_id, None)
-        self.forwarded_by_client.pop(client_id, None)
-        self.pending_eof_by_client.pop(client_id, None)
-        self.leader_processed_by_client.pop(client_id, None)
-        self.leader_forwarded_by_client.pop(client_id, None)
-        self.leader_expected_by_client.pop(client_id, None)
+    def _build_eof_outputs(self, client_id: int, total_forwarded: int) -> list:
+        eof_payload = self._eof_payload(total_forwarded)
+        current_seq = self._state.agg_seq(client_id)
+        return [
+            (f"{AGGREGATION_PREFIX}_{i}",
+             self._addressed_packet(MessageType.EOF, client_id, current_seq + i, eof_payload))
+            for i in range(AGGREGATION_AMOUNT)
+        ]
 
     # ---------- data path ----------
 
-    def _process_data(self, client_id: int, payload: bytes):
-        self._load_rates()
-        # El payload puede traer 1 o N transactions concatenadas.
-        transactions = self.transaction_serializer.deserialize_batch(payload)
-        if not transactions:
-            return
-
-        forwarded_in_batch = 0
-        for transaction in transactions:
-            if not self._in_date_range(transaction.date):
-                continue
-            try:
-                amount_usd = self._convert_to_usd(
-                    transaction.amount,
-                    transaction.currency,
-                    transaction.date[:10].replace("/", "-"),
-                )
-            except ValueError as e:
-                logging.warning("filter_q5_usd_conversion_error | error=%s", e)
-                continue
-            if amount_usd >= 1.0:
-                continue
-
-            # Forward individual: el aggregator espera 1 transaction por DATA.
-            self._forward_transaction(
-                self.transaction_serializer.serialize(transaction), client_id
-            )
-            forwarded_in_batch += 1
-
-        processed_delta = len(transactions)
-        with self.lock:
-            self.processed_by_client[client_id] = (
-                self.processed_by_client.get(client_id, 0) + processed_delta
-            )
-            if forwarded_in_batch:
-                self.forwarded_by_client[client_id] = (
-                    self.forwarded_by_client.get(client_id, 0) + forwarded_in_batch
-                )
-            processed_total = self.processed_by_client[client_id]
-            forwarded_total = self.forwarded_by_client.get(client_id, 0)
-            pending = self.pending_eof_by_client.get(client_id)
-
-        if should_log_progress(processed_total):
-            logging.info(
-                "filter_q5_usd_data_batch | id=%s | client_id=%s | batch_size=%s | "
-                "forwarded_in_batch=%s | processed_total=%s | forwarded_total=%s | "
-                "pending_eof=%s",
-                ID,
-                client_id,
-                processed_delta,
-                forwarded_in_batch,
-                processed_total,
-                forwarded_total,
-                pending is not None,
-            )
-
-        if pending is None:
-            return
-
-        # Late DATA: ya vimos el EOF, reportamos el delta agregado al líder.
-        _, leader_id = pending
-        self._report_to_leader(
-            client_id,
-            leader_id,
-            processed_count=processed_delta,
-            forwarded_count=forwarded_in_batch,
-        )
-
-    def _handle_upstream_eof(self, client_id: int, payload: bytes):
-        control = self.control_serializer.deserialize(payload)
-        expected_total = control.expected_total
-
-        with self.lock:
-            self.leader_expected_by_client[client_id] = expected_total
-
-        logging.info(
-            "filter_q5_usd_upstream_eof | id=%s | client_id=%s | expected_total=%s",
-            ID, client_id, expected_total,
-        )
-        self._broadcast_eof(client_id, expected_total)
-
-    def _process_message(self, message: bytes):
-        msg_type, client_id, payload = self.internal_protocol.unpack_packet(message)
-
-        if msg_type == MessageType.DATA:
-            self._process_data(client_id, payload)
-        elif msg_type == MessageType.EOF:
-            self._handle_upstream_eof(client_id, payload)
-        else:
-            raise ValueError(f"Unexpected filter_q5_usd message type: {msg_type}")
-
-    def process_messages(self, message, ack, nack):
+    def _process_data_message(self, message, ack, nack):
         try:
-            self._process_message(message)
-            ack()
-        except Exception as e:
-            logging.error("filter_q5_usd_error | id=%s | error=%s", ID, e)
-            nack()
+            msg_type, client_id, sender_id, seq, payload = (
+                self._proto.unpack_addressed_packet(message)
+            )
+
+            if msg_type == MessageType.DATA:
+                # Upstream filter (C_Q5) sends addressed packets, so dedup uses the
+                # real (sender_id, seq): protects against RabbitMQ redelivery of the
+                # same batch on crash without synthesizing a key.
+                msg_id = f"d:{sender_id}:{client_id}:{seq}"
+
+                with self._lock:
+                    if self._state.is_closed(client_id):
+                        ack()
+                        return
+
+                self._load_rates()  # RPC outside the handler lock
+
+                batch_stats = {"processed": 0, "forwarded": 0}
+
+                def bfn(pl):
+                    transactions = self._tx_ser.deserialize_batch(pl)
+                    batch_stats["processed"] = len(transactions)
+                    if not transactions:
+                        return FilterQ5UsdState.data_change(client_id, 0, 0), []
+
+                    current_seq = self._state.agg_seq(client_id)
+                    outputs = []
+                    forwarded = 0
+                    for tx in transactions:
+                        if not self._in_date_range(tx.date):
+                            continue
+                        try:
+                            amount_usd = self._convert_to_usd(
+                                tx.amount,
+                                tx.currency,
+                                tx.date[:10].replace("/", "-"),
+                            )
+                        except ValueError as e:
+                            logging.warning("filter_q5_usd_conversion_error | error=%s", e)
+                            continue
+                        if amount_usd >= 1.0:
+                            continue
+                        shard = client_id % AGGREGATION_AMOUNT
+                        dest = f"{AGGREGATION_PREFIX}_{shard}"
+                        pkt = self._addressed_packet(
+                            MessageType.DATA, client_id,
+                            current_seq + forwarded,
+                            self._tx_ser.serialize(tx),
+                        )
+                        outputs.append((dest, pkt))
+                        forwarded += 1
+
+                    batch_stats["forwarded"] = forwarded
+                    return FilterQ5UsdState.data_change(
+                        client_id, len(transactions), forwarded, seq_advance=forwarded
+                    ), outputs
+
+                with self._lock:
+                    instruction = self._handler.handle(
+                        msg_id, client_id, sender_id, seq, payload, bfn
+                    )
+                committed = self._publish_commit_ack(instruction, ack)
+
+                processed = self._state.processed_count(client_id)
+                if committed:
+                    logging.info(
+                        "filter_q5_usd_data_batch | id=%s | client_id=%s | "
+                        "batch_size=%s | forwarded_in_batch=%s | outputs=%s | "
+                        "processed_total=%s | forwarded_total=%s",
+                        ID, client_id, batch_stats["processed"],
+                        batch_stats["forwarded"], len(instruction.outputs),
+                        processed, self._state.forwarded_count(client_id),
+                    )
+
+            elif msg_type == MessageType.EOF:
+                self._handle_upstream_eof(client_id, payload, ack, nack)
+
+            elif msg_type == MessageType.ABORT:
+                self._handle_abort(client_id, sender_id, seq, ack, nack)
+
+            else:
+                raise ValueError(f"Unexpected filter_q5_usd message type: {msg_type}")
+
+        except Exception:
+            logging.exception("filter_q5_usd_data_error | id=%s", ID)
+            nack(requeue=True)
+
+    def _downstream_abort_outputs(self, client_id: int) -> list:
+        current_seq = self._state.agg_seq(client_id)
+        return [
+            (f"{AGGREGATION_PREFIX}_{i}",
+             self._addressed_packet(MessageType.ABORT, client_id, current_seq + i, b""))
+            for i in range(AGGREGATION_AMOUNT)
+        ]
+
+    def _handle_abort(self, client_id: int, sender_id: int, seq: int, ack, nack) -> None:
+        msg_id = f"abort:{sender_id}:{client_id}:{seq}"
+        try:
+            with self._lock:
+                if self._state.is_closed(client_id):
+                    ack()
+                    return
+
+                def bfn(_pl):
+                    return (
+                        FilterQ5UsdState.abort_change(client_id),
+                        self._downstream_abort_outputs(client_id),
+                    )
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, sender_id, seq, b"", bfn,
+                    kind=MsgKind.ABORT,
+                )
+            self._publish_commit_ack(instruction, ack)
+            logging.info(
+                "filter_q5_usd_abort | id=%s | client_id=%s", ID, client_id
+            )
+        except Exception:
+            logging.exception(
+                "filter_q5_usd_abort_error | id=%s | client_id=%s", ID, client_id
+            )
+            nack(requeue=True)
+
+    def _handle_upstream_eof(self, client_id: int, payload: bytes, ack, nack):
+        ctrl = self._ctrl_ser.deserialize(payload)
+        sender_id = ctrl.sender_id
+        seq = client_id  # at most one upstream EOF per (sender, client) pair
+        msg_id = f"ue:{client_id}:{sender_id}"
+
+        try:
+            with self._lock:
+                if self._state.is_closed(client_id):
+                    ack()
+                    return
+
+                count = self._state.processed_count(client_id)
+                fwd = self._state.forwarded_count(client_id)
+
+                def bfn(_pl):
+                    action = self._coordinator.on_upstream_eof(
+                        client_id, ctrl.expected_total, count, fwd
+                    )
+                    eof_change = FilterQ5UsdState.coordinator_upstream_eof_change(
+                        client_id, ctrl.expected_total, count, fwd
+                    )
+                    if isinstance(action, BroadcastAction):
+                        outputs = [(qname, action.message) for qname in action.queue_names]
+                        return eof_change, outputs
+                    if isinstance(action, FlushAction):
+                        # N=1: flush directly without coordination.
+                        outputs = self._build_eof_outputs(client_id, fwd)
+                        compound = FilterQ5UsdState.compound_change(
+                            eof_change,
+                            FilterQ5UsdState.data_change(client_id, 0, 0, AGGREGATION_AMOUNT),
+                            FilterQ5UsdState.close_change(client_id),
+                        )
+                        return compound, outputs
+                    # None: duplicate upstream EOF
+                    return eof_change, []
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, sender_id, seq, payload, bfn,
+                    kind=MsgKind.CTRL_UPSTREAM_EOF,
+                )
+
+            committed = self._publish_commit_ack(instruction, ack)
+            if not committed:
+                return
+            logging.info(
+                "filter_q5_usd_upstream_eof | id=%s | client_id=%s | expected_total=%s",
+                ID, client_id, ctrl.expected_total,
+            )
+
+        except Exception:
+            logging.exception(
+                "filter_q5_usd_upstream_eof_error | id=%s | client_id=%s", ID, client_id
+            )
+            nack(requeue=True)
 
     # ---------- control path ----------
 
-    def _handle_eof_broadcast(self, message: bytes, ack, nack, output_exchanges):
+    def _handle_control(self, message, ack, nack, response_senders: dict):
         try:
-            msg_type, client_id, payload = self.internal_protocol.unpack_packet(message)
-            if msg_type != MessageType.EOF_RECEIVED:
-                raise ValueError(
-                    f"unexpected filter_q5_usd control message type: {msg_type}"
-                )
+            msg_type, client_id, ctrl = self._coordinator.parse_message(message)
+            msg_type = MessageType(msg_type)
+        except Exception:
+            logging.exception("filter_q5_usd_control_parse_error | id=%s", ID)
+            nack(requeue=False)
+            return
 
-            control = self.control_serializer.deserialize(payload)
-            leader_id = control.sender_id
-            expected_total = control.expected_total
+        sender_id = ctrl.sender_id
+        seq = client_id
+        msg_id = f"ctrl:{msg_type.value}:{client_id}:{sender_id}"
+        kind_by_type = {
+            MessageType.EOF_RECEIVED: MsgKind.CTRL_EOF_RECEIVED,
+            MessageType.FLUSH_ORDER: MsgKind.CTRL_FLUSH_ORDER,
+        }
+        kind = kind_by_type.get(msg_type)
 
-            duplicate = False
-            with self.lock:
-                if client_id in self.pending_eof_by_client:
-                    duplicate = True
-                else:
-                    self.pending_eof_by_client[client_id] = (
-                        expected_total,
-                        leader_id,
+        try:
+            with self._lock:
+                if self._state.is_closed(client_id):
+                    ack()
+                    return
+
+                count = self._state.processed_count(client_id)
+                fwd = self._state.forwarded_count(client_id)
+
+                if msg_type == MessageType.EOF_RECEIVED:
+                    def bfn(_pl):
+                        action = self._coordinator.process_control_message(
+                            msg_type, client_id, ctrl, count, fwd
+                        )
+                        change = FilterQ5UsdState.coordinator_msg_change(
+                            msg_type, client_id, sender_id,
+                            ctrl.expected_total, ctrl.processed_count, count, fwd,
+                        )
+                        if isinstance(action, SendAnswerAction):
+                            return change, [(action.queue_name, action.message)]
+                        return change, []
+
+                    instruction = self._handler.handle(
+                        msg_id, client_id, sender_id, seq, message, bfn,
+                        kind=kind,
                     )
-                    processed_snapshot = self.processed_by_client.get(client_id, 0)
-                    forwarded_snapshot = self.forwarded_by_client.get(client_id, 0)
 
-            if duplicate:
-                logging.info(
-                    "filter_q5_usd_duplicate_eof_control | id=%s | client_id=%s | "
-                    "leader_id=%s",
-                    ID, client_id, leader_id,
-                )
+                elif msg_type == MessageType.FLUSH_ORDER:
+                    leader_id = ctrl.sender_id
+
+                    def bfn(_pl):
+                        # process_control_message for FLUSH_ORDER is read-only:
+                        # it only checks _leader_expected to decide leader vs non-leader.
+                        # The actual coordinator cleanup happens via apply_change below.
+                        action = self._coordinator.process_control_message(msg_type, client_id, ctrl)
+                        if action is None:
+                            # Leader receives its own broadcast but must not flush.
+                            return FilterQ5UsdState.data_change(client_id, 0, 0, 0), []
+                        outputs = self._build_eof_outputs(client_id, fwd)
+                        flush_ack_msg = self._coordinator.build_flush_ack(client_id, fwd)
+                        flush_ack_dest = self._coordinator.response_queue_for(leader_id)
+                        compound = FilterQ5UsdState.compound_change(
+                            FilterQ5UsdState.coordinator_cleanup_change(client_id),
+                            FilterQ5UsdState.data_change(client_id, 0, 0, AGGREGATION_AMOUNT),
+                            FilterQ5UsdState.close_change(client_id),
+                        )
+                        return compound, outputs + [(flush_ack_dest, flush_ack_msg)]
+
+                    instruction = self._handler.handle(
+                        msg_id, client_id, sender_id, seq, message, bfn,
+                        kind=kind,
+                    )
+
+                elif msg_type == MessageType.PROCESSED_REQUEST:
+                    _pr_action = self._coordinator.process_control_message(
+                        msg_type, client_id, ctrl, count, fwd
+                    )
+                else:
+                    logging.warning(
+                        "filter_q5_usd_unexpected_control_type | id=%s | msg_type=%s",
+                        ID, msg_type,
+                    )
+                    ack()
+                    return
+
+            if msg_type == MessageType.PROCESSED_REQUEST:
+                if isinstance(_pr_action, SendAnswerAction):
+                    response_senders[_pr_action.queue_name].send(_pr_action.message)
                 ack()
                 return
 
-            logging.info(
-                "filter_q5_usd_eof_control_snapshot | id=%s | client_id=%s | "
-                "leader_id=%s | processed_count=%s | forwarded_count=%s | "
-                "expected_total=%s",
-                ID,
-                client_id,
-                leader_id,
-                processed_snapshot,
-                forwarded_snapshot,
-                expected_total,
-            )
-            self._report_to_leader(
-                client_id,
-                leader_id,
-                processed_count=processed_snapshot,
-                forwarded_count=forwarded_snapshot,
-            )
+            self._publish_commit_ack(instruction, ack)
 
-            # Caso especial: si yo soy el único worker, mi snapshot ya es total.
-            # El protocolo igual se cierra al recibir mi propia PROCESSED_ANSWER.
-            ack()
         except Exception:
-            logging.exception("filter_q5_usd_control_error | id=%s", ID)
-            nack()
-
-    def _handle_leader_report(self, message: bytes, ack, nack, output_exchanges):
-        try:
-            msg_type, client_id, payload = self.internal_protocol.unpack_packet(message)
-            if msg_type != MessageType.PROCESSED_ANSWER:
-                raise ValueError(
-                    f"unexpected filter_q5_usd response message type: {msg_type}"
-                )
-
-            control = self.control_serializer.deserialize(payload)
-            should_close = False
-            forwarded_total = 0
-
-            with self.lock:
-                self.leader_processed_by_client[client_id] = (
-                    self.leader_processed_by_client.get(client_id, 0)
-                    + control.processed_count
-                )
-                self.leader_forwarded_by_client[client_id] = (
-                    self.leader_forwarded_by_client.get(client_id, 0)
-                    + control.expected_total
-                )
-                expected_total = self.leader_expected_by_client.get(client_id)
-
-                if (
-                    expected_total is not None
-                    and self.leader_processed_by_client[client_id] >= expected_total
-                ):
-                    should_close = True
-                    forwarded_total = self.leader_forwarded_by_client[client_id]
-                    self._cleanup_client(client_id)
-
-            if should_close:
-                logging.info(
-                    "filter_q5_usd_eof_ready | id=%s | client_id=%s | "
-                    "expected_total=%s | forwarded_total=%s",
-                    ID,
-                    client_id,
-                    expected_total,
-                    forwarded_total,
-                )
-                self._forward_eof_to_aggregators(
-                    client_id, forwarded_total, output_exchanges
-                )
-
-            ack()
-        except Exception:
-            logging.exception("filter_q5_usd_response_error | id=%s", ID)
-            nack()
+            logging.exception(
+                "filter_q5_usd_control_error | id=%s | client_id=%s", ID, client_id
+            )
+            nack(requeue=True)
 
     def _start_control_consumer(self):
-        consumer = MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, CONTROL_EXCHANGE, [CONTROL_EXCHANGE]
+        consumer = MessageMiddlewareQueueRabbitMQ(
+            MOM_HOST, self._coordinator.my_control_queue()
         )
         self.control_consumer = consumer
-        output_exchanges = self._new_output_exchanges()
+        response_senders = self._new_response_senders()
         try:
             if not self._shutdown.is_set():
                 consumer.start_consuming(
-                    lambda message, ack, nack: self._handle_eof_broadcast(
-                        message, ack, nack, output_exchanges
-                    )
+                    lambda msg, ack, nack: self._handle_control(msg, ack, nack, response_senders)
                 )
         finally:
-            for exchange in output_exchanges:
+            for q in response_senders.values():
                 try:
-                    exchange.close()
+                    q.close()
                 except Exception:
                     pass
             try:
@@ -460,23 +537,107 @@ class FilterQ5UsdWorker:
             except Exception:
                 pass
 
+    # ---------- response path (leader) ----------
+
+    def _handle_response(self, message, ack, nack):
+        try:
+            msg_type, client_id, ctrl = self._coordinator.parse_message(message)
+            msg_type = MessageType(msg_type)
+        except Exception:
+            logging.exception("filter_q5_usd_response_parse_error | id=%s", ID)
+            nack(requeue=False)
+            return
+
+        try:
+            if msg_type == MessageType.PROCESSED_ANSWER:
+                # Direct coordinator call — same known limitation as the aggregator:
+                # if leader crashes after acking some PROCESSED_ANSWERs but before
+                # snapshotting, non-leaders redeliver and rebuild the count.
+                with self._lock:
+                    action = self._coordinator.process_control_message(msg_type, client_id, ctrl)
+                if action is None:
+                    ack()
+                    return
+                if isinstance(action, BroadcastAction):
+                    if action.sleep_before > 0:
+                        time.sleep(action.sleep_before)
+                    for qname in action.queue_names:
+                        self._tl_sender(qname).send(action.message)
+                    ack()
+                else:
+                    logging.warning(
+                        "filter_q5_usd_unexpected_processed_answer_action | id=%s | action=%s",
+                        ID, action,
+                    )
+                    ack()
+
+            elif msg_type == MessageType.FLUSH_ACK:
+                sender_id = ctrl.sender_id
+                seq = client_id
+                msg_id = f"fa:{client_id}:{sender_id}"
+
+                with self._lock:
+                    if self._state.is_closed(client_id):
+                        ack()
+                        return
+
+                    already = self._coordinator.has_flush_ack(client_id, ctrl.sender_id)
+                    new_ack_count = self._coordinator.flush_ack_count(client_id) + (
+                        0 if already else 1
+                    )
+                    own_fwd = self._state.forwarded_count(client_id)
+                    accumulated = self._coordinator.accumulated_forwarded(client_id)
+                    new_total_fwd = accumulated + ctrl.processed_count + own_fwd
+
+                    def bfn(_pl):
+                        ack_change = FilterQ5UsdState.coordinator_msg_change(
+                            MessageType.FLUSH_ACK, client_id, sender_id,
+                            ctrl.expected_total, ctrl.processed_count,
+                        )
+                        if new_ack_count >= FILTER_Q5_USD_AMOUNT - 1:
+                            outputs = self._build_eof_outputs(client_id, new_total_fwd)
+                            compound = FilterQ5UsdState.compound_change(
+                                ack_change,
+                                FilterQ5UsdState.data_change(client_id, 0, 0, AGGREGATION_AMOUNT),
+                                FilterQ5UsdState.close_change(client_id),
+                            )
+                            logging.info(
+                                "filter_q5_usd_eof_ready | id=%s | client_id=%s | total_fwd=%s",
+                                ID, client_id, new_total_fwd,
+                            )
+                            return compound, outputs
+                        return ack_change, []
+
+                    instruction = self._handler.handle(
+                        msg_id, client_id, sender_id, seq, message, bfn,
+                        kind=MsgKind.CTRL_FLUSH_ACK,
+                    )
+
+                self._publish_commit_ack(instruction, ack)
+
+            else:
+                logging.warning(
+                    "filter_q5_usd_unexpected_response_type | id=%s | msg_type=%s", ID, msg_type
+                )
+                ack()
+
+        except Exception:
+            logging.exception(
+                "filter_q5_usd_response_error | id=%s | client_id=%s", ID, client_id
+            )
+            nack(requeue=True)
+
     def _start_response_consumer(self):
-        consumer = MessageMiddlewareQueueRabbitMQ(MOM_HOST, self.response_queue_name)
+        consumer = MessageMiddlewareQueueRabbitMQ(
+            MOM_HOST, self._coordinator.my_response_queue()
+        )
         self.response_consumer = consumer
-        output_exchanges = self._new_output_exchanges()
         try:
             if not self._shutdown.is_set():
                 consumer.start_consuming(
-                    lambda message, ack, nack: self._handle_leader_report(
-                        message, ack, nack, output_exchanges
-                    )
+                    lambda msg, ack, nack: self._handle_response(msg, ack, nack)
                 )
         finally:
-            for exchange in output_exchanges:
-                try:
-                    exchange.close()
-                except Exception:
-                    pass
             try:
                 consumer.close()
             except Exception:
@@ -486,9 +647,11 @@ class FilterQ5UsdWorker:
 
     def start(self):
         logging.info(
-            "filter_q5_usd_start | id=%s | input=%s | aggregation_prefix=%s | "
-            "aggregation_amount=%s | cluster_size=%s | date_range=[%s, %s]",
-            ID, INPUT_QUEUE, AGGREGATION_PREFIX, AGGREGATION_AMOUNT,
+            "filter_q5_usd_start | id=%s | input=%s | exchange=%s | routing_key=%s | "
+            "aggregation_prefix=%s | aggregation_amount=%s | cluster_size=%s | "
+            "date_range=[%s, %s]",
+            ID, INPUT_QUEUE, INPUT_EXCHANGE, self._input_routing_key(),
+            AGGREGATION_PREFIX, AGGREGATION_AMOUNT,
             FILTER_Q5_USD_AMOUNT, START_DATE, END_DATE,
         )
 
@@ -499,7 +662,7 @@ class FilterQ5UsdWorker:
 
         try:
             if not self._shutdown.is_set():
-                self.input_queue.start_consuming(self.process_messages)
+                self.input_queue.start_consuming(self._process_data_message)
         except Exception as e:
             logging.error("filter_q5_usd_start_error | id=%s | error=%s", ID, e)
         finally:
@@ -514,7 +677,6 @@ class FilterQ5UsdWorker:
         if self.closed or self._shutdown.is_set():
             return
         logging.info("filter_q5_usd_shutdown | id=%s", ID)
-
         self._shutdown.set()
         self.input_queue.request_stop_consuming()
         if self.control_consumer is not None:
@@ -526,10 +688,11 @@ class FilterQ5UsdWorker:
         if self.closed:
             return
         self.closed = True
-        for resource in (
-            [self.input_queue, self.control_sender]
-            + list(self.output_exchanges)
-        ):
+        resources = (
+            [self.input_queue]
+            + list(self._main_control_senders.values())
+        )
+        for resource in resources:
             try:
                 resource.close()
             except Exception:

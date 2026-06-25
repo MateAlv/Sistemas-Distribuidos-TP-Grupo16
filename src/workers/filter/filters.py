@@ -1,24 +1,36 @@
-import os
 import json
 import logging
+import os
 import threading
+import time
 
 from common import message_protocol
 from common.bank_ids import notebook_bank_id
 from common.domain.transaction import Transaction
 from common import middleware
 from common.constants import *
+from common.eof_coordinator import (
+    BroadcastAction,
+    EofCoordinator,
+    FlushAction,
+    SendAnswerAction,
+)
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal import partition_for_parts
+from common.message_protocol.internal.common import MessageType
+from common.middleware.middleware_rabbitmq import ensure_exchange_queue_bindings
+from common.routing import queue_name_for_worker, shard_for_client_id
+from common.fault_tolerance.handler import EdgeSpec, PersistentStateHandler, WorkerRunner
+from common.fault_tolerance.handler.action import Action
+from common.fault_tolerance.inbox import InboxStatus, MsgKind
 
 try:
-    from output_batcher import OutputBatcher
+    from filter_state import FilterState
 except ImportError:
-    from workers.filter.output_batcher import OutputBatcher
+    from workers.filter.filter_state import FilterState
 
 # Id correspondiente a la entidad
 ID = int(os.environ["ID"])
-# Host del middleware
 MOM_HOST = os.environ["MOM_HOST"]
 # Corresponde a como esta configurada la entidad, es decir, como filtra las transacciones
 # Configuraciones posibles:
@@ -29,12 +41,12 @@ MOM_HOST = os.environ["MOM_HOST"]
 CONFIGURATION = os.environ["CONFIGURATION"]
 # Cola de Entrada
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
-TRANSACTION_EXCHANGE = os.getenv("TRANSACTION_EXCHANGE")
+INPUT_EXCHANGE = os.getenv("INPUT_EXCHANGE")
+INPUT_ROUTING_PREFIX = os.getenv("INPUT_ROUTING_PREFIX")
 # Colas de Salida Posibles
 GATEWAY_QUEUE = os.environ["GATEWAY_QUEUE"]
 FILTER_DATE_QUEUE = os.environ["FILTER_DATE_QUEUE"]
 FILTER_Q1_QUEUE = os.environ["FILTER_Q1_QUEUE"]
-SUM_Q2_QUEUE = os.environ["SUM_Q2_QUEUE"]
 FILTER_Q3_QUEUE = os.environ["FILTER_Q3_QUEUE"]
 SCATTER_GATHER_MAPPER_QUEUE = os.environ["SCATTER_GATHER_MAPPER_QUEUE"]
 FILTER_Q5_USD_QUEUE = os.environ["FILTER_Q5_USD_QUEUE"]
@@ -46,10 +58,6 @@ Q4_FILTER_INPUT_ROUTING_PREFIX = os.getenv(
 Q4_FILTER_AMOUNT = int(os.getenv("Q4_FILTER_AMOUNT", "1"))
 Q4_FILTER_OUTPUT = "q4_filter"
 Q3_CANDIDATES_QUEUE = os.getenv("Q3_CANDIDATES_QUEUE", FILTER_Q3_QUEUE)
-# Sharding opcional de candidatos Q3 por client_id. Si Q3_CANDIDATES_EXCHANGE
-# y Q3_BARRIER_AMOUNT > 1 están seteados, el filter publica a un exchange con
-# routing key "{Q3_CANDIDATES_ROUTING_PREFIX}_{client_id % Q3_BARRIER_AMOUNT}"
-# para distribuir candidatos entre N q3_barrier shards.
 Q3_CANDIDATES_EXCHANGE = os.getenv("Q3_CANDIDATES_EXCHANGE")
 Q3_CANDIDATES_ROUTING_PREFIX = os.getenv(
     "Q3_CANDIDATES_ROUTING_PREFIX", "q3_candidates"
@@ -57,28 +65,72 @@ Q3_CANDIDATES_ROUTING_PREFIX = os.getenv(
 Q3_BARRIER_AMOUNT = int(os.getenv("Q3_BARRIER_AMOUNT", "1"))
 SUM_PREFIX = os.environ["SUM_PREFIX"]
 SUM_Q3_QUEUE = os.getenv("SUM_Q3_QUEUE", SUM_PREFIX)
+SUM_Q3_EXCHANGE = os.getenv("SUM_Q3_EXCHANGE", "")
+SUM_Q3_ROUTING_PREFIX = os.getenv("SUM_Q3_ROUTING_PREFIX", SUM_PREFIX)
+SUM_Q3_AMOUNT = int(os.getenv("SUM_Q3_AMOUNT", "0"))
 
 FILTER_AMOUNT = int(os.environ["FILTER_AMOUNT"])
 FILTER_PREFIX = os.environ["FILTER_PREFIX"] + "_" + CONFIGURATION
-CONTROL_EXCHANGE = os.environ["FILTER_PREFIX"] + "_" + "CONTROL_EXCHANGE_" + CONFIGURATION
+FILTER_CONTROL_QUEUE_PREFIX = FILTER_PREFIX + "_control"
+FILTER_RESPONSE_QUEUE_PREFIX = FILTER_PREFIX + "_response"
 USD_ENABLE_Q1 = os.getenv("USD_ENABLE_Q1", "1") != "0"
 USD_ENABLE_Q2 = os.getenv("USD_ENABLE_Q2", "1") != "0"
 USD_ENABLE_DATE = os.getenv("USD_ENABLE_DATE", "1") != "0"
 DATE_ENABLE_Q3 = os.getenv("DATE_ENABLE_Q3", "1") != "0"
 DATE_ENABLE_Q4 = os.getenv("DATE_ENABLE_Q4", "1") != "0"
+SUM_Q2_OUTPUT = "sum_q2"
+if CONFIGURATION == C_USD and USD_ENABLE_Q1:
+    FILTER_Q1_EXCHANGE = os.environ["FILTER_Q1_EXCHANGE"]
+    FILTER_Q1_ROUTING_PREFIX = os.environ["FILTER_Q1_ROUTING_PREFIX"]
+    FILTER_Q1_AMOUNT = int(os.environ["FILTER_Q1_AMOUNT"])
+else:
+    FILTER_Q1_EXCHANGE = ""
+    FILTER_Q1_ROUTING_PREFIX = ""
+    FILTER_Q1_AMOUNT = 0
+
+if CONFIGURATION == C_Q5:
+    FILTER_Q5_USD_EXCHANGE = os.environ["FILTER_Q5_USD_EXCHANGE"]
+    FILTER_Q5_USD_ROUTING_PREFIX = os.environ["FILTER_Q5_USD_ROUTING_PREFIX"]
+    FILTER_Q5_USD_AMOUNT = int(os.environ["FILTER_Q5_USD_AMOUNT"])
+else:
+    FILTER_Q5_USD_EXCHANGE = ""
+    FILTER_Q5_USD_ROUTING_PREFIX = ""
+    FILTER_Q5_USD_AMOUNT = 0
+
+if CONFIGURATION == C_USD and USD_ENABLE_Q2:
+    SUM_Q2_EXCHANGE = os.environ["SUM_Q2_EXCHANGE"]
+    SUM_Q2_ROUTING_PREFIX = os.environ["SUM_Q2_ROUTING_PREFIX"]
+    SUM_Q2_AMOUNT = int(os.environ["SUM_Q2_AMOUNT"])
+else:
+    SUM_Q2_EXCHANGE = ""
+    SUM_Q2_ROUTING_PREFIX = ""
+    SUM_Q2_AMOUNT = 0
+
+if CONFIGURATION == C_USD and USD_ENABLE_DATE:
+    FILTER_DATE_EXCHANGE = os.environ["FILTER_DATE_EXCHANGE"]
+    FILTER_DATE_ROUTING_PREFIX = os.environ["FILTER_DATE_ROUTING_PREFIX"]
+    FILTER_DATE_AMOUNT = int(os.environ["FILTER_DATE_AMOUNT"])
+else:
+    FILTER_DATE_EXCHANGE = ""
+    FILTER_DATE_ROUTING_PREFIX = ""
+    FILTER_DATE_AMOUNT = 0
 
 FILTER_OUTPUT_BATCH_BYTES = int(os.getenv("FILTER_OUTPUT_BATCH_BYTES", str(1024 * 1024)))
 FILTER_OUTPUT_BATCH_MAX_TX = int(os.getenv("FILTER_OUTPUT_BATCH_MAX_TX", "5000"))
+STATE_DIR = os.environ.get("STATE_DIR", "/tmp/filter_state")
+SNAPSHOT_INTERVAL = int(os.environ.get("SNAPSHOT_INTERVAL", "1000"))
+LEADER_ID = 0
 
 
 class FilterWorker:
     def __init__(self):
-    
-        # Iniciacion de la cola de entrada
-        if TRANSACTION_EXCHANGE:
+        if INPUT_EXCHANGE:
             self.input_queue = middleware.MessageMiddlewareExchangeRabbitMQ(
-                MOM_HOST, TRANSACTION_EXCHANGE, routing_keys=[],
-                exchange_type="fanout", queue_name=INPUT_QUEUE, exclusive=False,
+                MOM_HOST,
+                INPUT_EXCHANGE,
+                routing_keys=[self._input_routing_key()],
+                queue_name=INPUT_QUEUE,
+                exclusive=False,
             )
         else:
             self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
@@ -88,84 +140,155 @@ class FilterWorker:
         self.output_queues = self._new_output_queues()
         self.output_exchanges = []
 
-        # Seccion de control
-        # Primero Identificamos al Lider
-        self.is_leader = ID == 0
+        # Coordinador EOF
+        self.coordinator = EofCoordinator(
+            instance_id=ID,
+            total_instances=FILTER_AMOUNT,
+            control_queue_prefix=FILTER_CONTROL_QUEUE_PREFIX,
+            response_queue_prefix=FILTER_RESPONSE_QUEUE_PREFIX,
+            mode="broadcast",
+        )
 
-        # Definicion de las keys de los exchanges
-        self.personal_control_key = f"{FILTER_PREFIX}_{ID}"
-        self.output_control_keys = []
-        if self.is_leader:
-            for i in range(1, FILTER_AMOUNT):
-                self.output_control_keys.append(f"{FILTER_PREFIX}_{i}")
-        else:
-            self.output_control_keys.append(f"{FILTER_PREFIX}_0")
-
-        self.control_input = None
-
-        # Definicion del output del exchange de control
-        self.control_output = self._new_control_output()
+        # Senders del hilo principal (data thread) para broadcast de EOF_RECEIVED
+        self._main_control_senders = self._new_control_senders()
 
         # Serializadores para transacciones y mensajes de control
         self.transaction_serializer = message_protocol.internal.TransactionSerializer()
         self.control_serializer = message_protocol.internal.ControlMessageSerializer()
         self.internal_packet_serializer = message_protocol.internal.InternalProtocol()
 
-        self._batcher: OutputBatcher | None = None
-        if CONFIGURATION in (C_USD, C_Q5, C_DATE, C_Q1):
-            self._batcher = OutputBatcher(
-                self.transaction_serializer,
-                FILTER_OUTPUT_BATCH_BYTES,
-                FILTER_OUTPUT_BATCH_MAX_TX,
-            )
+        # Durable state + handler. FilterState owns the output batcher buffer
+        # (per (destination, client_id)); the worker drives it through the WAL.
+        self._state = FilterState(
+            self.coordinator, FILTER_OUTPUT_BATCH_BYTES, FILTER_OUTPUT_BATCH_MAX_TX
+        )
+        self._output_edges = self._build_output_edges()
+        self._handler = PersistentStateHandler(
+            state_dir=STATE_DIR,
+            node_id=f"filter_{CONFIGURATION}_{ID}",
+            worker_state=self._state,
+            snapshot_every=SNAPSHOT_INTERVAL,
+            output_edges=self._output_edges,
+        )
+        self._runner: WorkerRunner | None = None
+        self._data_publishers: dict | None = None
 
-        # Estado interno
+        # One lock serializes the handler (data thread) with every coordinator
+        # access on the control/response threads, so the snapshot is consistent.
         self.lock = threading.Lock()
+        self._stopped_lock = threading.Lock()
         self.active = True
         self._closed = False
         self.control_thread = None
+        self.response_thread = None
+        self._control_consumer = None
+        self._response_consumer = None
 
-        # Procesados por cliente
-        self.processed_by_client = {}
-        self.forwarded_by_client = {}
-        self.forwarded_by_output_by_client = {}
-        self.closed_by_client = set()
-        self.control_responses_by_client = {}
-        self.all_processed_by_client = {}
-        self.all_forwarded_by_output_by_client = {}
-        self.flushed_acks_by_client = {}
+        # Logging-only (non-durable): marks the first chunk seen per client.
         self.first_data_logged_by_client = set()
         self.deserialized_by_client = {}
-        self.pending_eof_by_client = {}
+        self._q4_next_seq_by_client_partition = {}
+
+        # Outputs whose downstream consumer (a WAL-wired worker) deduplicates by
+        # (sender_id, seq): these edges carry addressed packets instead of basic ones.
+        # Every other output stays basic so its consumer is unaffected.
+        #   SUM_Q2_OUTPUT / SUM_Q3_QUEUE   -> sum workers
+        #   FILTER_Q5_USD_QUEUE            -> filter_q5_usd
+        #   FILTER_Q1_QUEUE / FILTER_DATE_QUEUE -> downstream filters (this wiring)
+        self._addressed_outputs = {
+            SUM_Q2_OUTPUT, SUM_Q3_QUEUE, FILTER_Q5_USD_QUEUE,
+            FILTER_Q1_QUEUE, FILTER_DATE_QUEUE,
+        }
+        # The q4 entry (scatter_gather q4_filter) is WAL-wired and reads addressed
+        # packets, so the q4 edges (per-partition routing keys, or the plain mapper
+        # queue) must be addressed too — otherwise q4 hits a struct error and nacks.
+        if CONFIGURATION == C_DATE and DATE_ENABLE_Q4:
+            self._addressed_outputs.update(self._q4_filter_output_names())
+        # q3_barrier (candidates stream) is WAL-wired and reads addressed packets too.
+        if CONFIGURATION == C_DATE and DATE_ENABLE_Q3:
+            self._addressed_outputs.add(Q3_CANDIDATES_QUEUE)
+
+        # Monotonic seq per (output, client) for legacy addressed edges. Sharded
+        # filter/sum edges are handled by the durable SenderSequencer via
+        # _output_edges.
+        self._sum_seq_lock = threading.Lock()
+        self._sum_seq_by_output_client: dict[tuple[str, int], int] = {}
+
+    def _build_output_edges(self) -> dict[str, EdgeSpec]:
+        edges: dict[str, EdgeSpec] = {}
+        if CONFIGURATION == C_Q5:
+            edges[FILTER_Q5_USD_QUEUE] = EdgeSpec(ID, FILTER_Q5_USD_AMOUNT)
+        if CONFIGURATION == C_USD:
+            if USD_ENABLE_Q1:
+                edges[FILTER_Q1_QUEUE] = EdgeSpec(ID, FILTER_Q1_AMOUNT)
+            if USD_ENABLE_Q2:
+                edges[SUM_Q2_OUTPUT] = EdgeSpec(ID, SUM_Q2_AMOUNT)
+            if USD_ENABLE_DATE:
+                edges[FILTER_DATE_QUEUE] = EdgeSpec(ID, FILTER_DATE_AMOUNT)
+        if CONFIGURATION == C_DATE and DATE_ENABLE_Q3:
+            edges[SUM_Q3_QUEUE] = EdgeSpec(ID, SUM_Q3_AMOUNT)
+            edges[Q3_CANDIDATES_QUEUE] = EdgeSpec(ID, Q3_BARRIER_AMOUNT)
+        if CONFIGURATION == C_DATE and DATE_ENABLE_Q4:
+            for output_name in self._q4_filter_output_names():
+                edges[output_name] = EdgeSpec(ID, 1)
+        return edges
+
+    # ─── connection factories ────────────────────────────────────────────────
+
+    def _new_control_senders(self) -> dict:
+        return {
+            self.coordinator.control_queue_for(i): middleware.LazyQueue(
+                MOM_HOST, self.coordinator.control_queue_for(i)
+            )
+            for i in range(FILTER_AMOUNT)
+        }
+
+    def _new_response_senders(self) -> dict:
+        return {
+            self.coordinator.response_queue_for(i): middleware.LazyQueue(
+                MOM_HOST, self.coordinator.response_queue_for(i)
+            )
+            for i in range(FILTER_AMOUNT)
+        }
 
     def _new_output_queues(self):
         output_queues = {}
         if CONFIGURATION == C_Q1:
-            # Filtro Q1: la salida es el gateway para devolver datos al cliente
             output_queues[GATEWAY_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
                 MOM_HOST, GATEWAY_QUEUE
             )
         if CONFIGURATION == C_Q5:
-            # Filtro Q5_PF: la salida es la queue para el filtro Q5_USD
-            output_queues[FILTER_Q5_USD_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                MOM_HOST, FILTER_Q5_USD_QUEUE
+            output_queues[FILTER_Q5_USD_QUEUE] = middleware.ShardedPublisher(
+                MOM_HOST,
+                FILTER_Q5_USD_EXCHANGE,
+                FILTER_Q5_USD_ROUTING_PREFIX,
+                FILTER_Q5_USD_AMOUNT,
+                key_fn=middleware.client_id_key,
             )
         if CONFIGURATION == C_USD:
-            # Para el filtro de tipo de moneda, se necesitan tres colas de salida:
-            #    - Una para el filtro de Q1
-            #    - Una para el sum de Q2
-            #    - Una para el filtro de rango de fechas
             if USD_ENABLE_Q1:
-                output_queues[FILTER_Q1_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                    MOM_HOST, FILTER_Q1_QUEUE
+                output_queues[FILTER_Q1_QUEUE] = middleware.ShardedPublisher(
+                    MOM_HOST,
+                    FILTER_Q1_EXCHANGE,
+                    FILTER_Q1_ROUTING_PREFIX,
+                    FILTER_Q1_AMOUNT,
+                    key_fn=middleware.client_id_key,
                 )
             if USD_ENABLE_Q2:
-                output_queues[SUM_Q2_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                    MOM_HOST, SUM_Q2_QUEUE
+                output_queues[SUM_Q2_OUTPUT] = middleware.ShardedPublisher(
+                    MOM_HOST,
+                    SUM_Q2_EXCHANGE,
+                    SUM_Q2_ROUTING_PREFIX,
+                    SUM_Q2_AMOUNT,
+                    key_fn=middleware.client_id_key,
                 )
             if USD_ENABLE_DATE:
-                output_queues[FILTER_DATE_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                    MOM_HOST, FILTER_DATE_QUEUE
+                output_queues[FILTER_DATE_QUEUE] = middleware.ShardedPublisher(
+                    MOM_HOST,
+                    FILTER_DATE_EXCHANGE,
+                    FILTER_DATE_ROUTING_PREFIX,
+                    FILTER_DATE_AMOUNT,
+                    key_fn=middleware.client_id_key,
                 )
         if CONFIGURATION == C_DATE:
             if DATE_ENABLE_Q4:
@@ -180,168 +303,92 @@ class FilterWorker:
                             )
                         )
                 else:
-                    output_queues[SCATTER_GATHER_MAPPER_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                        MOM_HOST, SCATTER_GATHER_MAPPER_QUEUE
+                    output_queues[SCATTER_GATHER_MAPPER_QUEUE] = (
+                        middleware.MessageMiddlewareQueueRabbitMQ(
+                            MOM_HOST, SCATTER_GATHER_MAPPER_QUEUE
+                        )
                     )
             if DATE_ENABLE_Q3:
-                output_queues[SUM_Q3_QUEUE] = middleware.MessageMiddlewareQueueRabbitMQ(
-                    MOM_HOST, SUM_Q3_QUEUE
+                output_queues[SUM_Q3_QUEUE] = middleware.ShardedPublisher(
+                    MOM_HOST,
+                    SUM_Q3_EXCHANGE,
+                    SUM_Q3_ROUTING_PREFIX,
+                    SUM_Q3_AMOUNT,
+                    key_fn=middleware.client_id_key,
                 )
-                # Q3 candidates: si hay sharding configurado, publish via
-                # ShardedByClientPublisher (transparente al resto del código).
-                # La key del dict se mantiene en Q3_CANDIDATES_QUEUE por
-                # compatibilidad con _publish_to_queue/_forward_eof.
-                if Q3_CANDIDATES_EXCHANGE and Q3_BARRIER_AMOUNT > 1:
-                    output_queues[Q3_CANDIDATES_QUEUE] = (
-                        middleware.ShardedByClientPublisher(
-                            MOM_HOST,
-                            Q3_CANDIDATES_EXCHANGE,
-                            Q3_CANDIDATES_ROUTING_PREFIX,
-                            Q3_BARRIER_AMOUNT,
-                        )
+                output_queues[Q3_CANDIDATES_QUEUE] = (
+                    middleware.ShardedByClientPublisher(
+                        MOM_HOST,
+                        Q3_CANDIDATES_EXCHANGE,
+                        Q3_CANDIDATES_ROUTING_PREFIX,
+                        Q3_BARRIER_AMOUNT,
                     )
-                else:
-                    output_queues[Q3_CANDIDATES_QUEUE] = (
-                        middleware.MessageMiddlewareQueueRabbitMQ(
-                            MOM_HOST, Q3_CANDIDATES_QUEUE
-                        )
-                    )
+                )
         return output_queues
 
-    def _new_control_output(self):
-        return middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, CONTROL_EXCHANGE, self.output_control_keys
+    # ─── helpers ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _input_routing_key() -> str:
+        return queue_name_for_worker(INPUT_ROUTING_PREFIX, ID)
+
+    @staticmethod
+    def _ensure_sharded_output_bindings(
+        exchange: str, routing_prefix: str, shard_count: int
+    ) -> None:
+        ensure_exchange_queue_bindings(
+            MOM_HOST,
+            exchange,
+            {
+                queue_name_for_worker(routing_prefix, index): queue_name_for_worker(
+                    routing_prefix, index
+                )
+                for index in range(shard_count)
+            },
         )
 
-    def _pass_eof_control_message(
-            self, client_id, expected_total, control_output=None
-    ):
-        '''
-        Envia un mensaje de control al lider indicando que se recibio un EOF para un cliente, 
-        con la cantidad total de mensajes que se esperan para ese cliente
-        '''
-        message = self.control_serializer.serialize(
-            message_protocol.internal.ControlMessage(
-                sender_id=ID,
-                expected_total=expected_total,
-                processed_count=0
+    def _ensure_output_bindings(self) -> None:
+        if CONFIGURATION == C_Q5:
+            self._ensure_sharded_output_bindings(
+                FILTER_Q5_USD_EXCHANGE,
+                FILTER_Q5_USD_ROUTING_PREFIX,
+                FILTER_Q5_USD_AMOUNT,
             )
-        )
-        message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.internal.MessageType.EOF_RECEIVED,
-            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
-            payload=message
-        )
-        (control_output or self.control_output).send(message)
-
-    def _answer_control_message(
-            self, client_id, expected_total, processed_count, control_output=None
-    ):
-        '''
-        Responde a una solicitud de control con un mensaje indicando
-        '''
-        message = self.control_serializer.serialize(
-            message_protocol.internal.ControlMessage(
-                sender_id=ID,
-                expected_total=expected_total,
-                processed_count=processed_count
+            return
+        if CONFIGURATION == C_USD:
+            if USD_ENABLE_Q1:
+                self._ensure_sharded_output_bindings(
+                    FILTER_Q1_EXCHANGE, FILTER_Q1_ROUTING_PREFIX, FILTER_Q1_AMOUNT
+                )
+            if USD_ENABLE_Q2:
+                self._ensure_sharded_output_bindings(
+                    SUM_Q2_EXCHANGE, SUM_Q2_ROUTING_PREFIX, SUM_Q2_AMOUNT
+                )
+            if USD_ENABLE_DATE:
+                self._ensure_sharded_output_bindings(
+                    FILTER_DATE_EXCHANGE,
+                    FILTER_DATE_ROUTING_PREFIX,
+                    FILTER_DATE_AMOUNT,
+                )
+            return
+        if CONFIGURATION == C_DATE and DATE_ENABLE_Q3:
+            self._ensure_sharded_output_bindings(
+                SUM_Q3_EXCHANGE, SUM_Q3_ROUTING_PREFIX, SUM_Q3_AMOUNT
             )
-        )
-        message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.internal.MessageType.PROCESSED_ANSWER,
-            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
-            payload=message
-        )
-        (control_output or self.control_output).send(message)
-
-    def _request_control_message(self, client_id, expected_total, control_output=None):
-        '''
-        Envia un mensaje de control a los workers correspondientes solicitando informacion de cuantos mensajes han procesado
-        '''
-        message = self.control_serializer.serialize(
-            message_protocol.internal.ControlMessage(
-                sender_id=ID,
-                expected_total=expected_total,
-                processed_count=0
+            self._ensure_sharded_output_bindings(
+                Q3_CANDIDATES_EXCHANGE,
+                Q3_CANDIDATES_ROUTING_PREFIX,
+                Q3_BARRIER_AMOUNT,
             )
-        )
-        message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.internal.MessageType.PROCESSED_REQUEST,
-            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
-            payload=message
-        )
-        (control_output or self.control_output).send(message)
-
-    def _flush_control_message(self, client_id, control_output=None):
-        '''
-        Envia un mensaje de control a los workers correspondientes 
-        solicitando que liberen los recursos asociados a un cliente
-        '''
-        message  = self.control_serializer.serialize(
-            message_protocol.internal.ControlMessage(
-                sender_id=ID,
-                expected_total=0,
-                processed_count=0
+        if CONFIGURATION == C_DATE and DATE_ENABLE_Q4 and Q4_FILTER_INPUT_EXCHANGE:
+            self._ensure_sharded_output_bindings(
+                Q4_FILTER_INPUT_EXCHANGE,
+                Q4_FILTER_INPUT_ROUTING_PREFIX,
+                Q4_FILTER_AMOUNT,
             )
-        )
-        message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.internal.MessageType.FLUSH_ORDER,
-            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
-            payload=message
-        )
-        (control_output or self.control_output).send(message)
-
-    def _ack_flush_control_message(self, client_id, forwarded_by_output, control_output=None):
-        '''
-        Avisa al lider que se liberaron los recursos del cliente y le reporta los
-        conteos forwardeados por output de este filtro. El FLUSH_ACK lleva un
-        payload JSON (no ControlMessage) porque necesita el desglose por output,
-        que ControlMessage (3 enteros) no puede representar. Es interno al grupo
-        de filtros, asi que no afecta el protocolo de ningun otro worker.
-        '''
-        payload = json.dumps(
-            {"sender_id": ID, "forwarded_by_output": forwarded_by_output}
-        ).encode("utf-8")
-        message = self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.internal.MessageType.FLUSH_ACK,
-            client_id_bytes=client_id.to_bytes(16, byteorder='big'),
-            payload=payload
-        )
-        (control_output or self.control_output).send(message)
-
-    def _cleanup_client(self, client_id):
-        '''
-        Elimina toda la informacion asociada a un cliente, cerrando su procesamiento
-        '''
-        if self._batcher is not None:
-            self._batcher.discard_client(client_id)
-        with self.lock:
-            if client_id in self.processed_by_client:
-                del self.processed_by_client[client_id]
-            if client_id in self.forwarded_by_client:
-                del self.forwarded_by_client[client_id]
-            if client_id in self.forwarded_by_output_by_client:
-                del self.forwarded_by_output_by_client[client_id]
-            if client_id in self.all_processed_by_client:
-                del self.all_processed_by_client[client_id]
-            if client_id in self.all_forwarded_by_output_by_client:
-                del self.all_forwarded_by_output_by_client[client_id]
-            if client_id in self.control_responses_by_client:
-                del self.control_responses_by_client[client_id]
-            if client_id in self.flushed_acks_by_client:
-                del self.flushed_acks_by_client[client_id]
-            self.pending_eof_by_client.pop(client_id, None)
-            self.closed_by_client.add(client_id)
-    
-    def _record_forwarded_output(self, client_id: int, output_name: str):
-        if client_id not in self.forwarded_by_output_by_client:
-            self.forwarded_by_output_by_client[client_id] = {}
-        if output_name not in self.forwarded_by_output_by_client[client_id]:
-            self.forwarded_by_output_by_client[client_id][output_name] = 0
-        self.forwarded_by_output_by_client[client_id][output_name] += 1
 
     def _q4_filter_routing_key(self, partition: int) -> str:
-        return f"{Q4_FILTER_INPUT_ROUTING_PREFIX}_{partition}"
+        return queue_name_for_worker(Q4_FILTER_INPUT_ROUTING_PREFIX, partition)
 
     def _q4_filter_output_names(self) -> list[str]:
         if not Q4_FILTER_INPUT_EXCHANGE:
@@ -351,10 +398,7 @@ class FilterWorker:
             for partition in range(Q4_FILTER_AMOUNT)
         ]
 
-    def _q4_filter_output_for_transaction(
-        self,
-        transaction: Transaction,
-    ) -> str:
+    def _q4_filter_output_for_transaction(self, transaction: Transaction) -> str:
         if not Q4_FILTER_INPUT_EXCHANGE:
             return SCATTER_GATHER_MAPPER_QUEUE
         partition = partition_for_parts(
@@ -366,207 +410,253 @@ class FilterWorker:
         )
         return self._q4_filter_routing_key(partition)
 
-    def _data_packet(self, client_id: int, payload: bytes) -> bytes:
+    def _is_q4_filter_exchange_output(self, queue_name: str) -> bool:
+        return (
+            CONFIGURATION == C_DATE
+            and DATE_ENABLE_Q4
+            and bool(Q4_FILTER_INPUT_EXCHANGE)
+            and queue_name in self._q4_filter_output_names()
+        )
+
+    def _q4_filter_partition_from_output(self, queue_name: str) -> int:
+        for partition in range(Q4_FILTER_AMOUNT):
+            if queue_name == self._q4_filter_routing_key(partition):
+                return partition
+        raise ValueError(f"unknown q4 filter output queue: {queue_name!r}")
+
+    def _q4_addressed_packet(
+        self,
+        msg_type: MessageType,
+        client_id: int,
+        partition: int,
+        payload: bytes,
+    ) -> bytes:
+        seq_key = (client_id, partition)
+        seq = self._q4_next_seq_by_client_partition.get(seq_key, 0)
+        self._q4_next_seq_by_client_partition[seq_key] = seq + 1
+        return self.internal_packet_serializer.create_addressed_packet(
+            msg_type=msg_type,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            sender_id=ID,
+            seq=seq,
+            payload=payload,
+        )
+
+    def _next_sum_seq(self, output_name: str, client_id: int) -> int:
+        with self._sum_seq_lock:
+            key = (output_name, client_id)
+            seq = self._sum_seq_by_output_client.get(key, 0)
+            self._sum_seq_by_output_client[key] = (seq + 1) & 0xFFFFFFFF
+            return seq
+
+    def _output_shard(self, output_name: str, client_id: int) -> int | None:
+        if output_name not in self._output_edges:
+            return None
+        return shard_for_client_id(client_id, self._output_edges[output_name].shard_count)
+
+    def _logical_output(self, output_name: str, client_id: int, packet: bytes) -> tuple:
+        shard = self._output_shard(output_name, client_id)
+        if shard is None:
+            return (output_name, packet)
+        return (output_name, packet, shard)
+
+    def _output_packet(
+        self,
+        output_name: str,
+        msg_type,
+        client_id: int,
+        payload: bytes,
+    ) -> bytes:
+        # Sharded filter/sum edges are stamped by PersistentStateHandler's durable
+        # SenderSequencer. q4 filter exchange edges are still pre-addressed per
+        # (client, partition); remaining addressed edges keep the existing
+        # in-memory sequence behavior.
+        if output_name in self._output_edges:
+            return self.internal_packet_serializer.create_packet(
+                msg_type=msg_type,
+                client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+                payload=payload,
+            )
+        if self._is_q4_filter_exchange_output(output_name):
+            return self._q4_addressed_packet(
+                msg_type,
+                client_id,
+                self._q4_filter_partition_from_output(output_name),
+                payload,
+            )
+        if output_name in self._addressed_outputs:
+            return self.internal_packet_serializer.create_addressed_packet(
+                msg_type=msg_type,
+                client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+                sender_id=ID,
+                seq=self._next_sum_seq(output_name, client_id),
+                payload=payload,
+            )
         return self.internal_packet_serializer.create_packet(
-            msg_type=message_protocol.internal.MessageType.DATA,
+            msg_type=msg_type,
             client_id_bytes=client_id.to_bytes(16, byteorder="big"),
             payload=payload,
         )
 
-    def _publish_to_queue(
-        self, queue_name: str, client_id: int, transaction: Transaction,
-        output_queues=None,
-    ) -> None:
-        output_queues = output_queues or self.output_queues
-        if self._batcher is not None:
-            batch_payload = self._batcher.append(queue_name, client_id, transaction)
-            if batch_payload is not None:
-                output_queues[queue_name].send(
-                    self._data_packet(client_id, batch_payload)
-                )
-            return
-        payload = self.transaction_serializer.serialize(transaction)
-        output_queues[queue_name].send(self._data_packet(client_id, payload))
-
-    def _flush_batcher_for_client(self, client_id: int, output_queues=None) -> None:
-        if self._batcher is None:
-            return
-        output_queues = output_queues or self.output_queues
-        for queue_name, payload in self._batcher.drain_client(client_id).items():
-            output_queues[queue_name].send(self._data_packet(client_id, payload))
-            logging.info(
-                "filter_batcher_flush | filter=%s | id=%s | client_id=%s | "
-                "queue=%s | bytes=%s",
-                CONFIGURATION, ID, client_id, queue_name, len(payload),
-            )
-
-    def _forward_transaction(self, transaction: Transaction, client_id: int, output_queues=None):
-        '''
-        Envia una transaccion a la(s) cola(s) de salida segun la configuracion.
-        Devuelve True si fue forwardeada a al menos una cola.
-        '''
-        logging.debug(
-            f"Transaction {transaction} passed filter in filter_{CONFIGURATION} "
-            f"with id {ID}, forwarding to output"
-        )
-        sent = False
+    def _route_transaction(self, transaction: Transaction) -> list[tuple[str, str]]:
+        """(destination, logical_output) pairs this transaction is forwarded to,
+        under the current CONFIGURATION. Empty if filtered out. Destination is the
+        routing target; logical_output is the EOF/forwarded accounting bucket. They
+        differ only for sharded q4 (per-partition destinations roll up to
+        Q4_FILTER_OUTPUT). Mirrors the old _forward_transaction routing exactly."""
         if CONFIGURATION == C_Q1:
-            self._publish_to_queue(GATEWAY_QUEUE, client_id, transaction, output_queues)
-            with self.lock:
-                self._record_forwarded_output(client_id, GATEWAY_QUEUE)
-            sent = True
+            return [(GATEWAY_QUEUE, GATEWAY_QUEUE)] if self._filter_transaction(transaction) else []
         if CONFIGURATION == C_Q5:
-            self._publish_to_queue(FILTER_Q5_USD_QUEUE, client_id, transaction, output_queues)
-            with self.lock:
-                self._record_forwarded_output(client_id, FILTER_Q5_USD_QUEUE)
-            sent = True
+            return (
+                [(FILTER_Q5_USD_QUEUE, FILTER_Q5_USD_QUEUE)]
+                if self._filter_transaction(transaction) else []
+            )
         if CONFIGURATION == C_USD:
+            if not self._filter_transaction(transaction):
+                return []
+            outs = []
             if USD_ENABLE_Q1:
-                self._publish_to_queue(FILTER_Q1_QUEUE, client_id, transaction, output_queues)
-                with self.lock:
-                    self._record_forwarded_output(client_id, FILTER_Q1_QUEUE)
-                sent = True
+                outs.append((FILTER_Q1_QUEUE, FILTER_Q1_QUEUE))
             if USD_ENABLE_Q2:
-                self._publish_to_queue(SUM_Q2_QUEUE, client_id, transaction, output_queues)
-                with self.lock:
-                    self._record_forwarded_output(client_id, SUM_Q2_QUEUE)
-                sent = True
+                outs.append((SUM_Q2_OUTPUT, SUM_Q2_OUTPUT))
             if USD_ENABLE_DATE:
-                self._publish_to_queue(FILTER_DATE_QUEUE, client_id, transaction, output_queues)
-                with self.lock:
-                    self._record_forwarded_output(client_id, FILTER_DATE_QUEUE)
-                sent = True
+                outs.append((FILTER_DATE_QUEUE, FILTER_DATE_QUEUE))
+            return outs
         if CONFIGURATION == C_DATE:
+            outs = []
             if DATE_ENABLE_Q3 and self._filter_transaction_by_raw_timestamp(
-                transaction,
-                start_timestamp="2022/09/01",
-                end_timestamp="2022/09/06",
+                transaction, "2022/09/01", "2022/09/06"
             ):
-                self._publish_to_queue(SUM_Q3_QUEUE, client_id, transaction, output_queues)
-                with self.lock:
-                    self._record_forwarded_output(client_id, SUM_Q3_QUEUE)
-                sent = True
+                outs.append((SUM_Q3_QUEUE, SUM_Q3_QUEUE))
             if DATE_ENABLE_Q3 and self._filter_transaction_by_raw_timestamp(
-                transaction,
-                start_timestamp="2022/09/06",
-                end_timestamp="2022/09/15",
+                transaction, "2022/09/06", "2022/09/15"
             ):
-                self._publish_to_queue(Q3_CANDIDATES_QUEUE, client_id, transaction, output_queues)
-                with self.lock:
-                    self._record_forwarded_output(client_id, Q3_CANDIDATES_QUEUE)
-                sent = True
+                outs.append((Q3_CANDIDATES_QUEUE, Q3_CANDIDATES_QUEUE))
             if DATE_ENABLE_Q4 and self._filter_transaction_by_raw_timestamp(
-                transaction,
-                start_timestamp="2022/09/01",
-                end_timestamp="2022/09/06",
+                transaction, "2022/09/01", "2022/09/06"
             ):
-                q4_output = self._q4_filter_output_for_transaction(
-                    transaction
+                dest = self._q4_filter_output_for_transaction(transaction)
+                logical = (
+                    Q4_FILTER_OUTPUT if Q4_FILTER_INPUT_EXCHANGE
+                    else SCATTER_GATHER_MAPPER_QUEUE
                 )
-                self._publish_to_queue(q4_output, client_id, transaction, output_queues)
-                with self.lock:
-                    self._record_forwarded_output(
-                        client_id,
-                        (
-                            Q4_FILTER_OUTPUT
-                            if Q4_FILTER_INPUT_EXCHANGE
-                            else SCATTER_GATHER_MAPPER_QUEUE
-                        ),
-                    )
-                sent = True
-        return sent
+                outs.append((dest, logical))
+            return outs
+        return []
 
-    def _forward_eof(self, client_id: int, forwarded_by_output: dict, output_queues=None):
-        '''
-        Envia un mensaje de EOF a la cola de salida correspondiente segun la
-        configuracion del worker. Cada EOF lleva el conteo GLOBAL de transacciones
-        forwardeadas a ESE output (forwarded_by_output[queue]). Para Q1/Q5/USD ese
-        conteo coincide con el total (cada tx que pasa va a todos sus outputs), asi
-        que el comportamiento no cambia; para DATE cada output recibe su propio
-        conteo, que es lo que el sum/mapper/barrier necesitan para cerrar.
-        '''
-        def count(queue: str) -> int:
-            return int(forwarded_by_output.get(queue, 0))
-        def eof_packet(total: int):
-            message = self.control_serializer.serialize(
-                message_protocol.internal.ControlMessage(
-                    sender_id=ID,
-                    expected_total=total,
-                    processed_count=0
-                )
-            )
-            return self.internal_packet_serializer.create_packet(
-                msg_type=message_protocol.internal.MessageType.EOF,
-                client_id_bytes=client_id.to_bytes(16, byteorder='big'),
-                payload=message
-            )
+    def _abort_fn(self, client_id: int) -> tuple[dict, list]:
+        change = FilterState.abort_change(client_id)
+        return change, self._downstream_abort_outputs(client_id)
 
-        output_queues = output_queues or self.output_queues
-        if CONFIGURATION == C_Q1:
-            expected_total = count(GATEWAY_QUEUE)
-            output_queues[GATEWAY_QUEUE].send(eof_packet(expected_total))
-            self._log_forwarded_eof(client_id, GATEWAY_QUEUE, expected_total)
-        if CONFIGURATION == C_Q5:
-            expected_total = count(FILTER_Q5_USD_QUEUE)
-            output_queues[FILTER_Q5_USD_QUEUE].send(eof_packet(expected_total))
-            self._log_forwarded_eof(client_id, FILTER_Q5_USD_QUEUE, expected_total)
-        if CONFIGURATION == C_USD:
-            if USD_ENABLE_Q1:
-                expected_total = count(FILTER_Q1_QUEUE)
-                output_queues[FILTER_Q1_QUEUE].send(eof_packet(expected_total))
-                self._log_forwarded_eof(client_id, FILTER_Q1_QUEUE, expected_total)
-            if USD_ENABLE_Q2:
-                expected_total = count(SUM_Q2_QUEUE)
-                output_queues[SUM_Q2_QUEUE].send(eof_packet(expected_total))
-                self._log_forwarded_eof(client_id, SUM_Q2_QUEUE, expected_total)
-            if USD_ENABLE_DATE:
-                expected_total = count(FILTER_DATE_QUEUE)
-                output_queues[FILTER_DATE_QUEUE].send(eof_packet(expected_total))
-                self._log_forwarded_eof(client_id, FILTER_DATE_QUEUE, expected_total)
-        if CONFIGURATION == C_DATE:
-            if DATE_ENABLE_Q3:
-                expected_total = count(SUM_Q3_QUEUE)
-                output_queues[SUM_Q3_QUEUE].send(eof_packet(expected_total))
-                self._log_forwarded_eof(client_id, SUM_Q3_QUEUE, expected_total)
-                expected_total = count(Q3_CANDIDATES_QUEUE)
-                output_queues[Q3_CANDIDATES_QUEUE].send(eof_packet(expected_total))
-                self._log_forwarded_eof(
-                    client_id, Q3_CANDIDATES_QUEUE, expected_total
-                )
-            if DATE_ENABLE_Q4:
-                if Q4_FILTER_INPUT_EXCHANGE:
-                    expected_total = count(Q4_FILTER_OUTPUT)
-                    for output_name in self._q4_filter_output_names():
-                        output_queues[output_name].send(eof_packet(expected_total))
-                        self._log_forwarded_eof(
-                            client_id, output_name, expected_total
-                        )
-                else:
-                    expected_total = count(SCATTER_GATHER_MAPPER_QUEUE)
-                    output_queues[SCATTER_GATHER_MAPPER_QUEUE].send(
-                        eof_packet(expected_total)
-                    )
-                    self._log_forwarded_eof(
-                        client_id, SCATTER_GATHER_MAPPER_QUEUE, expected_total
-                    )
-
-    def _log_forwarded_eof(self, client_id: int, output_name: str, expected_total: int):
-        logging.info(
-            "filter_forward_eof | filter=%s | id=%s | client_id=%s | "
-            "output=%s | expected_total=%s",
-            CONFIGURATION,
-            ID,
-            client_id,
-            output_name,
-            expected_total,
+    def _downstream_abort_outputs(self, client_id: int) -> list:
+        packet = self.internal_packet_serializer.create_packet(
+            msg_type=MessageType.ABORT,
+            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+            payload=b"",
         )
+        return [
+            (edge, packet, shard)
+            for edge, spec in self._output_edges.items()
+            for shard in range(spec.shard_count)
+        ]
 
-    
+    def _data_process_payload(self, client_id: int, payload: bytes):
+        """business_fn for a DATA batch (runs inside the durable handler, NEW only):
+        filter + route each transaction, append the passing ones to the durable
+        buffer (predicted via plan_data so the flushed batches can be stamped into
+        the outbox), and return (data_change, outputs). Pure w.r.t. worker state —
+        apply_change performs the real buffer append, so WAL replay reproduces it."""
+        if self._state.is_closed(client_id):
+            return FilterState.data_change(client_id, 0, {}, {}), []
+        transactions = self.transaction_serializer.deserialize_batch(payload)
+        if not transactions:
+            return FilterState.data_change(client_id, 0, {}, {}), []
+
+        if client_id not in self.first_data_logged_by_client:
+            self.first_data_logged_by_client.add(client_id)
+            logging.info(
+                "filter_first_chunk_received | filter=%s | id=%s | client_id=%s | "
+                "batch_size=%s", CONFIGURATION, ID, client_id, len(transactions),
+            )
+
+        appends_by_dest: dict[str, list[bytes]] = {}
+        forwarded_by_output: dict[str, int] = {}
+        for transaction in transactions:
+            routes = self._route_transaction(transaction)
+            if not routes:
+                continue
+            serialized = self.transaction_serializer.serialize(transaction)
+            for dest, logical in routes:
+                appends_by_dest.setdefault(dest, []).append(serialized)
+                forwarded_by_output[logical] = forwarded_by_output.get(logical, 0) + 1
+
+        # plan_data predicts the flushes WITHOUT mutating; apply_change does the
+        # real append under the same lock, matching these batches exactly.
+        flushed_by_dest = self._state.plan_data(client_id, appends_by_dest)
+        outputs = [
+            self._logical_output(
+                dest,
+                client_id,
+                self._output_packet(dest, MessageType.DATA, client_id, batch),
+            )
+            for dest, batches in flushed_by_dest.items()
+            for batch in batches
+        ]
+
+        change = FilterState.data_change(
+            client_id, len(transactions), appends_by_dest, forwarded_by_output
+        )
+        return change, outputs
+
+    def _eof_outputs(self, client_id: int, counts_by_output: dict) -> list:
+        """Logical EOF outputs for this config: one EOF per downstream output
+        carrying that output's forwarded total. Sharded q4 fans the logical total
+        out to every partition destination (matches the old _forward_eof)."""
+        def count(name: str) -> int:
+            return int(counts_by_output.get(name, 0))
+
+        def eof(dest: str, total: int):
+            payload = self.control_serializer.serialize(
+                message_protocol.internal.ControlMessage(
+                    sender_id=ID, expected_total=total, processed_count=0
+                )
+            )
+            # _output_packet wraps addressed edges (SUM / filter / q5 / q4) with a
+            # seq after the data seqs; every other edge stays basic.
+            return self._logical_output(
+                dest,
+                client_id,
+                self._output_packet(dest, MessageType.EOF, client_id, payload),
+            )
+
+        if CONFIGURATION == C_Q1:
+            return [eof(GATEWAY_QUEUE, count(GATEWAY_QUEUE))]
+        if CONFIGURATION == C_Q5:
+            return [eof(FILTER_Q5_USD_QUEUE, count(FILTER_Q5_USD_QUEUE))]
+        if CONFIGURATION == C_USD:
+            outs = []
+            if USD_ENABLE_Q1:
+                outs.append(eof(FILTER_Q1_QUEUE, count(FILTER_Q1_QUEUE)))
+            if USD_ENABLE_Q2:
+                outs.append(eof(SUM_Q2_OUTPUT, count(SUM_Q2_OUTPUT)))
+            if USD_ENABLE_DATE:
+                outs.append(eof(FILTER_DATE_QUEUE, count(FILTER_DATE_QUEUE)))
+            return outs
+        if CONFIGURATION == C_DATE:
+            outs = []
+            if DATE_ENABLE_Q3:
+                outs.append(eof(SUM_Q3_QUEUE, count(SUM_Q3_QUEUE)))
+                outs.append(eof(Q3_CANDIDATES_QUEUE, count(Q3_CANDIDATES_QUEUE)))
+            if DATE_ENABLE_Q4:
+                total = (
+                    count(Q4_FILTER_OUTPUT) if Q4_FILTER_INPUT_EXCHANGE
+                    else count(SCATTER_GATHER_MAPPER_QUEUE)
+                )
+                outs.extend(eof(dest, total) for dest in self._q4_filter_output_names())
+            return outs
+        return []
+
     def _filter_transaction(self, transaction: Transaction, start_date=None, end_date=None):
-        '''
-        Aplica el filtro correspondiente a la configuracion de este worker a una transaccion,
-        devolviendo True si la transaccion pasa el filtro y False en caso contrario
-        '''
         if CONFIGURATION == C_Q1:
             return transaction < 50
         if CONFIGURATION == C_Q5:
@@ -587,411 +677,512 @@ class FilterWorker:
         # Notebook query windows compare the raw Timestamp string directly.
         timestamp = transaction.date.strip()
         return start_timestamp <= timestamp <= end_timestamp
-    
-    
-    def _process_data_message(self, message):
-        '''
-        Procesa un mensaje de la cola de entrada, aplicando el filtro correspondiente a la
-        configuracion de este worker y reenviando la transaccion a la cola de salida correspondiente 
-        si la transaccion pasa el filtro
-        '''
-        msg_type, client_id, payload = self.internal_packet_serializer.unpack_packet(message)
 
+    def _do_broadcast(self, action: BroadcastAction, control_senders: dict) -> None:
+        if action.sleep_before > 0:
+            time.sleep(action.sleep_before)
+        for qname in action.queue_names:
+            control_senders[qname].send(action.message)
+
+    @staticmethod
+    def _close_queue_dict(queues: dict) -> None:
+        for q in queues.values():
+            try:
+                q.close()
+            except Exception:
+                pass
+
+    # ─── data path ───────────────────────────────────────────────────────────
+
+    def _publish_outputs(self, entries, publishers: dict) -> None:
+        """Publish stamped outbox entries, resolving each destination name against
+        the given per-thread publishers map."""
+        for entry in entries:
+            publisher = publishers.get(entry.destination)
+            if publisher is None:
+                raise KeyError(f"no publisher for destination {entry.destination!r}")
+            if entry.shard is None:
+                publisher.send(entry.body)
+            else:
+                publisher.send_to_shard(entry.body, entry.shard)
+
+    def _publish_commit_ack(self, instruction, ack, publishers: dict) -> bool:
+        """Publish outputs, commit, ack. A duplicate/replayed input the inbox
+        already finished comes back as Action.ACK with ctx=None — just ack it;
+        never commit_done(*None). Crash-recovery path."""
+        if instruction.action is Action.ACK:
+            ack()
+            return False
+        self._publish_outputs(instruction.outputs, publishers)
         with self.lock:
-            if client_id in self.closed_by_client:
-                # Si el cliente ya fue cerrado, no procesamos mas mensajes de ese cliente
-                logging.info(f"Received message for closed client {client_id} in filter_{CONFIGURATION} with id {ID}, ignoring")
-                return
+            self._handler.commit_done(*instruction.ctx)
+        ack()
+        return True
 
-        if msg_type == message_protocol.internal.MessageType.DATA:
-            transactions = self.transaction_serializer.deserialize_batch(payload)
-            if not transactions:
-                return
+    def _drain_outputs(self, client_id: int) -> list:
+        """DATA outputs for the buffer's leftover batches per destination (read-only
+        plan_drain; the close change discards the buffer in apply_change)."""
+        return [
+            self._logical_output(
+                dest,
+                client_id,
+                self._output_packet(dest, MessageType.DATA, client_id, batch),
+            )
+            for dest, batch in self._state.plan_drain(client_id).items()
+        ]
 
-            with self.lock:
-                if client_id not in self.first_data_logged_by_client:
-                    self.first_data_logged_by_client.add(client_id)
-                    logging.info(
-                        "filter_first_chunk_received | filter=%s | id=%s | "
-                        "client_id=%s | message_bytes=%s | payload_bytes=%s | "
-                        "batch_size=%s",
-                        CONFIGURATION,
-                        ID,
-                        client_id,
-                        len(message),
-                        len(payload),
-                        len(transactions),
-                    )
-                prev_deserialized = self.deserialized_by_client.get(client_id, 0)
-                self.deserialized_by_client[client_id] = (
-                    prev_deserialized + len(transactions)
-                )
+    def _on_input_message(self, message, ack, nack):
+        """Dispatch by type: DATA through the durable runner; upstream EOF drives
+        the broadcast coordinator (WAL-tracked)."""
+        if not message:
+            logging.error("filter_empty_message | filter=%s | id=%s", CONFIGURATION, ID)
+            nack(requeue=False)
+            return
+        msg_type = message[0]
+        if msg_type == MessageType.DATA:
+            self._runner.process(message, ack, nack)
+        elif msg_type == MessageType.EOF:
+            self._handle_upstream_eof(message, ack, nack)
+        elif msg_type == MessageType.ABORT:
+            self._runner.process(message, ack, nack)
+        else:
+            logging.warning(
+                "filter_unknown_message_type | filter=%s | id=%s | type=%s",
+                CONFIGURATION, ID, msg_type,
+            )
+            nack(requeue=False)
 
-            for offset, transaction in enumerate(transactions, start=1):
-                tx_number = prev_deserialized + offset
-                if tx_number <= 3:
-                    logging.info(
-                        "filter_transaction_deserialized | filter=%s | id=%s | "
-                        "client_id=%s | transaction_number=%s | date=%s | "
-                        "from_bank=%s | from_account=%s | to_bank=%s | "
-                        "to_account=%s | amount=%s | currency=%s | format=%s",
-                        CONFIGURATION,
-                        ID,
-                        client_id,
-                        tx_number,
-                        transaction.date,
-                        transaction.from_bank,
-                        transaction.from_account,
-                        transaction.to_bank,
-                        transaction.to_account,
-                        transaction.amount,
-                        transaction.currency,
-                        transaction.format,
-                    )
-                if tx_number == 3:
-                    logging.info(
-                        "==================== Forward pass successful - Mate | "
-                        "filter=%s | id=%s | client_id=%s | "
-                        "transactions_deserialized=%s ====================",
-                        CONFIGURATION,
-                        ID,
-                        client_id,
-                        tx_number,
-                    )
-
-            forwarded_in_batch = 0
-            for transaction in transactions:
-                if CONFIGURATION == C_DATE or self._filter_transaction(transaction):
-                    if self._forward_transaction(transaction, client_id):
-                        forwarded_in_batch += 1
+    def _handle_upstream_eof(self, message, ack, nack):
+        """Upstream EOF (addressed) through the handler as a durable input
+        (kind=DATA): on_upstream_eof is idempotent so apply_change replays it.
+        N>1 broadcasts EOF_RECEIVED; N=1 flushes the buffer + downstream EOF +
+        close. Outputs ride the outbox and are re-published on recovery."""
+        try:
+            _msg_type, client_id, sender_id, seq, payload = (
+                self.internal_packet_serializer.unpack_addressed_packet(message)
+            )
+            ctrl = self.control_serializer.deserialize(payload)
+            expected_total = ctrl.expected_total
+            msg_id = f"d:{sender_id}:{client_id}:{seq}"
 
             with self.lock:
-                self.forwarded_by_client[client_id] = (
-                    self.forwarded_by_client.get(client_id, 0) + forwarded_in_batch
+                status = self._handler.inbox.classify(client_id, sender_id, seq)
+                if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
+                    ack()
+                    return
+                count = self._state.processed_count(client_id)
+
+                def bfn(_pl):
+                    eof_change = FilterState.coordinator_upstream_eof_change(
+                        client_id, expected_total, count, count
+                    )
+                    if FILTER_AMOUNT > 1:
+                        msg = self.internal_packet_serializer.create_packet(
+                            msg_type=MessageType.EOF_RECEIVED,
+                            client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+                            payload=self.control_serializer.serialize(
+                                message_protocol.internal.ControlMessage(
+                                    sender_id=ID, expected_total=expected_total,
+                                    processed_count=0,
+                                )
+                            ),
+                        )
+                        outputs = [
+                            (self.coordinator.control_queue_for(i), msg)
+                            for i in range(FILTER_AMOUNT)
+                        ]
+                        return eof_change, outputs
+                    # N==1: flush the buffer + downstream EOF, then close.
+                    outputs = self._drain_outputs(client_id)
+                    outputs += self._eof_outputs(
+                        client_id, self._state.forwarded_by_output(client_id)
+                    )
+                    compound = FilterState.compound_change(
+                        eof_change, FilterState.close_change(client_id)
+                    )
+                    return compound, outputs
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, sender_id, seq, payload, bfn
                 )
-                self.processed_by_client[client_id] = (
-                    self.processed_by_client.get(client_id, 0) + len(transactions)
-                )
-                processed_total = self.processed_by_client[client_id]
-                forwarded_total = self.forwarded_by_client[client_id]
 
-            if should_log_progress(processed_total):
-                logging.info(
-                    "filter_data_batch | filter=%s | id=%s | client_id=%s | "
-                    "batch_size=%s | forwarded_in_batch=%s | processed_total=%s | "
-                    "forwarded_total=%s",
-                    CONFIGURATION,
-                    ID,
-                    client_id,
-                    len(transactions),
-                    forwarded_in_batch,
-                    processed_total,
-                    forwarded_total,
-                )
-
-            # Si habia un EOF pendiente (caso un unico filtro), intentar cerrarlo
-            # ahora que se procesaron mensajes adicionales.
-            if FILTER_AMOUNT == 1:
-                self._try_forward_single_filter_eof(client_id)
-
-        elif msg_type == message_protocol.internal.MessageType.EOF:
-            # Cuando recibimos un EOF:
-            # - Si se es el lider, se le avisa a los demas workers que se recibio un EOF 
-            #     para este cliente y cuantos mensajes se esperan en total, para que ellos puedan 
-            #     responder con su conteo de procesados
-            # - Si no se es el lider, se le avisa al lider que se recibio un EOF para este cliente y 
-            #     cuantos mensajes se esperan en total, para que el lider pueda solicitar el 
-            #     conteo de procesados a los demas workers            
-            control_message = self.control_serializer.deserialize(payload)
-            expected_total = control_message.expected_total
-
+            self._publish_commit_ack(instruction, ack, self._data_publishers)
             logging.info(
                 "filter_upstream_eof | filter=%s | id=%s | client_id=%s | "
-                "expected_total=%s | leader=%s | filter_amount=%s",
-                CONFIGURATION,
-                ID,
-                client_id,
-                expected_total,
-                self.is_leader,
-                FILTER_AMOUNT,
+                "expected_total=%s | local_count=%s",
+                CONFIGURATION, ID, client_id, expected_total, count,
             )
-            
-            if self.is_leader and FILTER_AMOUNT == 1:
-                # No cerrar al llegar el EOF: registrar el expected_total y cerrar
-                # recien cuando se hayan procesado todos los mensajes esperados
-                # (pueden seguir llegando DATA de file_ingestors mas lentos).
+        except Exception:
+            logging.exception(
+                "filter_upstream_eof_error | filter=%s | id=%s", CONFIGURATION, ID
+            )
+            nack(requeue=True)
+
+    # ─── control path ────────────────────────────────────────────────────────
+
+    def _handle_control(self, message, ack, nack, publishers, response_senders):
+        try:
+            msg_type, client_id, ctrl = self.coordinator.parse_message(message)
+        except Exception:
+            logging.exception("filter_control_parse_error | filter=%s | id=%s", CONFIGURATION, ID)
+            nack(requeue=False)
+            return
+
+        if msg_type == MessageType.FLUSH_ORDER:
+            self._handle_flush_order(message, client_id, ctrl, ack, nack, publishers)
+            return
+        if msg_type == MessageType.EOF_RECEIVED:
+            self._handle_eof_received(message, client_id, ctrl, ack, nack, publishers)
+            return
+        if msg_type == MessageType.PROCESSED_REQUEST:
+            # Direct re-report (no state mutation); count from durable WAL state.
+            try:
                 with self.lock:
-                    self.pending_eof_by_client[client_id] = expected_total
-                self._try_forward_single_filter_eof(client_id)
-            elif self.is_leader:
-                self._request_control_message(client_id, expected_total)
-            else:
-                self._pass_eof_control_message(client_id, expected_total)
-        
-        else:
-            logging.warning(f"Received unknown message type: {msg_type} for filter_{CONFIGURATION}")
-
-    def _try_forward_single_filter_eof(self, client_id):
-        '''
-        Caso FILTER_AMOUNT == 1: reenvia el EOF y limpia el cliente solo cuando ya
-        se procesaron todos los mensajes esperados (processed_count >= expected_total).
-        Usa >= (no ==) para que un mensaje reentregado no impida nunca el cierre.
-        No bloquea: se invoca tras cada DATA y al recibir el EOF.
-        '''
-        with self.lock:
-            expected_total = self.pending_eof_by_client.get(client_id)
-            if expected_total is None:
-                return
-            if self.processed_by_client.get(client_id, 0) < expected_total:
-                return
-            # Filtro unico: sus conteos por output ya son el total global.
-            forwarded_by_output = dict(self.forwarded_by_output_by_client.get(client_id, {}))
-            del self.pending_eof_by_client[client_id]
-
-        self._flush_batcher_for_client(client_id)
-
-        logging.info(
-            f"All {expected_total} expected messages processed for client {client_id} "
-            f"in filter_{CONFIGURATION}, forwarding EOF (forwarded_by_output={forwarded_by_output})"
-        )
-        self._forward_eof(client_id, forwarded_by_output)
-        self._cleanup_client(client_id)
-
-    def _process_control_message(self, message, control_output=None, output_queues=None):
-        '''
-        Procesa un mensaje de control recibido por el exchange de control, actualizando el estado interno del worker
-        y respondiendo a los mensajes de control correspondientes
-        '''
-        # Desempaquetamos el mensaje
-        msg_type, client_id, payload = self.internal_packet_serializer.unpack_packet(message)
-
-        # El FLUSH_ACK lleva payload JSON (desglose por output), no ControlMessage:
-        # se maneja antes del deserialize comun para no romperlo.
-        if msg_type == message_protocol.internal.MessageType.FLUSH_ACK:
-            self._handle_flush_ack(client_id, payload, output_queues)
-            return
-
-        control_message = self.control_serializer.deserialize(payload)
-
-        if msg_type == message_protocol.internal.MessageType.EOF_RECEIVED:
-            if not self.is_leader:
-                logging.warning(f"Received EOF_RECEIVED control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
-                return
-            # Si se recibe un mensaje indicando que se recibio un EOF para un cliente, se responde con una solicitud de conteo de procesados para ese cliente
-            self._request_control_message(
-                client_id, control_message.expected_total, control_output
-            )
-
-        elif msg_type == message_protocol.internal.MessageType.PROCESSED_REQUEST:
-            if self.is_leader:
-                logging.warning(f"Received PROCESSED_REQUEST control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am the leader, ignoring")
-                return
-            # Si se recibe una solicitud de conteo procesados, se responde con un mensaje indicando
-            # cuantos mensajes se han procesado para ese cliente
-            with self.lock:
-                processed_count = self.processed_by_client.get(client_id, 0)
-            self._answer_control_message(
-                client_id,
-                control_message.expected_total,
-                processed_count,
-                control_output,
-            )
-        
-        elif msg_type == message_protocol.internal.MessageType.PROCESSED_ANSWER:
-            if not self.is_leader:
-                logging.warning(f"Received PROCESSED_ANSWER control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
-                return
-            
-            with self.lock:
-                procesados = self.processed_by_client.get(client_id, 0)
-
-            if client_id not in self.control_responses_by_client:
-                self.control_responses_by_client[client_id] = set()
-            self.control_responses_by_client[client_id].add(control_message.sender_id)
-            
-            if client_id not in self.all_processed_by_client:
-                self.all_processed_by_client[client_id] = 0
-            self.all_processed_by_client[client_id] += control_message.processed_count
-            
-            if len(self.control_responses_by_client[client_id]) == FILTER_AMOUNT - 1:
-                if self.all_processed_by_client[client_id] + procesados == control_message.expected_total:
-                    logging.info(f"Received all PROCESSED_ANSWER control messages for client {client_id} in filter_{CONFIGURATION}, total processed: {procesados + control_message.processed_count}, expected: {control_message.expected_total}, sending FLUSH_ORDER")
-                    self._flush_control_message(client_id, control_output)
-                else:
-                    logging.info(f"Received all PROCESSED_ANSWER control messages for client {client_id} in filter_{CONFIGURATION}, total processed: {procesados + control_message.processed_count}, expected: {control_message.expected_total}, but counts do not match, resending PROCESSED_REQUEST")
-                    self._request_control_message(
-                        client_id, control_message.expected_total, control_output
+                    count = self._state.processed_count(client_id)
+                    fwd = sum(self._state.forwarded_by_output(client_id).values())
+                    action = self.coordinator.process_control_message(
+                        MessageType.PROCESSED_REQUEST, client_id, ctrl, count, fwd
                     )
-                    self.control_responses_by_client[client_id] = set()
-                    self.all_processed_by_client[client_id] = 0
-        
-        elif msg_type == message_protocol.internal.MessageType.FLUSH_ORDER:
-            if self.is_leader:
-                logging.warning(f"Received FLUSH_ORDER control message from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}, but I am the leader, ignoring")
-                return
-            self._flush_batcher_for_client(client_id, output_queues)
-            with self.lock:
-                forwarded_by_output = dict(self.forwarded_by_output_by_client.get(client_id, {}))
-            self._cleanup_client(client_id)
-            self._ack_flush_control_message(client_id, forwarded_by_output, control_output)
-
-        else:
-            logging.warning(f"Received unknown control message type: {msg_type} from worker {control_message.sender_id} for client {client_id} in filter_{CONFIGURATION}")
-
-    def _handle_flush_ack(self, client_id, payload, output_queues=None):
-        '''
-        El lider agrega los conteos por output de cada FLUSH_ACK. Cuando recibio
-        el de todos los filtros, combina con los propios y reenvia el EOF
-        downstream con el conteo GLOBAL por output.
-        '''
-        if not self.is_leader:
-            logging.warning(f"Received FLUSH_ACK control message for client {client_id} in filter_{CONFIGURATION}, but I am not the leader, ignoring")
-            return
-
-        sender_id, counts = self._decode_flush_ack_payload(payload, output_queues)
-
-        if client_id not in self.flushed_acks_by_client:
-            self.flushed_acks_by_client[client_id] = set()
-        self.flushed_acks_by_client[client_id].add(sender_id)
-
-        agg = self.all_forwarded_by_output_by_client.setdefault(client_id, {})
-        for output, value in counts.items():
-            agg[output] = agg.get(output, 0) + int(value)
-
-        if len(self.flushed_acks_by_client[client_id]) == FILTER_AMOUNT - 1:
-            logging.info(
-                "filter_flush_ack_complete | filter=%s | id=%s | client_id=%s | "
-                "acks=%s | forwarding_eof=true",
-                CONFIGURATION,
-                ID,
-                client_id,
-                len(self.flushed_acks_by_client[client_id]),
-            )
-            self._flush_batcher_for_client(client_id, output_queues)
-            global_counts = dict(agg)
-            with self.lock:
-                local_counts = self.forwarded_by_output_by_client.get(client_id, {})
-                if local_counts:
-                    for output, value in local_counts.items():
-                        global_counts[output] = global_counts.get(output, 0) + value
-                elif client_id in self.forwarded_by_client:
-                    outputs = output_queues or self.output_queues
-                    if len(outputs) == 1:
-                        output = next(iter(outputs))
-                        global_counts[output] = (
-                            global_counts.get(output, 0)
-                            + self.forwarded_by_client.get(client_id, 0)
-                        )
-            self._forward_eof(client_id, global_counts, output_queues)
-            self._cleanup_client(client_id)
-
-    def _decode_flush_ack_payload(self, payload, output_queues=None):
-        try:
-            data = json.loads(payload.decode("utf-8"))
-            return data.get("sender_id"), data.get("forwarded_by_output", {})
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            control = self.control_serializer.deserialize(payload)
-            outputs = output_queues or self.output_queues
-            if len(outputs) != 1:
-                raise ValueError(
-                    "legacy FLUSH_ACK payload can only be mapped with one output queue"
+                if isinstance(action, SendAnswerAction):
+                    response_senders[action.queue_name].send(action.message)
+                ack()
+            except Exception:
+                logging.exception(
+                    "filter_processed_request_error | filter=%s | id=%s | client_id=%s",
+                    CONFIGURATION, ID, client_id,
                 )
-            output = next(iter(outputs))
-            return control.sender_id, {output: control.processed_count}
-
-    def process_data_messages(self, message, ack, nack):
-        '''
-        Callback para procesar los mensajes recibidos por la cola de entrada
-        '''
-        try:
-            self._process_data_message(message)
-            ack()
-        except Exception as e:
-            logging.error(f"Error processing data message in filter_{CONFIGURATION} with id {ID}: {e}")
-            nack()
-
-    def _start_control_consumer(self):
-        control_input = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, CONTROL_EXCHANGE, [self.personal_control_key]
+                nack(requeue=True)
+            return
+        logging.warning(
+            "filter_unexpected_control_type | filter=%s | id=%s | msg_type=%s",
+            CONFIGURATION, ID, msg_type,
         )
-        self.control_input = control_input
-        control_output = self._new_control_output()
-        output_queues = self._new_output_queues()
+        ack()
+
+    def _handle_eof_received(self, message, client_id, ctrl, ack, nack, publishers):
+        # WAL-tracked (CTRL_EOF_RECEIVED) so _pending_eof is durable: a later
+        # PROCESSED_REQUEST must find it to re-report. One per (client, leader).
+        sender_id = ctrl.sender_id
+        seq = client_id
+        msg_id = f"er:{client_id}:{ctrl.sender_id}"
         try:
-            if self.active:
-                control_input.start_consuming(
-                    lambda message, ack, nack: self._process_control_message_with_publishers(
-                        message, ack, nack, control_output, output_queues
+            with self.lock:
+                count = self._state.processed_count(client_id)
+                fwd = sum(self._state.forwarded_by_output(client_id).values())
+
+                def bfn(_pl):
+                    action = self.coordinator.process_control_message(
+                        MessageType.EOF_RECEIVED, client_id, ctrl, count, fwd
                     )
+                    change = FilterState.coordinator_msg_change(
+                        MessageType.EOF_RECEIVED, client_id, ctrl.sender_id,
+                        ctrl.expected_total, ctrl.processed_count, count, fwd,
+                    )
+                    if isinstance(action, SendAnswerAction):
+                        return change, [(action.queue_name, action.message)]
+                    return change, []
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, sender_id, seq, message, bfn,
+                    kind=MsgKind.CTRL_EOF_RECEIVED,
+                )
+            self._publish_commit_ack(instruction, ack, publishers)
+        except Exception:
+            logging.exception(
+                "filter_eof_received_error | filter=%s | id=%s | client_id=%s",
+                CONFIGURATION, ID, client_id,
+            )
+            nack(requeue=True)
+
+    def _handle_flush_order(self, message, client_id, ctrl, ack, nack, publishers):
+        # Non-leader: drain the buffer (final DATA batches) + send a custom JSON
+        # FLUSH_ACK (per-output forwarded) to the leader, then cleanup + close.
+        # The dynamic leader (it set _leader_expected) ignores its own FLUSH_ORDER.
+        leader_id = ctrl.sender_id
+        seq = client_id
+        msg_id = f"fo:{client_id}:{ctrl.sender_id}"
+        try:
+            with self.lock:
+                status = self._handler.inbox.classify(
+                    client_id, leader_id, seq, MsgKind.CTRL_FLUSH_ORDER
+                )
+                if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
+                    ack()
+                    return
+                if self.coordinator.leader_expected(client_id) is not None:
+                    ack()  # leader for this client; ignores FLUSH_ORDER
+                    return
+
+                def bfn(_pl):
+                    drain = self._drain_outputs(client_id)
+                    fwd_by_output = self._state.forwarded_by_output(client_id)
+                    ack_payload = json.dumps(
+                        {"sender_id": ID, "forwarded_by_output": fwd_by_output}
+                    ).encode("utf-8")
+                    flush_ack = self.internal_packet_serializer.create_packet(
+                        msg_type=MessageType.FLUSH_ACK,
+                        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+                        payload=ack_payload,
+                    )
+                    flush_ack_dest = self.coordinator.response_queue_for(leader_id)
+                    compound = FilterState.compound_change(
+                        FilterState.coordinator_cleanup_change(client_id, is_leader=False),
+                        FilterState.close_change(client_id),
+                    )
+                    return compound, drain + [(flush_ack_dest, flush_ack)]
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, leader_id, seq, message, bfn,
+                    kind=MsgKind.CTRL_FLUSH_ORDER,
+                )
+            self._publish_commit_ack(instruction, ack, publishers)
+        except Exception:
+            logging.exception(
+                "filter_flush_order_error | filter=%s | id=%s | client_id=%s",
+                CONFIGURATION, ID, client_id,
+            )
+            nack(requeue=True)
+
+    def _run_control_consumer(self) -> None:
+        consumer = middleware.MessageMiddlewareQueueRabbitMQ(
+            MOM_HOST, self.coordinator.my_control_queue()
+        )
+        response_senders = self._new_response_senders()
+        output_queues = self._new_output_queues()
+
+        with self._stopped_lock:
+            self._control_consumer = consumer
+            already_stopped = not self.active
+
+        if already_stopped:
+            try:
+                consumer.close()
+            except Exception:
+                pass
+            self._close_queue_dict(response_senders)
+            self._close_queue_dict(output_queues)
+            return
+
+        # Combined publishers for the outbox (data destinations + the leader's
+        # response queue for the FLUSH_ACK), resolved by destination name.
+        publishers = {**output_queues, **response_senders}
+        try:
+            consumer.start_consuming(
+                lambda msg, ack, nack: self._handle_control(
+                    msg, ack, nack, publishers, response_senders
+                )
+            )
+        except Exception as e:
+            if not self._closed:
+                logging.error(
+                    "filter_control_consumer_stopped | filter=%s | id=%s | error=%s",
+                    CONFIGURATION, ID, e,
                 )
         finally:
             try:
-                control_input.close()
-            except Exception as e:
-                logging.error(
-                    f"Error closing control input in filter_{CONFIGURATION} with id {ID}: {e}"
-                )
-            self._close_control_thread_publishers(control_output, output_queues)
+                consumer.close()
+            except Exception:
+                pass
+            self._close_queue_dict(response_senders)
+            self._close_queue_dict(output_queues)
 
-    def _process_control_message_with_publishers(
-        self, message, ack, nack, control_output, output_queues
-    ):
+    # ─── response path ────────────────────────────────────────────────────────
+
+    def _handle_response(self, message, ack, nack, publishers, control_senders):
+        # FLUSH_ACK carries a custom JSON payload (per-output counts), so peek the
+        # type with unpack_packet rather than the coordinator's ControlMessage parse.
         try:
-            self._process_control_message(message, control_output, output_queues)
-            ack()
-        except Exception as e:
-            logging.error(
-                f"Error processing control message in filter_{CONFIGURATION} "
-                f"with id {ID}: {e}"
+            msg_type, client_id, payload = self.internal_packet_serializer.unpack_packet(
+                message
             )
-            nack()
+        except Exception:
+            logging.exception("filter_response_parse_error | filter=%s | id=%s", CONFIGURATION, ID)
+            nack(requeue=False)
+            return
 
-    def _close_control_thread_publishers(self, control_output, output_queues):
+        if msg_type == MessageType.FLUSH_ACK:
+            self._handle_flush_ack(message, client_id, payload, ack, nack, publishers)
+            return
+
+        # PROCESSED_ANSWER: transient count-collection on the leader. Direct
+        # coordinator call (rebuilt by redelivery + retry); broadcasts FLUSH_ORDER
+        # or PROCESSED_REQUEST. Same accepted limitation as sum/aggregator.
         try:
-            control_output.close()
-        except Exception as e:
-            logging.error(f"Error closing control thread output in filter_{CONFIGURATION} with id {ID}: {e}")
-        for queue in output_queues.values():
+            ctrl = self.control_serializer.deserialize(payload)
+            with self.lock:
+                action = self.coordinator.process_control_message(msg_type, client_id, ctrl)
+            if isinstance(action, BroadcastAction):
+                self._do_broadcast(action, control_senders)
+            ack()
+        except Exception:
+            logging.exception(
+                "filter_processed_answer_error | filter=%s | id=%s | client_id=%s",
+                CONFIGURATION, ID, client_id,
+            )
+            nack(requeue=True)
+
+    def _handle_flush_ack(self, message, client_id, payload, ack, nack, publishers):
+        # Leader accumulates the per-output FLUSH_ACK counts via the WAL. On the last
+        # ack (FILTER_AMOUNT-1) it drains its own buffer and emits one downstream EOF
+        # per output with the cross-replica total, then closes. The single coordinator
+        # mutation + close happen in apply_change.
+        sender_id, counts = self._decode_flush_ack_payload(payload)
+        seq = client_id
+        msg_id = f"fa:{client_id}:{sender_id}"
+        try:
+            with self.lock:
+                status = self._handler.inbox.classify(
+                    client_id, sender_id, seq, MsgKind.CTRL_FLUSH_ACK
+                )
+                if self._state.is_closed(client_id) and status is not InboxStatus.APPLIED:
+                    ack()
+                    return
+                if (
+                    status is not InboxStatus.APPLIED
+                    and self.coordinator.leader_expected(client_id) is None
+                ):
+                    ack()  # not the leader for this client
+                    return
+
+                # Inbox dedup makes each (client, sender) FLUSH_ACK NEW exactly once,
+                # so this ack always increments the count by one.
+                new_ack_count = self._state.flushed_ack_count(client_id) + 1
+
+                def bfn(_pl):
+                    ack_change = FilterState.flush_ack_change(client_id, sender_id, counts)
+                    if new_ack_count < FILTER_AMOUNT - 1:
+                        return ack_change, []
+                    # Last ack: total = prior acks + this ack + leader's own.
+                    total = dict(self._state.all_forwarded_by_output(client_id))
+                    for out, value in counts.items():
+                        total[out] = total.get(out, 0) + int(value)
+                    for out, value in self._state.forwarded_by_output(client_id).items():
+                        total[out] = total.get(out, 0) + value
+                    outputs = self._drain_outputs(client_id) + self._eof_outputs(client_id, total)
+                    compound = FilterState.compound_change(
+                        ack_change,
+                        FilterState.coordinator_cleanup_change(client_id, is_leader=True),
+                        FilterState.close_change(client_id),
+                    )
+                    return compound, outputs
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, sender_id, seq, message, bfn,
+                    kind=MsgKind.CTRL_FLUSH_ACK,
+                )
+            self._publish_commit_ack(instruction, ack, publishers)
+        except Exception:
+            logging.exception(
+                "filter_flush_ack_error | filter=%s | id=%s | client_id=%s",
+                CONFIGURATION, ID, client_id,
+            )
+            nack(requeue=True)
+
+    def _decode_flush_ack_payload(self, payload):
+        data = json.loads(payload.decode("utf-8"))
+        return data.get("sender_id"), data.get("forwarded_by_output", {})
+
+    def _run_response_consumer(self) -> None:
+        consumer = middleware.MessageMiddlewareQueueRabbitMQ(
+            MOM_HOST, self.coordinator.my_response_queue()
+        )
+        control_senders = self._new_control_senders()
+        output_queues = self._new_output_queues()
+
+        with self._stopped_lock:
+            self._response_consumer = consumer
+            already_stopped = not self.active
+
+        if already_stopped:
             try:
-                queue.close()
-            except Exception as e:
-                logging.error(f"Error closing control thread queue in filter_{CONFIGURATION} with id {ID}: {e}")
+                consumer.close()
+            except Exception:
+                pass
+            self._close_queue_dict(control_senders)
+            self._close_queue_dict(output_queues)
+            return
+
+        # Publishers for the leader's WAL outputs (drained DATA + downstream EOFs).
+        publishers = {**output_queues, **control_senders}
+        try:
+            consumer.start_consuming(
+                lambda msg, ack, nack: self._handle_response(
+                    msg, ack, nack, publishers, control_senders
+                )
+            )
+        except Exception as e:
+            if not self._closed:
+                logging.error(
+                    "filter_response_consumer_stopped | filter=%s | id=%s | error=%s",
+                    CONFIGURATION, ID, e,
+                )
+        finally:
+            try:
+                consumer.close()
+            except Exception:
+                pass
+            self._close_queue_dict(control_senders)
+            self._close_queue_dict(output_queues)
+
+    # ─── lifecycle ────────────────────────────────────────────────────────────
 
     def start(self):
-        '''
-        Inicia el procesamiento de mensajes de la cola de entrada y del exchange de control
-        '''
-        # Se inicia un thread para procesar los mensajes de control
-        self.control_thread = threading.Thread(target=self._start_control_consumer)
+        self._ensure_output_bindings()
+
+        # Build the data-thread publishers and runner, then recover (restoring the
+        # coordinator + batcher buffer) BEFORE spawning the control/response threads,
+        # so they never touch shared state mid-recovery. The map combines downstream
+        # outputs + control + response queues because recovery re-publishes any
+        # pending output, whose destination may be any of those.
+        self._data_publishers = {
+            **self.output_queues,
+            **self._main_control_senders,
+            **self._new_response_senders(),
+        }
+        self._runner = WorkerRunner(
+            handler=self._handler,
+            publishers=self._data_publishers,
+            process_payload=self._data_process_payload,
+            lock=self.lock,
+            abort_fn=self._abort_fn,
+        )
+        self._runner.recover_and_republish()
+
+        self.control_thread = threading.Thread(target=self._run_control_consumer)
+        self.response_thread = threading.Thread(target=self._run_response_consumer)
         self.control_thread.start()
+        self.response_thread.start()
 
         try:
             if self.active:
-                self.input_queue.start_consuming(self.process_data_messages)
+                self.input_queue.start_consuming(self._on_input_message)
         except Exception as e:
             logging.error(f"Error in filter_{CONFIGURATION} with id {ID}: {e}")
         finally:
             self.handle_sigterm()
             if self.control_thread is not None:
                 self.control_thread.join(timeout=5)
+            if self.response_thread is not None:
+                self.response_thread.join(timeout=5)
             self.close()
 
     def handle_sigterm(self):
-        '''
-        Maneja la señal de terminacion.
-        '''
-        if not self.active:
-            return
-        logging.info(f"Received SIGTERM in filter_{CONFIGURATION} with id {ID}, shutting down")
-        self.active = False
+        with self._stopped_lock:
+            if not self.active:
+                return
+            self.active = False
+            control_consumer = self._control_consumer
+            response_consumer = self._response_consumer
+
+        logging.info(
+            f"Received SIGTERM in filter_{CONFIGURATION} with id {ID}, shutting down"
+        )
         self.input_queue.request_stop_consuming()
-        if self.control_input is not None:
-            self.control_input.request_stop_consuming()
+        for consumer in (control_consumer, response_consumer):
+            if consumer is not None:
+                consumer.request_stop_consuming()
 
     def close(self):
-        '''
-        Cierra los recursos utilizados por este worker.
-        '''
         if self._closed:
             return
         self._closed = True
@@ -1000,21 +1191,26 @@ class FilterWorker:
         try:
             self.input_queue.close()
         except Exception as e:
-            logging.error(f"Error closing input queue in filter_{CONFIGURATION} with id {ID}: {e}")
+            logging.error(
+                f"Error closing input queue in filter_{CONFIGURATION} with id {ID}: {e}"
+            )
 
-        try:
-            self.control_output.close()
-        except Exception as e:
-            logging.error(f"Error closing control output in filter_{CONFIGURATION} with id {ID}: {e}")
+        self._close_queue_dict(self._main_control_senders)
 
         for queue in self.output_queues.values():
             try:
                 queue.close()
             except Exception as e:
-                logging.error(f"Error closing output queue in filter_{CONFIGURATION} with id {ID}: {e}")
+                logging.error(
+                    f"Error closing output queue in filter_{CONFIGURATION} "
+                    f"with id {ID}: {e}"
+                )
 
         for exchange in self.output_exchanges:
             try:
                 exchange.close()
             except Exception as e:
-                logging.error(f"Error closing output exchange in filter_{CONFIGURATION} with id {ID}: {e}")
+                logging.error(
+                    f"Error closing output exchange in filter_{CONFIGURATION} "
+                    f"with id {ID}: {e}"
+                )

@@ -1,9 +1,12 @@
 import importlib
 import sys
+import tempfile
 import types
 
 from common.domain.transaction import Transaction
 from common.message_protocol.internal import (
+    ControlMessage,
+    ControlMessageSerializer,
     InternalProtocol,
     TransactionSerializer,
 )
@@ -17,6 +20,9 @@ class FakeQueue:
     def send(self, message):
         self.sent.append(message)
 
+    def send_to_shard(self, message, shard):
+        self.sent.append(message)
+
     def close(self):
         pass
 
@@ -26,9 +32,25 @@ class FakeQueue:
     def stop_consuming(self):
         pass
 
+    def request_stop_consuming(self):
+        pass
+
 
 class FakeExchange(FakeQueue):
     pass
+
+
+class FakeShardedPublisher(FakeQueue):
+    def __init__(self, host, exchange_name, routing_key_prefix, shard_count, key_fn=None):
+        super().__init__()
+        self.host = host
+        self.exchange_name = exchange_name
+        self.routing_key_prefix = routing_key_prefix
+        self.shard_count = shard_count
+        self.key_fn = key_fn
+
+    def send_to_all(self, message):
+        self.sent.append(message)
 
 
 def _import_filter_module(
@@ -41,8 +63,8 @@ def _import_filter_module(
     date_enable_q3: str = "0",
     date_enable_q4: str = "0",
 ):
-    # Solo activamos USD_ENABLE_Q2 para acotar el output del filter al
-    # SUM_Q2_QUEUE en este test. El resto se desactiva con flags.
+    # Solo activamos USD_ENABLE_Q2 para acotar el output del filter al sum_q2.
+    # El resto se desactiva con flags.
     monkeypatch.setenv("ID", "0")
     monkeypatch.setenv("MOM_HOST", "rabbitmq")
     monkeypatch.setenv("CONFIGURATION", configuration)
@@ -50,12 +72,26 @@ def _import_filter_module(
     monkeypatch.setenv("GATEWAY_QUEUE", "gateway_results_queue")
     monkeypatch.setenv("FILTER_DATE_QUEUE", "filter_date_queue")
     monkeypatch.setenv("FILTER_Q1_QUEUE", "filter_q1_queue")
-    monkeypatch.setenv("SUM_Q2_QUEUE", "sum_q2_queue")
+    monkeypatch.setenv("FILTER_DATE_EXCHANGE", "filter_date_exchange")
+    monkeypatch.setenv("FILTER_DATE_ROUTING_PREFIX", "filter_date")
+    monkeypatch.setenv("FILTER_DATE_AMOUNT", "4")
+    monkeypatch.setenv("FILTER_Q1_EXCHANGE", "filter_q1_exchange")
+    monkeypatch.setenv("FILTER_Q1_ROUTING_PREFIX", "filter_q1")
+    monkeypatch.setenv("FILTER_Q1_AMOUNT", "3")
+    monkeypatch.setenv("SUM_Q2_EXCHANGE", "sum_q2_exchange")
+    monkeypatch.setenv("SUM_Q2_ROUTING_PREFIX", "sum_q2")
+    monkeypatch.setenv("SUM_Q2_AMOUNT", "1")
     monkeypatch.setenv("FILTER_Q3_QUEUE", "filter_q3_queue")
     monkeypatch.setenv("SCATTER_GATHER_MAPPER_QUEUE", "sg_mapper_queue")
     monkeypatch.setenv("FILTER_Q5_USD_QUEUE", "filter_q5_usd_queue")
+    monkeypatch.setenv("FILTER_Q5_USD_EXCHANGE", "filter_q5_usd_exchange")
+    monkeypatch.setenv("FILTER_Q5_USD_ROUTING_PREFIX", "filter_q5_usd")
+    monkeypatch.setenv("FILTER_Q5_USD_AMOUNT", "2")
     monkeypatch.setenv("SUM_PREFIX", "sum_q3")
     monkeypatch.setenv("SUM_Q3_QUEUE", "sum_q3_queue")
+    monkeypatch.setenv("SUM_Q3_EXCHANGE", "sum_q3_exchange")
+    monkeypatch.setenv("SUM_Q3_ROUTING_PREFIX", "sum_q3")
+    monkeypatch.setenv("SUM_Q3_AMOUNT", "1")
     monkeypatch.setenv("FILTER_AMOUNT", filter_amount)
     monkeypatch.setenv("FILTER_PREFIX", "filter")
     monkeypatch.setenv("USD_ENABLE_Q1", usd_enable_q1)
@@ -63,6 +99,7 @@ def _import_filter_module(
     monkeypatch.setenv("USD_ENABLE_DATE", usd_enable_date)
     monkeypatch.setenv("DATE_ENABLE_Q3", date_enable_q3)
     monkeypatch.setenv("DATE_ENABLE_Q4", date_enable_q4)
+    monkeypatch.setenv("STATE_DIR", tempfile.mkdtemp(prefix="filter-test-"))
 
     fake_pika = types.SimpleNamespace(
         exceptions=types.SimpleNamespace(
@@ -83,7 +120,47 @@ def _import_filter_module(
         "MessageMiddlewareExchangeRabbitMQ",
         FakeExchange,
     )
+    monkeypatch.setattr(module.middleware, "LazyQueue", FakeQueue)
+    monkeypatch.setattr(module.middleware, "ShardedByClientPublisher", FakeShardedPublisher)
+    monkeypatch.setattr(module.middleware, "ShardedPublisher", FakeShardedPublisher)
+    monkeypatch.setattr(module.middleware, "body_digest_key", lambda message: message)
     return module
+
+
+class AckNack:
+    def __init__(self):
+        self.acks = 0
+        self.nacks = []
+
+    def ack(self):
+        self.acks += 1
+
+    def nack(self, requeue=False):
+        self.nacks.append(requeue)
+
+
+def _make_worker(module):
+    worker = module.FilterWorker()
+    worker._data_publishers = {
+        **worker.output_queues,
+        **worker._main_control_senders,
+    }
+    worker._runner = module.WorkerRunner(
+        handler=worker._handler,
+        publishers=worker._data_publishers,
+        process_payload=worker._data_process_payload,
+        lock=worker.lock,
+        abort_fn=worker._abort_fn,
+    )
+    worker._runner.recover_and_republish()
+    return worker
+
+
+def _process_input(worker, message):
+    calls = AckNack()
+    worker._on_input_message(message, calls.ack, calls.nack)
+    assert calls.nacks == []
+    assert calls.acks == 1
 
 
 def _tx(
@@ -106,11 +183,31 @@ def _tx(
     )
 
 
-def _data_packet(client_id: int, transactions: list[Transaction]) -> bytes:
+def _data_packet(
+    client_id: int,
+    transactions: list[Transaction],
+    seq: int = 0,
+    sender_id: int = 5,
+) -> bytes:
     payload = TransactionSerializer.serialize_batch(transactions)
-    return InternalProtocol.create_packet(
+    return InternalProtocol.create_addressed_packet(
         msg_type=MessageType.DATA,
         client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        sender_id=sender_id,
+        seq=seq,
+        payload=payload,
+    )
+
+
+def _eof_packet(client_id: int, expected_total: int, seq: int = 1, sender_id: int = 5) -> bytes:
+    payload = ControlMessageSerializer.serialize(
+        ControlMessage(sender_id=sender_id, expected_total=expected_total, processed_count=0)
+    )
+    return InternalProtocol.create_addressed_packet(
+        msg_type=MessageType.EOF,
+        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        sender_id=sender_id,
+        seq=seq,
         payload=payload,
     )
 
@@ -118,7 +215,12 @@ def _data_packet(client_id: int, transactions: list[Transaction]) -> bytes:
 def test_usd_filter_processes_batched_payload(monkeypatch):
     monkeypatch.setenv("FILTER_OUTPUT_BATCH_MAX_TX", "2")
     module = _import_filter_module(monkeypatch, configuration="USD")
-    worker = module.FilterWorker()
+    worker = _make_worker(module)
+
+    sum_q2_output = worker.output_queues["sum_q2"]
+    assert sum_q2_output.exchange_name == "sum_q2_exchange"
+    assert sum_q2_output.routing_key_prefix == "sum_q2"
+    assert sum_q2_output.shard_count == 1
 
     transactions = [
         _tx(10.0, "US Dollar"),
@@ -127,68 +229,220 @@ def test_usd_filter_processes_batched_payload(monkeypatch):
     ]
     message = _data_packet(client_id=42, transactions=transactions)
 
-    worker._process_data_message(message)
+    _process_input(worker, message)
 
-    assert worker.processed_by_client[42] == 3
-    assert worker.forwarded_by_client[42] == 2
+    assert worker._state.processed_count(42) == 3
+    assert worker._state.forwarded_count(42) == 2
 
-    sum_q2_output = worker.output_queues["sum_q2_queue"]
     assert len(sum_q2_output.sent) == 1
 
-    msg_type, client_id, payload = InternalProtocol.unpack_packet(sum_q2_output.sent[0])
+    # sum_q2 is a WAL-wired addressed edge: the packet carries this worker's
+    # sender_id and a dense per-(output, client) seq starting at 0.
+    msg_type, client_id, sender_id, seq, payload = InternalProtocol.unpack_addressed_packet(
+        sum_q2_output.sent[0]
+    )
     assert msg_type == MessageType.DATA
     assert client_id == 42
+    assert sender_id == module.ID
+    assert seq == 0
     batch_txs = TransactionSerializer.deserialize_batch(payload)
     assert len(batch_txs) == 2
     assert all(tx.currency == "US Dollar" for tx in batch_txs)
+
+
+def test_usd_filter_q1_and_date_outputs_are_sharded(monkeypatch):
+    monkeypatch.setenv("FILTER_OUTPUT_BATCH_MAX_TX", "1")
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="USD",
+        usd_enable_q1="1",
+        usd_enable_q2="0",
+        usd_enable_date="1",
+    )
+    worker = _make_worker(module)
+
+    q1_output = worker.output_queues["filter_q1_queue"]
+    assert q1_output.exchange_name == "filter_q1_exchange"
+    assert q1_output.routing_key_prefix == "filter_q1"
+    assert q1_output.shard_count == 3
+    assert q1_output.key_fn is module.middleware.client_id_key
+
+    date_output = worker.output_queues["filter_date_queue"]
+    assert date_output.exchange_name == "filter_date_exchange"
+    assert date_output.routing_key_prefix == "filter_date"
+    assert date_output.shard_count == 4
+    assert date_output.key_fn is module.middleware.client_id_key
+
+    _process_input(
+        worker,
+        _data_packet(7, [_tx(15.0, "US Dollar"), _tx(20.0, "Euro")])
+    )
+
+    assert len(q1_output.sent) == 1
+    assert len(date_output.sent) == 1
+    assert q1_output.sent[0] == date_output.sent[0]
+
+
+def test_usd_filter_predeclares_q1_and_date_bindings(monkeypatch):
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="USD",
+        usd_enable_q1="1",
+        usd_enable_q2="0",
+        usd_enable_date="1",
+    )
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.FilterWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "rabbitmq",
+            "filter_q1_exchange",
+            {
+                "filter_q1_0": "filter_q1_0",
+                "filter_q1_1": "filter_q1_1",
+                "filter_q1_2": "filter_q1_2",
+            },
+        ),
+        (
+            "rabbitmq",
+            "filter_date_exchange",
+            {
+                "filter_date_0": "filter_date_0",
+                "filter_date_1": "filter_date_1",
+                "filter_date_2": "filter_date_2",
+                "filter_date_3": "filter_date_3",
+            },
+        ),
+    ]
+
+
+def test_usd_filter_predeclares_sum_q2_bindings(monkeypatch):
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="USD",
+        usd_enable_q1="0",
+        usd_enable_q2="1",
+        usd_enable_date="0",
+    )
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.FilterWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "rabbitmq",
+            "sum_q2_exchange",
+            {"sum_q2_0": "sum_q2_0"},
+        )
+    ]
 
 
 def test_usd_filter_buffers_until_flush(monkeypatch):
     monkeypatch.setenv("FILTER_OUTPUT_BATCH_MAX_TX", "1000")
     monkeypatch.setenv("FILTER_OUTPUT_BATCH_BYTES", str(10 * 1024 * 1024))
     module = _import_filter_module(monkeypatch, configuration="USD")
-    worker = module.FilterWorker()
+    worker = _make_worker(module)
 
     message = _data_packet(client_id=7, transactions=[_tx(15.0, "US Dollar")])
-    worker._process_data_message(message)
+    _process_input(worker, message)
 
-    assert worker.processed_by_client[7] == 1
-    assert worker.forwarded_by_client[7] == 1
-    assert len(worker.output_queues["sum_q2_queue"].sent) == 0
+    assert worker._state.processed_count(7) == 1
+    assert worker._state.forwarded_count(7) == 1
+    assert len(worker.output_queues["sum_q2"].sent) == 0
 
-    worker._flush_batcher_for_client(7)
-    sent = worker.output_queues["sum_q2_queue"].sent
-    assert len(sent) == 1
-    msg_type, client_id, payload = InternalProtocol.unpack_packet(sent[0])
+    _process_input(worker, _eof_packet(7, expected_total=1, seq=1))
+    sent = worker.output_queues["sum_q2"].sent
+    assert len(sent) == 2
+    msg_type, client_id, sender_id, seq, payload = InternalProtocol.unpack_addressed_packet(
+        sent[0]
+    )
     assert msg_type == MessageType.DATA
     assert client_id == 7
+    assert sender_id == module.ID
+    assert seq == 0
     txs = TransactionSerializer.deserialize_batch(payload)
     assert len(txs) == 1 and txs[0].currency == "US Dollar"
+    eof_type, _, _, eof_seq, _ = InternalProtocol.unpack_addressed_packet(sent[1])
+    assert eof_type == MessageType.EOF
+    assert eof_seq == 1
 
 
 def test_q5_filter_batches_wire_and_ach_to_filter_q5_usd(monkeypatch):
     # filter_q5_format (C_Q5) tambien debe acumular en el batcher.
     monkeypatch.setenv("FILTER_OUTPUT_BATCH_MAX_TX", "2")
     module = _import_filter_module(monkeypatch, configuration="Q5")
-    worker = module.FilterWorker()
+    worker = _make_worker(module)
+
+    q5_output = worker.output_queues["filter_q5_usd_queue"]
+    assert q5_output.exchange_name == "filter_q5_usd_exchange"
+    assert q5_output.routing_key_prefix == "filter_q5_usd"
+    assert q5_output.shard_count == 2
+    assert q5_output.key_fn is module.middleware.client_id_key
+    old_packet = InternalProtocol.create_packet(
+        MessageType.DATA,
+        (99).to_bytes(16, byteorder="big"),
+        b"payload",
+    )
+    addressed_packet = InternalProtocol.create_addressed_packet(
+        MessageType.DATA,
+        (99).to_bytes(16, byteorder="big"),
+        sender_id=3,
+        seq=7,
+        payload=b"payload",
+    )
+    assert q5_output.key_fn(old_packet) == q5_output.key_fn(addressed_packet) == 99
 
     transactions = [
         _tx(1.0, "US Dollar", fmt="Wire"),
         _tx(2.0, "US Dollar", fmt="Credit Card"),  # no pasa filtro Q5
         _tx(3.0, "Euro", fmt="ACH"),
     ]
-    worker._process_data_message(_data_packet(99, transactions))
+    _process_input(worker, _data_packet(99, transactions))
 
-    assert worker.processed_by_client[99] == 3
-    assert worker.forwarded_by_client[99] == 2
+    assert worker._state.processed_count(99) == 3
+    assert worker._state.forwarded_count(99) == 2
 
-    q5_output = worker.output_queues["filter_q5_usd_queue"]
     assert len(q5_output.sent) == 1
 
-    _, _, payload = InternalProtocol.unpack_packet(q5_output.sent[0])
+    _, _, _, _, payload = InternalProtocol.unpack_addressed_packet(q5_output.sent[0])
     batch_txs = TransactionSerializer.deserialize_batch(payload)
     assert len(batch_txs) == 2
     assert {tx.format for tx in batch_txs} == {"Wire", "ACH"}
+
+
+def test_q5_filter_predeclares_q5_usd_bindings(monkeypatch):
+    module = _import_filter_module(monkeypatch, configuration="Q5")
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.FilterWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "rabbitmq",
+            "filter_q5_usd_exchange",
+            {
+                "filter_q5_usd_0": "filter_q5_usd_0",
+                "filter_q5_usd_1": "filter_q5_usd_1",
+            },
+        )
+    ]
 
 
 def test_date_filter_uses_notebook_q3_timestamp_bounds(monkeypatch):
@@ -200,9 +454,10 @@ def test_date_filter_uses_notebook_q3_timestamp_bounds(monkeypatch):
         date_enable_q3="1",
         date_enable_q4="0",
     )
-    worker = module.FilterWorker()
+    worker = _make_worker(module)
 
-    worker._process_data_message(
+    _process_input(
+        worker,
         _data_packet(
             314,
             [
@@ -245,17 +500,94 @@ def test_date_filter_uses_notebook_q3_timestamp_bounds(monkeypatch):
     assert len(sum_q3_sent) == 1
     assert len(q3_candidates_sent) == 2
 
-    _, _, baseline_payload = InternalProtocol.unpack_packet(sum_q3_sent[0])
+    # Both downstream consumers are WAL-wired, so both edges carry addressed packets.
+    _, _, sender_id, seq, baseline_payload = InternalProtocol.unpack_addressed_packet(
+        sum_q3_sent[0]
+    )
+    assert sender_id == module.ID
+    assert seq == 0
     baseline_txs = TransactionSerializer.deserialize_batch(baseline_payload)
     assert [tx.from_account for tx in baseline_txs] == ["baseline"]
 
     candidate_accounts = []
     for packet in q3_candidates_sent:
-        _, _, payload = InternalProtocol.unpack_packet(packet)
+        _, _, candidate_sender, _candidate_seq, payload = (
+            InternalProtocol.unpack_addressed_packet(packet)
+        )
+        assert candidate_sender == module.ID
         candidate_accounts.extend(
             tx.from_account for tx in TransactionSerializer.deserialize_batch(payload)
         )
     assert candidate_accounts == ["start", "end"]
+
+
+def test_date_filter_predeclares_sum_q3_and_candidates_bindings(monkeypatch):
+    monkeypatch.setenv("Q3_BARRIER_AMOUNT", "2")
+    monkeypatch.setenv("Q3_CANDIDATES_EXCHANGE", "q3_candidates_exchange")
+    monkeypatch.setenv("Q3_CANDIDATES_ROUTING_PREFIX", "q3_candidates")
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="DATE",
+        usd_enable_q2="0",
+        date_enable_q3="1",
+        date_enable_q4="0",
+    )
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.FilterWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "rabbitmq",
+            "sum_q3_exchange",
+            {"sum_q3_0": "sum_q3_0"},
+        ),
+        (
+            "rabbitmq",
+            "q3_candidates_exchange",
+            {
+                "q3_candidates_0": "q3_candidates_0",
+                "q3_candidates_1": "q3_candidates_1",
+            },
+        ),
+    ]
+
+
+def test_date_filter_predeclares_q4_source_prefilter_bindings(monkeypatch):
+    monkeypatch.setenv("Q4_FILTER_INPUT_EXCHANGE", "q4_prefilter")
+    monkeypatch.setenv("Q4_FILTER_INPUT_ROUTING_PREFIX", "q4_source")
+    monkeypatch.setenv("Q4_FILTER_AMOUNT", "2")
+    module = _import_filter_module(
+        monkeypatch,
+        configuration="DATE",
+        usd_enable_q2="0",
+        date_enable_q3="0",
+        date_enable_q4="1",
+    )
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "ensure_exchange_queue_bindings",
+        lambda *args: calls.append(args),
+    )
+
+    module.FilterWorker()._ensure_output_bindings()
+
+    assert calls == [
+        (
+            "rabbitmq",
+            "q4_prefilter",
+            {
+                "q4_source_0": "q4_source_0",
+                "q4_source_1": "q4_source_1",
+            },
+        )
+    ]
 
 
 def test_date_filter_uses_notebook_q4_timestamp_bounds(monkeypatch):
@@ -267,9 +599,10 @@ def test_date_filter_uses_notebook_q4_timestamp_bounds(monkeypatch):
         date_enable_q3="0",
         date_enable_q4="1",
     )
-    worker = module.FilterWorker()
+    worker = _make_worker(module)
 
-    worker._process_data_message(
+    _process_input(
+        worker,
         _data_packet(
             315,
             [
@@ -306,7 +639,8 @@ def test_date_filter_uses_notebook_q4_timestamp_bounds(monkeypatch):
 
     q4_accounts = []
     for packet in q4_sent:
-        _, _, payload = InternalProtocol.unpack_packet(packet)
+        _, _, sender_id, _seq, payload = InternalProtocol.unpack_addressed_packet(packet)
+        assert sender_id == module.ID
         q4_accounts.extend(
             tx.from_account for tx in TransactionSerializer.deserialize_batch(payload)
         )
@@ -327,7 +661,7 @@ def test_date_filter_routes_q4_to_source_prefilter_exchange_with_global_eof(
         date_enable_q3="0",
         date_enable_q4="1",
     )
-    worker = module.FilterWorker()
+    worker = _make_worker(module)
 
     txs = [
         _tx(
@@ -346,16 +680,19 @@ def test_date_filter_routes_q4_to_source_prefilter_exchange_with_global_eof(
         ),
     ]
 
-    worker._process_data_message(_data_packet(316, txs))
+    _process_input(worker, _data_packet(316, txs))
 
     assert set(worker.output_queues) == {"q4_source_0", "q4_source_1"}
     q4_accounts_by_key = {}
     for key, output in worker.output_queues.items():
         accounts = []
         for packet in output.sent:
-            msg_type, _, payload = InternalProtocol.unpack_packet(packet)
+            msg_type, _, sender_id, _seq, payload = (
+                InternalProtocol.unpack_addressed_packet(packet)
+            )
             if msg_type != MessageType.DATA:
                 continue
+            assert sender_id == 0
             accounts.extend(
                 tx.from_account
                 for tx in TransactionSerializer.deserialize_batch(payload)
@@ -366,26 +703,26 @@ def test_date_filter_routes_q4_to_source_prefilter_exchange_with_global_eof(
         expected_key = worker._q4_filter_output_for_transaction(tx)
         assert tx.from_account in q4_accounts_by_key[expected_key]
 
-    control_payload = module.message_protocol.internal.ControlMessageSerializer.serialize(
-        module.message_protocol.internal.ControlMessage(
-            sender_id=0, expected_total=2, processed_count=0
-        )
-    )
-    eof_message = InternalProtocol.create_packet(
-        msg_type=MessageType.EOF,
-        client_id_bytes=(316).to_bytes(16, byteorder="big"),
-        payload=control_payload,
-    )
-    worker._process_data_message(eof_message)
+    _process_input(worker, _eof_packet(316, expected_total=2, seq=1))
 
     for output in worker.output_queues.values():
+        addressed = [
+            InternalProtocol.unpack_addressed_packet(packet)
+            for packet in output.sent
+        ]
+        assert [seq for _msg_type, _client, _sender, seq, _payload in addressed] == (
+            list(range(len(addressed)))
+        )
         eof_packets = [
             packet
             for packet in output.sent
-            if InternalProtocol.unpack_packet(packet)[0] == MessageType.EOF
+            if InternalProtocol.unpack_addressed_packet(packet)[0] == MessageType.EOF
         ]
         assert len(eof_packets) == 1
-        _, _, payload = InternalProtocol.unpack_packet(eof_packets[0])
+        _, _, sender_id, _seq, payload = InternalProtocol.unpack_addressed_packet(
+            eof_packets[0]
+        )
+        assert sender_id == 0
         control = module.message_protocol.internal.ControlMessageSerializer.deserialize(
             payload
         )
@@ -399,35 +736,33 @@ def test_eof_flushes_partial_batch_before_forwarding(monkeypatch):
     monkeypatch.setenv("FILTER_OUTPUT_BATCH_MAX_TX", "1000")
     monkeypatch.setenv("FILTER_OUTPUT_BATCH_BYTES", str(10 * 1024 * 1024))
     module = _import_filter_module(monkeypatch, configuration="USD")
-    worker = module.FilterWorker()
+    worker = _make_worker(module)
 
     # 1 DATA con 1 USD tx -> queda en buffer.
-    worker._process_data_message(_data_packet(11, [_tx(5.0, "US Dollar")]))
-    sum_q2_output = worker.output_queues["sum_q2_queue"]
+    _process_input(worker, _data_packet(11, [_tx(5.0, "US Dollar")]))
+    sum_q2_output = worker.output_queues["sum_q2"]
     assert len(sum_q2_output.sent) == 0
 
     # EOF: expected_total = 1 (las DATA que procesaron upstream). El filter
     # tiene processed = 1, asi que _try_forward_single_filter_eof dispara
     # el flush + el forward del EOF.
-    control_payload = module.message_protocol.internal.ControlMessageSerializer.serialize(
-        module.message_protocol.internal.ControlMessage(
-            sender_id=0, expected_total=1, processed_count=0
-        )
-    )
-    eof_message = InternalProtocol.create_packet(
-        msg_type=MessageType.EOF,
-        client_id_bytes=(11).to_bytes(16, byteorder="big"),
-        payload=control_payload,
-    )
-    worker._process_data_message(eof_message)
+    _process_input(worker, _eof_packet(11, expected_total=1, seq=1))
 
-    # Tras el EOF: 2 publishes en sum_q2_queue: primero el batch (DATA con 1 tx),
+    # Tras el EOF: 2 publishes en sum_q2: primero el batch (DATA con 1 tx),
     # despues el EOF.
     assert len(sum_q2_output.sent) == 2
-    data_msg_type, _, data_payload = InternalProtocol.unpack_packet(sum_q2_output.sent[0])
-    eof_msg_type, _, _ = InternalProtocol.unpack_packet(sum_q2_output.sent[1])
+    data_msg_type, _, data_sender, data_seq, data_payload = (
+        InternalProtocol.unpack_addressed_packet(sum_q2_output.sent[0])
+    )
+    eof_msg_type, _, eof_sender, eof_seq, _ = InternalProtocol.unpack_addressed_packet(
+        sum_q2_output.sent[1]
+    )
     assert data_msg_type == MessageType.DATA
     assert eof_msg_type == MessageType.EOF
+    # The EOF shares the data seq counter for this (output, client): the flushed
+    # batch takes seq 0, the trailing EOF seq 1.
+    assert data_sender == eof_sender == module.ID
+    assert (data_seq, eof_seq) == (0, 1)
     # El batch DATA debe contener la 1 tx pendiente.
     assert len(TransactionSerializer.deserialize_batch(data_payload)) == 1
 
@@ -437,64 +772,83 @@ def test_batcher_isolates_buffers_between_clients(monkeypatch):
     monkeypatch.setenv("FILTER_OUTPUT_BATCH_MAX_TX", "1000")
     monkeypatch.setenv("FILTER_OUTPUT_BATCH_BYTES", str(10 * 1024 * 1024))
     module = _import_filter_module(monkeypatch, configuration="USD")
-    worker = module.FilterWorker()
+    worker = _make_worker(module)
 
-    worker._process_data_message(_data_packet(1, [_tx(1.0, "US Dollar")]))
-    worker._process_data_message(_data_packet(2, [_tx(2.0, "US Dollar")]))
+    _process_input(worker, _data_packet(1, [_tx(1.0, "US Dollar")], seq=0))
+    _process_input(worker, _data_packet(2, [_tx(2.0, "US Dollar")], seq=0))
 
-    assert worker.forwarded_by_client[1] == 1
-    assert worker.forwarded_by_client[2] == 1
+    assert worker._state.forwarded_count(1) == 1
+    assert worker._state.forwarded_count(2) == 1
     # Nada se publico (limites altos, sin EOF).
-    assert len(worker.output_queues["sum_q2_queue"].sent) == 0
+    assert len(worker.output_queues["sum_q2"].sent) == 0
 
-    # Flushear solo client 1 no toca el buffer del client 2.
-    worker._flush_batcher_for_client(1)
-    sent = worker.output_queues["sum_q2_queue"].sent
-    assert len(sent) == 1
-    _, client_id, payload = InternalProtocol.unpack_packet(sent[0])
+    # Flushear client 1 via EOF no toca el buffer del client 2.
+    _process_input(worker, _eof_packet(1, expected_total=1, seq=1))
+    sent = worker.output_queues["sum_q2"].sent
+    assert len(sent) == 2
+    _, client_id, sender_id, seq, payload = InternalProtocol.unpack_addressed_packet(sent[0])
     assert client_id == 1
+    assert sender_id == module.ID
+    assert seq == 0
     assert TransactionSerializer.deserialize_batch(payload)[0].amount == 1.0
 
-    worker._flush_batcher_for_client(2)
-    sent_now = worker.output_queues["sum_q2_queue"].sent
-    assert len(sent_now) == 2
-    _, client_id, payload = InternalProtocol.unpack_packet(sent_now[1])
+    _process_input(worker, _eof_packet(2, expected_total=1, seq=1))
+    sent_now = worker.output_queues["sum_q2"].sent
+    assert len(sent_now) == 4
+    _, client_id, sender_id, seq, payload = InternalProtocol.unpack_addressed_packet(sent_now[2])
     assert client_id == 2
+    assert sender_id == module.ID
+    # Independent per-client counter: client 2's first packet is also seq 0.
+    assert seq == 0
     assert TransactionSerializer.deserialize_batch(payload)[0].amount == 2.0
 
 
-def test_control_path_uses_thread_local_output_publishers(monkeypatch):
+def test_response_path_uses_thread_local_output_publishers(monkeypatch):
+    """_handle_flush_ack must emit EOF to thread-local output_queues, not self.output_queues."""
+    import json
+
     module = _import_filter_module(
         monkeypatch,
         configuration="Q1",
         filter_amount="2",
     )
-    worker = module.FilterWorker()
+    worker = _make_worker(module)
 
     client_id = 123
-    worker.forwarded_by_client[client_id] = 3
-    thread_control_output = FakeExchange()
-    thread_output_queues = {
-        "gateway_results_queue": FakeQueue(),
-    }
-
-    control_payload = module.message_protocol.internal.ControlMessageSerializer.serialize(
-        module.message_protocol.internal.ControlMessage(
-            sender_id=1, expected_total=0, processed_count=2
+    # Leader (worker 0) already processed 3 forwarded items for this client.
+    worker._state.apply_change(
+        module.FilterState.data_change(
+            client_id, 3, {}, {"gateway_results_queue": 3}
         )
     )
-    flush_ack = InternalProtocol.create_packet(
+    # Mark the coordinator as having started a broadcast round for this client.
+    worker.coordinator._leader_expected[client_id] = 5
+
+    thread_output_queues = {"gateway_results_queue": FakeQueue()}
+
+    # JSON FLUSH_ACK from worker 1 carrying 2 forwarded items.
+    flush_ack_payload = json.dumps(
+        {"sender_id": 1, "forwarded_by_output": {"gateway_results_queue": 2}}
+    ).encode("utf-8")
+
+    flush_ack_message = InternalProtocol.create_packet(
         msg_type=MessageType.FLUSH_ACK,
         client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-        payload=control_payload,
+        payload=flush_ack_payload,
     )
-
-    worker._process_control_message(
-        flush_ack,
-        control_output=thread_control_output,
-        output_queues=thread_output_queues,
+    calls = AckNack()
+    worker._handle_flush_ack(
+        flush_ack_message,
+        client_id,
+        flush_ack_payload,
+        calls.ack,
+        calls.nack,
+        thread_output_queues,
     )
+    assert calls.nacks == []
+    assert calls.acks == 1
 
+    # EOF must go to the thread-local output, not the data-thread's own queues.
     assert len(worker.output_queues["gateway_results_queue"].sent) == 0
     assert len(thread_output_queues["gateway_results_queue"].sent) == 1
     msg_type, sent_client_id, payload = InternalProtocol.unpack_packet(
@@ -505,45 +859,62 @@ def test_control_path_uses_thread_local_output_publishers(monkeypatch):
     )
     assert msg_type == MessageType.EOF
     assert sent_client_id == client_id
-    assert forwarded_eof.expected_total == 5
+    assert forwarded_eof.expected_total == 5  # 3 leader + 2 non-leader
 
 
-def test_control_path_uses_thread_local_control_publisher(monkeypatch):
+def test_response_path_broadcasts_flush_order_via_thread_local_senders(monkeypatch):
+    """When all PROCESSED_ANSWERs arrive, FLUSH_ORDER must go through thread-local
+    control_senders, not through self._main_control_senders."""
+    from common.message_protocol.internal.common import MessageType as MT
+
     module = _import_filter_module(
         monkeypatch,
         configuration="Q1",
         filter_amount="2",
     )
-    worker = module.FilterWorker()
+    worker = _make_worker(module)
 
     client_id = 456
-    worker.processed_by_client[client_id] = 3
-    thread_control_output = FakeExchange()
-    thread_output_queues = {
-        "gateway_results_queue": FakeQueue(),
-    }
+    # Simulate coordinator state: leader has expected=5, worker 1 already answered
+    # with processed_count=2.  Only worker 0's own answer is outstanding.
+    worker.coordinator._leader_expected[client_id] = 5
+    worker.coordinator._leader_processed[client_id] = 2
+    worker.coordinator._leader_responders[client_id] = {1}
+    worker._state.apply_change(module.FilterState.data_change(client_id, 3, {}, {}))
 
-    control_payload = module.message_protocol.internal.ControlMessageSerializer.serialize(
-        module.message_protocol.internal.ControlMessage(
-            sender_id=1, expected_total=5, processed_count=2
-        )
+    thread_control_senders = {
+        worker.coordinator.control_queue_for(0): FakeQueue(),
+        worker.coordinator.control_queue_for(1): FakeQueue(),
+    }
+    thread_output_queues = {"gateway_results_queue": FakeQueue()}
+
+    # PROCESSED_ANSWER from worker 0 (the leader, self-reporting count=3)
+    ctrl = module.message_protocol.internal.ControlMessage(
+        sender_id=0, expected_total=5, processed_count=3
     )
+    ctrl_bytes = module.message_protocol.internal.ControlMessageSerializer.serialize(ctrl)
     processed_answer = InternalProtocol.create_packet(
         msg_type=MessageType.PROCESSED_ANSWER,
         client_id_bytes=client_id.to_bytes(16, byteorder="big"),
-        payload=control_payload,
+        payload=ctrl_bytes,
     )
 
-    worker._process_control_message(
+    calls = AckNack()
+    worker._handle_response(
         processed_answer,
-        control_output=thread_control_output,
-        output_queues=thread_output_queues,
+        calls.ack,
+        calls.nack,
+        thread_output_queues,
+        thread_control_senders,
     )
+    assert calls.nacks == []
+    assert calls.acks == 1
 
-    assert len(worker.control_output.sent) == 0
-    assert len(thread_control_output.sent) == 1
-    msg_type, sent_client_id, _ = InternalProtocol.unpack_packet(
-        thread_control_output.sent[0]
-    )
-    assert msg_type == MessageType.FLUSH_ORDER
-    assert sent_client_id == client_id
+    # FLUSH_ORDER must be sent via thread-local control senders, not main senders.
+    for q in worker._main_control_senders.values():
+        assert len(q.sent) == 0, "FLUSH_ORDER must not use _main_control_senders"
+    for q in thread_control_senders.values():
+        assert len(q.sent) == 1
+        msg_type, sent_client_id, _ = InternalProtocol.unpack_packet(q.sent[0])
+        assert msg_type == MessageType.FLUSH_ORDER
+        assert sent_client_id == client_id

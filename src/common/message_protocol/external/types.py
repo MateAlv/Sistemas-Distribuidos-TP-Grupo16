@@ -1,12 +1,13 @@
-# Client → gateway message types
+# Client to gateway message types
 HANDSHAKE = 1
 FILE_CHUNK = 2
 FINISH = 3
 ACK = 4
 
-# Gateway → file_ingestor message types
+# Gateway to file_ingestor message types
 MSG_CHUNK = 1
 MSG_EOF = 2
+MSG_ABORT = 3
 FILE_INGESTOR_ROUTING_KEY_PREFIX = "file_ingestor"
 
 # FileChunk file types
@@ -17,7 +18,7 @@ FILE_TYPE_NAMES = {
     FILE_TYPE_ACCOUNTS: "accounts",
 }
 
-# file_ingestor/results → gateway message types
+# file_ingestor and results to gateway message types
 RES_RESULT = 1
 RES_EOF = 2
 

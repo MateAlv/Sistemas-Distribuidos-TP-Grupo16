@@ -14,7 +14,7 @@ def _wait_attr(get, timeout=2.0):
     raise AssertionError("attribute was never set")
 
 
-def _make_worker(pika_env, monkeypatch):
+def _make_worker(pika_env, monkeypatch, tmp_path):
     module = pika_env.import_fresh("workers.q2_bank_name_joiner.bank_name_joiner")
     created = {}
 
@@ -32,12 +32,82 @@ def _make_worker(pika_env, monkeypatch):
         q2_input_queue="q2_enrich_queue",
         accounts_input_queue="accounts_line_batch_queue",
         output_queue="join_q2_results_queue",
+        state_dir=str(tmp_path / "q2_bank_name_joiner_state"),
+        snapshot_interval=1000,
     )
     return module, module.BankNameJoinerWorker(config), created
 
 
-def test_q2_joiner_sigterm_stops_both_consumers_and_closes(pika_env, monkeypatch):
-    _module, worker, created = _make_worker(pika_env, monkeypatch)
+def _calls():
+    calls = {"acks": 0, "nacks": 0}
+
+    def ack():
+        calls["acks"] += 1
+
+    def nack(*_args, **_kwargs):
+        calls["nacks"] += 1
+
+    return calls, ack, nack
+
+
+def _q2_data(module, client_id: int, sender_id: int = 3, seq: int = 0) -> bytes:
+    payload = module.Q2BankMaxPartialSerializer.serialize(
+        module.Q2BankMaxPartial(
+            bank_id="001",
+            from_account="acc-1",
+            amount=10.0,
+        )
+    )
+    return module.InternalProtocol().create_addressed_packet(
+        msg_type=module.MessageType.DATA,
+        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        sender_id=sender_id,
+        seq=seq,
+        payload=payload,
+    )
+
+
+def _eof(module, client_id: int, sender_id: int, seq: int, expected: int) -> bytes:
+    payload = module.ControlMessageSerializer().serialize(
+        module.ControlMessage(
+            sender_id=sender_id,
+            expected_total=expected,
+            processed_count=0,
+        )
+    )
+    return module.InternalProtocol().create_addressed_packet(
+        msg_type=module.MessageType.EOF,
+        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        sender_id=sender_id,
+        seq=seq,
+        payload=payload,
+    )
+
+
+def _accounts_data(module, client_id: int, sender_id: int = 5, seq: int = 0) -> bytes:
+    payload = module.LineBatchSerializer.serialize(
+        LineBatch(
+            file_type=module.FILE_TYPE_ACCOUNTS,
+            rel_path="accounts.csv",
+            batch_id=0,
+            first_line_number=2,
+            header=("Bank ID", "Bank Name"),
+            lines=(b"001,Raw One",),
+        )
+    )
+    return module.InternalProtocol().create_addressed_packet(
+        msg_type=module.MessageType.DATA,
+        client_id_bytes=client_id.to_bytes(16, byteorder="big"),
+        sender_id=sender_id,
+        seq=seq,
+        payload=payload,
+    )
+
+
+def test_q2_joiner_sigterm_stops_both_consumers_and_closes(
+    pika_env, monkeypatch, tmp_path
+):
+    _module, worker, created = _make_worker(pika_env, monkeypatch, tmp_path)
 
     done = threading.Event()
 
@@ -67,11 +137,12 @@ def test_q2_joiner_sigterm_stops_both_consumers_and_closes(pika_env, monkeypatch
     assert accounts.stop_calls == 1
     assert q2.closed
     assert accounts.closed
-    assert not created.get("join_q2_results_queue")
+    assert len(created["join_q2_results_queue"]) == 1
+    assert created["join_q2_results_queue"][0].closed
 
 
-def test_q2_joiner_stop_is_idempotent(pika_env, monkeypatch):
-    _module, worker, _created = _make_worker(pika_env, monkeypatch)
+def test_q2_joiner_stop_is_idempotent(pika_env, monkeypatch, tmp_path):
+    _module, worker, _created = _make_worker(pika_env, monkeypatch, tmp_path)
 
     done = threading.Event()
     threading.Thread(
@@ -92,65 +163,24 @@ def test_q2_joiner_stop_is_idempotent(pika_env, monkeypatch):
     assert accounts.stop_calls == 1
 
 
-def test_q2_joiner_output_connections_are_per_thread(pika_env, monkeypatch):
-    module, worker, created = _make_worker(pika_env, monkeypatch)
+def test_q2_joiner_output_connection_is_shared_and_closed(
+    pika_env, monkeypatch, tmp_path
+):
+    _module, worker, created = _make_worker(pika_env, monkeypatch, tmp_path)
 
-    outputs = {}
-    outputs_lock = threading.Lock()
-    start_barrier = threading.Barrier(2)
-    close_barrier = threading.Barrier(2)
-    errors = []
+    assert len(created["join_q2_results_queue"]) == 1
+    output = created["join_q2_results_queue"][0]
+    assert not output.closed
 
-    def emit(client_id, bank_id):
-        try:
-            start_barrier.wait(timeout=2)
-            state = module.ClientState(
-                bank_names={bank_id: [f"Bank {bank_id}"]},
-                q2_results={
-                    bank_id: module.Q2BankMaxPartial(
-                        bank_id=bank_id,
-                        from_account=f"account-{client_id}",
-                        amount=100.0 + client_id,
-                    )
-                },
-            )
-            with worker._lock:
-                worker._states[client_id] = state
+    worker.close()
 
-            worker._emit_results(client_id)
-            thread_id = threading.get_ident()
-            with worker._output_queues_lock:
-                output = worker._output_queues_by_thread[thread_id]
-            with outputs_lock:
-                outputs[threading.current_thread().name] = output
-            close_barrier.wait(timeout=2)
-        except Exception as exc:
-            errors.append(exc)
-        finally:
-            worker._close_thread_output_queue()
-
-    threads = [
-        threading.Thread(target=emit, args=(1, "1"), name="emit-1"),
-        threading.Thread(target=emit, args=(2, "2"), name="emit-2"),
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=5)
-
-    assert not errors
-    assert all(not thread.is_alive() for thread in threads)
-    assert len(outputs) == 2
-    assert len({id(output) for output in outputs.values()}) == 2
-    assert all(output.closed for output in outputs.values())
-    assert len(created["join_q2_results_queue"]) == 2
-    assert all(len(output.sent) == 2 for output in outputs.values())
+    assert output.closed
 
 
 def test_q2_joiner_accounts_parse_uses_notebook_bank_id_coercion(
-    pika_env, monkeypatch
+    pika_env, monkeypatch, tmp_path
 ):
-    module, worker, _created = _make_worker(pika_env, monkeypatch)
+    module, worker, _created = _make_worker(pika_env, monkeypatch, tmp_path)
 
     payload = module.LineBatchSerializer.serialize(
         LineBatch(
@@ -170,44 +200,85 @@ def test_q2_joiner_accounts_parse_uses_notebook_bank_id_coercion(
     ]
 
 
-def test_q2_joiner_emits_only_banks_matched_by_notebook_inner_join(
-    pika_env, monkeypatch
-):
-    module, worker, created = _make_worker(pika_env, monkeypatch)
+def test_q2_joiner_consumes_addressed_inputs(pika_env, monkeypatch, tmp_path):
+    module, worker, created = _make_worker(pika_env, monkeypatch, tmp_path)
     client_id = 77
-    with worker._lock:
-        worker._states[client_id] = module.ClientState(
-            bank_names={
-                "1": ["Raw One"],
-                "2": ["Two A", "Two B"],
-            },
-            q2_results={
-                "1": module.Q2BankMaxPartial(
-                    bank_id="1",
-                    from_account="acc-1",
-                    amount=10.0,
-                ),
-                "2": module.Q2BankMaxPartial(
-                    bank_id="2",
-                    from_account="acc-2",
-                    amount=20.0,
-                ),
-                "3": module.Q2BankMaxPartial(
-                    bank_id="3",
-                    from_account="missing",
-                    amount=30.0,
-                ),
-            },
-        )
+    calls, ack, nack = _calls()
 
-    worker._emit_results(client_id)
+    worker._on_q2_message(_q2_data(module, client_id), ack, nack)
+    worker._on_q2_message(_eof(module, client_id, sender_id=3, seq=1, expected=1), ack, nack)
+    worker._on_accounts_message(_accounts_data(module, client_id), ack, nack)
+    worker._on_accounts_message(
+        _eof(module, client_id, sender_id=5, seq=1, expected=1), ack, nack
+    )
 
+    assert calls == {"acks": 4, "nacks": 0}
     output = created["join_q2_results_queue"][0]
-    data_packets = output.sent[:-1]
-    eof_packet = output.sent[-1]
+    data_packet, eof_packet = output.sent
+
+    msg_type, packet_client_id, sender_id, seq, payload = (
+        worker._protocol.unpack_addressed_packet(data_packet)
+    )
+    assert msg_type == module.MessageType.DATA
+    assert packet_client_id == client_id
+    assert sender_id == 0
+    assert seq == 0
+    result = module.Q2BankMaxResultSerializer.deserialize(payload)
+    assert (result.bank_id, result.from_account, result.bank_name, result.amount) == (
+        "1",
+        "acc-1",
+        "Raw One",
+        10.0,
+    )
+
+    msg_type, packet_client_id, sender_id, seq, payload = (
+        worker._protocol.unpack_addressed_packet(eof_packet)
+    )
+    assert msg_type == module.MessageType.EOF
+    assert packet_client_id == client_id
+    assert sender_id == 0
+    assert seq == 1
+    control = worker._control_serializer.deserialize(payload)
+    assert control.expected_total == 1
+
+
+def test_q2_joiner_emits_only_banks_matched_by_notebook_inner_join(
+    pika_env, monkeypatch, tmp_path
+):
+    module, worker, _created = _make_worker(pika_env, monkeypatch, tmp_path)
+    client_id = 77
+    state = module.ClientState(
+        bank_names={
+            "1": ["Raw One"],
+            "2": ["Two A", "Two B"],
+        },
+        q2_results={
+            "1": module.Q2BankMaxPartial(
+                bank_id="1",
+                from_account="acc-1",
+                amount=10.0,
+            ),
+            "2": module.Q2BankMaxPartial(
+                bank_id="2",
+                from_account="acc-2",
+                amount=20.0,
+            ),
+            "3": module.Q2BankMaxPartial(
+                bank_id="3",
+                from_account="missing",
+                amount=30.0,
+            ),
+        },
+    )
+
+    outputs = worker._build_result_outputs(state, client_id)
+    data_packets = [body for _dest, body in outputs[:-1]]
+    eof_packet = outputs[-1][1]
     rows = set()
     for packet in data_packets:
-        msg_type, packet_client_id, payload = worker._protocol.unpack_packet(packet)
+        msg_type, packet_client_id, _sender_id, _seq, payload = (
+            worker._protocol.unpack_addressed_packet(packet)
+        )
         assert msg_type == module.MessageType.DATA
         assert packet_client_id == client_id
         result = module.Q2BankMaxResultSerializer.deserialize(payload)
@@ -226,8 +297,54 @@ def test_q2_joiner_emits_only_banks_matched_by_notebook_inner_join(
         ("2", "acc-2", "Two B", 20.0),
     }
 
-    msg_type, packet_client_id, payload = worker._protocol.unpack_packet(eof_packet)
+    msg_type, packet_client_id, _sender_id, seq, payload = (
+        worker._protocol.unpack_addressed_packet(eof_packet)
+    )
     assert msg_type == module.MessageType.EOF
     assert packet_client_id == client_id
+    assert seq == 3
     control = worker._control_serializer.deserialize(payload)
     assert control.expected_total == 3
+
+
+def test_q2_joiner_recovery_republishes_ready_outbox_after_publish_crash(
+    pika_env, monkeypatch, tmp_path
+):
+    module, worker, _created = _make_worker(pika_env, monkeypatch, tmp_path)
+    client_id = 77
+    calls, ack, nack = _calls()
+
+    worker._on_q2_message(_q2_data(module, client_id), ack, nack)
+    worker._on_q2_message(_eof(module, client_id, sender_id=3, seq=1, expected=1), ack, nack)
+    worker._on_accounts_message(_accounts_data(module, client_id), ack, nack)
+
+    def crash_send(_body):
+        raise RuntimeError("crash after INPUT_APPLIED before publish")
+
+    worker._send_output = crash_send
+    worker._on_accounts_message(
+        _eof(module, client_id, sender_id=5, seq=1, expected=1), ack, nack
+    )
+    assert calls == {"acks": 3, "nacks": 1}
+    worker._handler.wal.close()
+
+    _module, recovered, recovered_created = _make_worker(pika_env, monkeypatch, tmp_path)
+
+    output = recovered_created["join_q2_results_queue"][0]
+    assert len(output.sent) == 2
+    data_packet, eof_packet = output.sent
+    msg_type, packet_client_id, _sender_id, _seq, payload = (
+        recovered._protocol.unpack_addressed_packet(data_packet)
+    )
+    assert msg_type == module.MessageType.DATA
+    assert packet_client_id == client_id
+    result = module.Q2BankMaxResultSerializer.deserialize(payload)
+    assert result.bank_name == "Raw One"
+
+    msg_type, packet_client_id, _sender_id, _seq, payload = (
+        recovered._protocol.unpack_addressed_packet(eof_packet)
+    )
+    assert msg_type == module.MessageType.EOF
+    assert packet_client_id == client_id
+    control = recovered._control_serializer.deserialize(payload)
+    assert control.expected_total == 1

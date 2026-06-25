@@ -16,12 +16,22 @@ SERVER_HOST = "gateway"
 SERVER_PORT = 5678
 FILE_INGESTOR_EXCHANGE = "file_ingestor_exchange"
 FILE_SPLITTER_QUEUE_PREFIX = "file_splitter"
-TRANSACTION_EXCHANGE = "transaction_fanout_exchange"
 FILE_INGESTOR_CONTROL_EXCHANGE = "file_ingestor_control"
 FILE_INGESTOR_RESPONSE_QUEUE_PREFIX = "file_ingestor_response"
 FILTER_PREFIX = "filter"
 
-LINE_BATCH_QUEUE = "line_batch_queue"
+LINE_BATCH_EXCHANGE = "line_batch_exchange"
+FILE_INGESTOR_ROUTING_PREFIX = "file_ingestor"
+FILTER_USD_EXCHANGE = "filter_usd_exchange"
+FILTER_USD_ROUTING_PREFIX = "filter_usd"
+FILTER_Q5_FORMAT_EXCHANGE = "filter_q5_format_exchange"
+FILTER_Q5_FORMAT_ROUTING_PREFIX = "filter_q5_format"
+FILTER_Q1_EXCHANGE = "filter_q1_exchange"
+FILTER_Q1_ROUTING_PREFIX = "filter_q1"
+FILTER_DATE_EXCHANGE = "filter_date_exchange"
+FILTER_DATE_ROUTING_PREFIX = "filter_date"
+FILTER_Q5_USD_EXCHANGE = "filter_q5_usd_exchange"
+FILTER_Q5_USD_ROUTING_PREFIX = "filter_q5_usd"
 FILTER_USD_QUEUE = "filter_usd_queue"
 FILTER_Q1_QUEUE = "filter_q1_queue"
 FILTER_DATE_QUEUE = "filter_date_queue"
@@ -31,6 +41,8 @@ FILTER_Q5_FORMAT_QUEUE = "filter_q5_format_queue"
 FILTER_Q5_USD_QUEUE = "filter_q5_usd_queue"
 SUM_Q2_QUEUE = "sum_q2_queue"
 SUM_Q3_QUEUE = "sum_q3_queue"
+SUM_Q2_EXCHANGE = "sum_q2_exchange"
+SUM_Q3_EXCHANGE = "sum_q3_exchange"
 GATEWAY_Q1_QUEUE = "gateway_results_queue"
 GATEWAY_Q2_QUEUE = "join_q2_results_queue"
 GATEWAY_Q3_QUEUE = "gateway_q3_results_queue"
@@ -69,6 +81,9 @@ Q3_AVERAGES_EXCHANGE = "q3_averages_exchange"
 Q3_CANDIDATES_EXCHANGE = "q3_candidates_exchange"
 Q3_AVERAGES_ROUTING_PREFIX = "q3_averages"
 Q3_CANDIDATES_ROUTING_PREFIX = "q3_candidates"
+WORKER_STATE_DIR = "/worker_state"
+DEFAULT_SNAPSHOT_INTERVAL = 1000
+RABBITMQ_DURABLE_ENV = "RABBITMQ_DURABLE=true"
 OBSERVABILITY_DEFAULTS = {
     "FLOW_LOG_ENABLED": "1",
     "FLOW_LOG_EVERY_MESSAGES": "100000",
@@ -78,6 +93,14 @@ OBSERVABILITY_DEFAULTS = {
     "CHUNK_LOG_EVERY": "10000",
     "RESULT_LOG_EVERY": "100000",
 }
+DEFAULT_MONITOR_COUNT = 3
+DEFAULT_MONITOR_PORT = 9000
+DEFAULT_ELECTION_PORT = 9001
+DEFAULT_MONITOR_CHECK_INTERVAL = 3.0
+DEFAULT_MAX_MISSED = 3
+DEFAULT_ELECTION_TIMEOUT = 5.0
+DEFAULT_COORDINATOR_TIMEOUT = 10.0
+DEFAULT_STARTUP_GRACE_PERIOD = 30.0
 
 
 def main() -> int:
@@ -151,6 +174,8 @@ def parse_args():
     parser.add_argument("--q3-barrier-workers", type=int, default=None, help="Override q3_barrier worker count (sharded by client_id).")
     parser.add_argument("--prefetch", type=int, default=None, help="PREFETCH_COUNT for filter/sum services.")
     parser.add_argument("--clients", type=int, default=None, help="Number of client containers to spawn. Each gets a distinct client_id sharing the first configured dataset.")
+    parser.add_argument("--monkey", action="store_true", default=None, help="Add the monkey service that kills random workers.")
+    parser.add_argument("--monkey-interval", type=int, default=None, help="Seconds between monkey kills.")
     parser.add_argument("--skip-output", action="store_true", help="Do not write docker-compose.yaml.")
     parser.add_argument("--skip-test-output", action="store_true", help="Do not write docker-compose.test.yaml.")
     parser.set_defaults(skip_output=False, skip_test_output=False)
@@ -313,6 +338,10 @@ def apply_cli_overrides(config: dict, args, path: Path) -> None:
         workers["q3_barrier"] = args.q3_barrier_workers
     if args.prefetch is not None:
         settings["filter_prefetch_count"] = args.prefetch
+    if args.monkey:
+        settings.setdefault("monkey", {})["enabled"] = True
+    if args.monkey_interval is not None:
+        settings.setdefault("monkey", {})["interval"] = args.monkey_interval
     if args.clients is not None:
         if args.clients < 1:
             raise ValueError("clients must be >= 1")
@@ -350,7 +379,8 @@ def load_config(path: Path) -> dict:
         raise FileNotFoundError(f"config file not found: {path}")
     with path.open("r", encoding="utf-8") as file:
         config = yaml.safe_load(file) or {}
-    validate_config(config, path)
+    # Validation is deferred to apply_cli_overrides so that --dataset / --clients
+    # overrides are applied before the file-existence checks run.
     return config
 
 
@@ -397,6 +427,39 @@ def validate_config(config: dict, path: Path) -> None:
         if int(value) <= 0:
             raise ValueError(f"{path}: {key} must be greater than 0")
 
+    monitor = config.get("monitor", {})
+    if monitor.get("enabled", False):
+        monitor_count = int(monitor.get("count", DEFAULT_MONITOR_COUNT))
+        if monitor_count < 1 or monitor_count > 255:
+            raise ValueError(f"{path}: monitor.count must be in range [1, 255]")
+        for key, default in (
+            ("port", DEFAULT_MONITOR_PORT),
+            ("election_port", DEFAULT_ELECTION_PORT),
+        ):
+            value = int(monitor.get(key, default))
+            if value < 1 or value > 65535:
+                raise ValueError(
+                    f"{path}: monitor.{key} must be in range [1, 65535]"
+                )
+        for key, default in (
+            ("check_interval", DEFAULT_MONITOR_CHECK_INTERVAL),
+            ("election_timeout", DEFAULT_ELECTION_TIMEOUT),
+            ("coordinator_timeout", DEFAULT_COORDINATOR_TIMEOUT),
+        ):
+            if float(monitor.get(key, default)) <= 0:
+                raise ValueError(
+                    f"{path}: monitor.{key} must be greater than 0"
+                )
+        startup_grace_period = float(
+            monitor.get("startup_grace_period", DEFAULT_STARTUP_GRACE_PERIOD)
+        )
+        if startup_grace_period < 0:
+            raise ValueError(
+                f"{path}: monitor.startup_grace_period must be at least 0"
+            )
+        if int(monitor.get("max_missed", DEFAULT_MAX_MISSED)) <= 0:
+            raise ValueError(f"{path}: monitor.max_missed must be greater than 0")
+
     joiners = workers.get("joiners", {})
     for key in ("q2", "q3"):
         value = int(joiners.get(key, 1))
@@ -422,6 +485,8 @@ def write_compose(config: dict, path: Path, expose_ports: bool) -> None:
 def build_compose(config: dict, expose_ports: bool) -> dict:
     workers = config.get("workers", {})
     settings = config.get("settings", {})
+    monitor_config = config.get("monitor", {})
+    monitor_enabled = bool(monitor_config.get("enabled", False))
     enabled_queries = set(config.get("queries", ["q1", "q2", "q3", "q4", "q5"]))
     q1_enabled = "q1" in enabled_queries
     q2_enabled = "q2" in enabled_queries
@@ -469,34 +534,76 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
         enabled_queries,
     )
 
+    file_ingestor_count = counts["file_ingestors"]
     for index in range(counts["file_splitters"]):
         services[f"file_splitter_{index}"] = file_splitter_service(
-            index, settings, q2_enabled=q2_enabled
+            index,
+            settings,
+            q2_enabled=q2_enabled,
+            file_ingestor_count=file_ingestor_count,
         )
 
-    for index in range(counts["file_ingestors"]):
-        services[f"file_ingestor_{index}"] = file_ingestor_service(index, settings)
+    named_volumes: dict[str, None] = {}
+    for index in range(file_ingestor_count):
+        vol_name = f"file_ingestor_{index}_state"
+        named_volumes[vol_name] = None
+        services[f"file_ingestor_{index}"] = file_ingestor_service(
+            index=index,
+            total=file_ingestor_count,
+            settings=settings,
+            state_volume=vol_name,
+            filter_usd_amount=counts["filter_usd"] if usd_enabled else 0,
+            filter_q5_format_amount=counts["filter_q5_format"] if q5_enabled else 0,
+        )
 
     filter_specs = []
     if usd_enabled:
-        filter_specs.append(("USD", counts["filter_usd"], FILTER_USD_QUEUE))
+        filter_specs.append((
+            "USD",
+            counts["filter_usd"],
+            FILTER_USD_ROUTING_PREFIX,
+            FILTER_USD_EXCHANGE,
+            FILTER_USD_ROUTING_PREFIX,
+        ))
     if q1_enabled:
-        filter_specs.append(("Q1", counts["filter_q1"], FILTER_Q1_QUEUE))
+        filter_specs.append((
+            "Q1",
+            counts["filter_q1"],
+            FILTER_Q1_ROUTING_PREFIX,
+            FILTER_Q1_EXCHANGE,
+            FILTER_Q1_ROUTING_PREFIX,
+        ))
     if q3_enabled or q4_enabled:
-        filter_specs.append(("DATE", counts["filter_date"], FILTER_DATE_QUEUE))
+        filter_specs.append((
+            "DATE",
+            counts["filter_date"],
+            FILTER_DATE_ROUTING_PREFIX,
+            FILTER_DATE_EXCHANGE,
+            FILTER_DATE_ROUTING_PREFIX,
+        ))
 
-    for configuration, count, input_queue in filter_specs:
+    for configuration, count, input_queue_prefix, input_exchange, input_routing_prefix in filter_specs:
         for index in range(count):
             services[f"filter_{configuration.lower()}_{index}"] = filter_service(
                 configuration=configuration,
                 index=index,
                 amount=count,
-                input_queue=input_queue,
+                input_queue=(
+                    worker_queue_name(input_queue_prefix, index)
+                    if input_exchange
+                    else input_queue_prefix
+                ),
                 settings=settings,
-                transaction_exchange=TRANSACTION_EXCHANGE if configuration == "USD" else None,
+                input_exchange=input_exchange,
+                input_routing_prefix=input_routing_prefix,
                 enabled_queries=enabled_queries,
                 q3_barrier_amount=counts["q3_barrier"],
                 q4_filter_amount=counts["q4_filter"],
+                filter_q1_amount=counts["filter_q1"],
+                filter_date_amount=counts["filter_date"],
+                filter_q5_usd_amount=counts["filter_q5_usd"],
+                sum_q2_amount=counts["sum_q2"],
+                sum_q3_amount=counts["sum_q3"],
             )
 
     if q5_enabled:
@@ -505,12 +612,17 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 configuration="Q5",
                 index=index,
                 amount=counts["filter_q5_format"],
-                input_queue=FILTER_Q5_FORMAT_QUEUE,
+                input_queue=worker_queue_name(FILTER_Q5_FORMAT_ROUTING_PREFIX, index),
                 settings=settings,
-                transaction_exchange=TRANSACTION_EXCHANGE,
+                input_exchange=FILTER_Q5_FORMAT_EXCHANGE,
+                input_routing_prefix=FILTER_Q5_FORMAT_ROUTING_PREFIX,
                 enabled_queries=enabled_queries,
                 q3_barrier_amount=counts["q3_barrier"],
                 q4_filter_amount=counts["q4_filter"],
+                filter_q1_amount=counts["filter_q1"],
+                filter_date_amount=counts["filter_date"],
+                filter_q5_usd_amount=counts["filter_q5_usd"],
+                sum_q2_amount=counts["sum_q2"],
             )
 
         services["rates_service"] = rates_service()
@@ -520,7 +632,9 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 index=index,
                 amount=counts["filter_q5_usd"],
                 aggregation_amount=counts["aggregation_q5"],
-                input_queue=FILTER_Q5_USD_QUEUE,
+                input_queue=worker_queue_name(FILTER_Q5_USD_ROUTING_PREFIX, index),
+                input_exchange=FILTER_Q5_USD_EXCHANGE,
+                input_routing_prefix=FILTER_Q5_USD_ROUTING_PREFIX,
             )
 
     if q2_enabled:
@@ -531,7 +645,9 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 amount=counts["sum_q2"],
                 aggregation_amount=counts["aggregation_q2"],
                 aggregation_prefix=AGGREGATION_Q2_PREFIX,
-                input_queue=SUM_Q2_QUEUE,
+                input_queue=worker_queue_name(SUM_Q2_PREFIX, index),
+                input_exchange=SUM_Q2_EXCHANGE,
+                input_routing_prefix=SUM_Q2_PREFIX,
                 settings=settings,
                 sum_prefix=SUM_Q2_PREFIX,
             )
@@ -544,13 +660,17 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 amount=counts["sum_q3"],
                 aggregation_amount=counts["aggregation_q3"],
                 aggregation_prefix=AGGREGATION_Q3_PREFIX,
-                input_queue=SUM_Q3_QUEUE,
+                input_queue=worker_queue_name(SUM_Q3_PREFIX, index),
+                input_exchange=SUM_Q3_EXCHANGE,
+                input_routing_prefix=SUM_Q3_PREFIX,
                 settings=settings,
                 sum_prefix=SUM_Q3_PREFIX,
             )
 
     if q2_enabled:
         for index in range(counts["aggregation_q2"]):
+            vol_name = f"aggregation_q2_{index}_state"
+            named_volumes[vol_name] = None
             services[f"aggregation_q2_{index}"] = aggregator_service(
                 configuration="Q2",
                 index=index,
@@ -559,6 +679,7 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 output_queue=JOIN_Q2_QUEUE,
                 sum_amount=counts["sum_q2"],
                 sum_prefix=SUM_Q2_PREFIX,
+                state_volume=vol_name,
             )
 
         services["join_q2"] = joiner_service(
@@ -580,6 +701,8 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
 
     if q3_enabled:
         for index in range(counts["aggregation_q3"]):
+            vol_name = f"aggregation_q3_{index}_state"
+            named_volumes[vol_name] = None
             services[f"aggregation_q3_{index}"] = aggregator_service(
                 configuration="Q3",
                 index=index,
@@ -588,6 +711,7 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 output_queue=JOIN_Q3_QUEUE,
                 sum_amount=counts["sum_q3"],
                 sum_prefix=SUM_Q3_PREFIX,
+                state_volume=vol_name,
             )
 
         services["join_q3"] = joiner_service(
@@ -605,13 +729,17 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
             services[f"q3_barrier_{index}"] = q3_barrier_service(
                 index=index,
                 barrier_amount=barrier_amount,
-                averages_queue=JOIN_Q3_RESULTS_QUEUE,
-                candidates_queue=Q3_CANDIDATES_QUEUE,
+                averages_queue=worker_queue_name(Q3_AVERAGES_ROUTING_PREFIX, index),
+                candidates_queue=worker_queue_name(
+                    Q3_CANDIDATES_ROUTING_PREFIX, index
+                ),
                 output_queue=GATEWAY_Q3_QUEUE,
             )
 
     if q5_enabled:
         for index in range(counts["aggregation_q5"]):
+            vol_name = f"aggregation_q5_{index}_state"
+            named_volumes[vol_name] = None
             services[f"aggregation_q5_{index}"] = aggregator_service(
                 configuration="Q5",
                 index=index,
@@ -620,6 +748,7 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 output_queue=JOIN_Q5_QUEUE,
                 sum_amount=counts["filter_q5_usd"],
                 sum_prefix="filter_q5_usd",
+                state_volume=vol_name,
             )
 
         services["join_q5"] = joiner_service(
@@ -669,20 +798,97 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
                 settings=settings,
             )
 
+    rabbitmq_service_names = [
+        name for name in services if name != "rabbitmq"
+    ]
+    for name in rabbitmq_service_names:
+        add_env_once(services[name], RABBITMQ_DURABLE_ENV)
+
+    snapshot_interval = int(
+        settings.get("snapshot_interval", DEFAULT_SNAPSHOT_INTERVAL)
+    )
+    worker_service_names = [
+        name
+        for name in services
+        if name not in {"rabbitmq", "gateway", "rates_service"}
+    ]
+    for name in worker_service_names:
+        add_worker_state_volume(
+            name, services[name], named_volumes, snapshot_interval
+        )
+
+    heartbeat_node_names = [
+        *worker_service_names
+    ]
+    monitor_names = []
+    if monitor_enabled:
+        monitor_count = int(
+            monitor_config.get("count", DEFAULT_MONITOR_COUNT)
+        )
+        monitor_names = [
+            f"monitor_{monitor_id}"
+            for monitor_id in range(1, monitor_count + 1)
+        ]
+        nodes_to_watch = [*heartbeat_node_names, *monitor_names]
+        for monitor_id, name in enumerate(monitor_names, start=1):
+            services[name] = monitor_service(
+                monitor_id=monitor_id,
+                monitor_count=monitor_count,
+                nodes_to_watch=nodes_to_watch,
+                monitor_config=monitor_config,
+                settings=settings,
+            )
+        heartbeat_node_names.extend(monitor_names)
+
     client_dependencies = [
         name for name in services if name not in {"rabbitmq", "gateway"}
     ]
     client_dependencies.insert(0, "gateway")
+    client_names = []
     for client_index, account in enumerate(config["client_accounts"]):
         client_id = int(account.get("client_id", client_index))
-        services[f"client_{client_id}"] = client_service(
+        name = f"client_{client_id}"
+        client_names.append(name)
+        services[name] = client_service(
             client_id=client_id,
             account=account,
             settings=settings,
             depends_on=client_dependencies,
         )
 
-    return {"services": services}
+    monitor_hosts = ",".join(monitor_names)
+    monitor_port = int(
+        monitor_config.get("port", DEFAULT_MONITOR_PORT)
+    )
+    for name in heartbeat_node_names:
+        service = services[name]
+        service["container_name"] = name
+        service.setdefault("environment", []).append(f"NODE_NAME={name}")
+        if monitor_enabled:
+            service["environment"].extend(
+                [
+                    f"MONITOR_HOSTS={monitor_hosts}",
+                    f"MONITOR_PORT={monitor_port}",
+                ]
+            )
+
+    rabbitmq_env_vars = []
+    if bool_value(config, "rabbitmq_durable", False):
+        rabbitmq_env_vars.append("RABBITMQ_DURABLE=true")
+    if bool_value(config, "rabbitmq_publisher_confirms", False):
+        rabbitmq_env_vars.append("RABBITMQ_PUBLISHER_CONFIRMS=true")
+    if rabbitmq_env_vars:
+        for name, service in services.items():
+            if name != "rabbitmq":
+                service.setdefault("environment", []).extend(rabbitmq_env_vars)
+
+    if settings.get("monkey", {}).get("enabled", False):
+        services["monkey"] = monkey_service(settings, client_names)
+
+    compose: dict = {"services": services}
+    if named_volumes:
+        compose["volumes"] = named_volumes
+    return compose
 
 
 def rabbitmq_service(expose_ports: bool) -> dict:
@@ -731,29 +937,60 @@ def gateway_service(file_ingestor_count: int, settings: dict, enabled_queries: s
     )
 
 
-def file_ingestor_service(index: int, settings: dict) -> dict:
+def file_ingestor_service(
+    index: int,
+    total: int,
+    settings: dict,
+    state_volume: str,
+    filter_usd_amount: int,
+    filter_q5_format_amount: int,
+) -> dict:
+    environment = [
+        f"ID={index}",
+        f"FILE_INGESTOR_AMOUNT={total}",
+        f"FILE_INGESTOR_CONTROL_QUEUE_PREFIX=file_ingestor_control",
+        f"FILE_INGESTOR_RESPONSE_QUEUE_PREFIX={FILE_INGESTOR_RESPONSE_QUEUE_PREFIX}",
+        f"LINE_BATCH_INPUT_QUEUE={worker_queue_name(FILE_INGESTOR_ROUTING_PREFIX, index)}",
+        f"LINE_BATCH_INPUT_EXCHANGE={LINE_BATCH_EXCHANGE}",
+        f"LINE_BATCH_INPUT_ROUTING_PREFIX={FILE_INGESTOR_ROUTING_PREFIX}",
+        f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
+        f"MOM_HOST={MOM_HOST}",
+        "PYTHONUNBUFFERED=1",
+        "STATE_DIR=/worker_state",
+    ]
+    if filter_usd_amount > 0:
+        environment.extend([
+            f"FILTER_USD_AMOUNT={filter_usd_amount}",
+            f"FILTER_USD_EXCHANGE={FILTER_USD_EXCHANGE}",
+            f"FILTER_USD_ROUTING_PREFIX={FILTER_USD_ROUTING_PREFIX}",
+        ])
+    if filter_q5_format_amount > 0:
+        environment.extend([
+            f"FILTER_Q5_FORMAT_AMOUNT={filter_q5_format_amount}",
+            f"FILTER_Q5_FORMAT_EXCHANGE={FILTER_Q5_FORMAT_EXCHANGE}",
+            f"FILTER_Q5_FORMAT_ROUTING_PREFIX={FILTER_Q5_FORMAT_ROUTING_PREFIX}",
+        ])
     return base_service(
         "workers/file_ingestor/Dockerfile",
         depends_on=depends_on_rabbitmq(),
-        environment=[
-            f"ID={index}",
-            f"FILE_INGESTOR_CONTROL_EXCHANGE={FILE_INGESTOR_CONTROL_EXCHANGE}",
-            f"FILE_INGESTOR_RESPONSE_QUEUE_PREFIX={FILE_INGESTOR_RESPONSE_QUEUE_PREFIX}",
-            f"LINE_BATCH_INPUT_QUEUE={LINE_BATCH_QUEUE}",
-            f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
-            f"MOM_HOST={MOM_HOST}",
-            "PYTHONUNBUFFERED=1",
-            f"TRANSACTION_OUTPUT_EXCHANGE={TRANSACTION_EXCHANGE}",
-        ],
+        environment=environment,
+        volumes=[f"{state_volume}:/worker_state"],
     )
 
 
-def file_splitter_service(index: int, settings: dict, q2_enabled: bool) -> dict:
+def file_splitter_service(
+    index: int,
+    settings: dict,
+    q2_enabled: bool,
+    file_ingestor_count: int,
+) -> dict:
     environment = [
         f"FILE_SPLITTER_INPUT_EXCHANGE={FILE_INGESTOR_EXCHANGE}",
         f"FILE_SPLITTER_QUEUE_PREFIX={FILE_SPLITTER_QUEUE_PREFIX}",
+        f"FILE_INGESTOR_AMOUNT={file_ingestor_count}",
         f"ID={index}",
-        f"LINE_BATCH_OUTPUT_QUEUE={LINE_BATCH_QUEUE}",
+        f"LINE_BATCH_OUTPUT_EXCHANGE={LINE_BATCH_EXCHANGE}",
+        f"LINE_BATCH_OUTPUT_ROUTING_PREFIX={FILE_INGESTOR_ROUTING_PREFIX}",
         f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
         f"MAX_BATCH_BYTES={settings.get('chunk_max_bytes', 65536)}",
         f"MAX_LINE_BYTES={settings.get('max_line_bytes', 16777216)}",
@@ -799,10 +1036,16 @@ def filter_service(
     amount: int,
     input_queue: str,
     settings: dict,
-    transaction_exchange: str | None = None,
+    input_exchange: str | None = None,
+    input_routing_prefix: str | None = None,
     enabled_queries: set[str] | None = None,
     q3_barrier_amount: int = 1,
     q4_filter_amount: int = 1,
+    filter_q1_amount: int = 1,
+    filter_date_amount: int = 1,
+    filter_q5_usd_amount: int = 1,
+    sum_q2_amount: int = 1,
+    sum_q3_amount: int = 1,
 ) -> dict:
     enabled_queries = enabled_queries or {"q1", "q2", "q3", "q4", "q5"}
     environment = [
@@ -823,7 +1066,6 @@ def filter_service(
         f"Q3_CANDIDATES_QUEUE={Q3_CANDIDATES_QUEUE}",
         f"SCATTER_GATHER_MAPPER_QUEUE={SG_MAPPER_QUEUE}",
         f"SUM_PREFIX={SUM_Q3_PREFIX}",
-        f"SUM_Q2_QUEUE={SUM_Q2_QUEUE}",
         f"SUM_Q3_QUEUE={SUM_Q3_QUEUE}",
         f"USD_ENABLE_Q1={int('q1' in enabled_queries)}",
         f"USD_ENABLE_Q2={int('q2' in enabled_queries)}",
@@ -837,18 +1079,52 @@ def filter_service(
             f"Q4_FILTER_INPUT_EXCHANGE={Q4_FILTER_INPUT_EXCHANGE}",
             f"Q4_FILTER_INPUT_ROUTING_PREFIX={Q4_FILTER_ROUTING_PREFIX}",
         ])
-    # Sharded mode: el filter_date publica candidates al exchange con routing
-    # key por client_id en lugar de la queue compartida.
-    if q3_barrier_amount > 1:
+    if "q2" in enabled_queries:
         environment.extend([
+            f"SUM_Q2_AMOUNT={sum_q2_amount}",
+            f"SUM_Q2_EXCHANGE={SUM_Q2_EXCHANGE}",
+            f"SUM_Q2_ROUTING_PREFIX={SUM_Q2_PREFIX}",
+        ])
+    if configuration == "USD" and "q1" in enabled_queries:
+        environment.extend([
+            f"FILTER_Q1_AMOUNT={filter_q1_amount}",
+            f"FILTER_Q1_EXCHANGE={FILTER_Q1_EXCHANGE}",
+            f"FILTER_Q1_ROUTING_PREFIX={FILTER_Q1_ROUTING_PREFIX}",
+        ])
+    if configuration == "USD" and (("q3" in enabled_queries) or ("q4" in enabled_queries)):
+        environment.extend([
+            f"FILTER_DATE_AMOUNT={filter_date_amount}",
+            f"FILTER_DATE_EXCHANGE={FILTER_DATE_EXCHANGE}",
+            f"FILTER_DATE_ROUTING_PREFIX={FILTER_DATE_ROUTING_PREFIX}",
+        ])
+    if configuration == "Q5":
+        environment.extend([
+            f"FILTER_Q5_USD_AMOUNT={filter_q5_usd_amount}",
+            f"FILTER_Q5_USD_EXCHANGE={FILTER_Q5_USD_EXCHANGE}",
+            f"FILTER_Q5_USD_ROUTING_PREFIX={FILTER_Q5_USD_ROUTING_PREFIX}",
+        ])
+    if "q3" in enabled_queries:
+        environment.extend([
+            f"SUM_Q3_AMOUNT={sum_q3_amount}",
+            f"SUM_Q3_EXCHANGE={SUM_Q3_EXCHANGE}",
+            f"SUM_Q3_ROUTING_PREFIX={SUM_Q3_PREFIX}",
             f"Q3_CANDIDATES_EXCHANGE={Q3_CANDIDATES_EXCHANGE}",
             f"Q3_CANDIDATES_ROUTING_PREFIX={Q3_CANDIDATES_ROUTING_PREFIX}",
         ])
-    if transaction_exchange:
-        environment.append(f"TRANSACTION_EXCHANGE={transaction_exchange}")
+    if input_exchange:
+        environment.extend([
+            f"INPUT_EXCHANGE={input_exchange}",
+            f"INPUT_ROUTING_PREFIX={input_routing_prefix}",
+        ])
     prefetch = settings.get("filter_prefetch_count")
     if prefetch is not None:
         environment.append(f"PREFETCH_COUNT={prefetch}")
+    output_batch_bytes = settings.get("filter_output_batch_bytes")
+    if output_batch_bytes is not None:
+        environment.append(f"FILTER_OUTPUT_BATCH_BYTES={output_batch_bytes}")
+    output_batch_max_tx = settings.get("filter_output_batch_max_tx")
+    if output_batch_max_tx is not None:
+        environment.append(f"FILTER_OUTPUT_BATCH_MAX_TX={output_batch_max_tx}")
 
     return base_service(
         "workers/filter/Dockerfile",
@@ -872,7 +1148,12 @@ def rates_service() -> dict:
 
 
 def filter_q5_usd_service(
-    index: int, amount: int, aggregation_amount: int, input_queue: str
+    index: int,
+    amount: int,
+    aggregation_amount: int,
+    input_queue: str,
+    input_exchange: str,
+    input_routing_prefix: str,
 ) -> dict:
     return base_service(
         "workers/filter_q5_usd/Dockerfile",
@@ -882,7 +1163,9 @@ def filter_q5_usd_service(
             f"AGGREGATION_PREFIX={AGGREGATION_Q5_PREFIX}",
             f"FILTER_Q5_USD_AMOUNT={amount}",
             f"ID={index}",
+            f"INPUT_EXCHANGE={input_exchange}",
             f"INPUT_QUEUE={input_queue}",
+            f"INPUT_ROUTING_PREFIX={input_routing_prefix}",
             f"MOM_HOST={MOM_HOST}",
             "PYTHONUNBUFFERED=1",
             f"RATES_REQUEST_QUEUE={RATES_REQUEST_QUEUE}",
@@ -899,6 +1182,8 @@ def sum_service(
     aggregation_amount: int,
     aggregation_prefix: str,
     input_queue: str,
+    input_exchange: str | None,
+    input_routing_prefix: str | None,
     settings: dict,
     sum_prefix: str,
 ) -> dict:
@@ -913,6 +1198,10 @@ def sum_service(
         f"SUM_AMOUNT={amount}",
         f"SUM_PREFIX={sum_prefix}",
     ]
+    if input_exchange is not None:
+        environment.append(f"INPUT_EXCHANGE={input_exchange}")
+    if input_routing_prefix is not None:
+        environment.append(f"INPUT_ROUTING_PREFIX={input_routing_prefix}")
     prefetch = settings.get("filter_prefetch_count")
     if prefetch is not None:
         environment.append(f"PREFETCH_COUNT={prefetch}")
@@ -932,6 +1221,7 @@ def aggregator_service(
     output_queue: str,
     sum_amount: int,
     sum_prefix: str,
+    state_volume: str,
 ) -> dict:
     return base_service(
         "workers/aggregator/Dockerfile",
@@ -946,7 +1236,9 @@ def aggregator_service(
             "PYTHONUNBUFFERED=1",
             f"SUM_AMOUNT={sum_amount}",
             f"SUM_PREFIX={sum_prefix}",
+            "STATE_DIR=/worker_state",
         ],
+        volumes=[f"{state_volume}:/worker_state"],
     )
 
 
@@ -972,8 +1264,7 @@ def joiner_service(
         f"SUM_AMOUNT={sum_amount}",
         f"SUM_PREFIX={sum_prefix}",
     ]
-    # Sharded Q3: el joiner enruta averages por client_id al barrier shard.
-    if configuration == "Q3" and q3_barrier_amount > 1:
+    if configuration == "Q3":
         environment.extend([
             f"Q3_BARRIER_AMOUNT={q3_barrier_amount}",
             f"Q3_AVERAGES_EXCHANGE={Q3_AVERAGES_EXCHANGE}",
@@ -1003,15 +1294,12 @@ def q3_barrier_service(
         f"Q3_BARRIER_AMOUNT={barrier_amount}",
         "Q3_THRESHOLD_DIVISOR=100",
     ]
-    # Sharded mode: exponer los exchanges y prefijos de routing key. El barrier
-    # creará su queue bindeada al routing key "{prefix}_{ID}".
-    if barrier_amount > 1:
-        environment.extend([
-            f"Q3_AVERAGES_EXCHANGE={Q3_AVERAGES_EXCHANGE}",
-            f"Q3_CANDIDATES_EXCHANGE={Q3_CANDIDATES_EXCHANGE}",
-            f"Q3_AVERAGES_ROUTING_PREFIX={Q3_AVERAGES_ROUTING_PREFIX}",
-            f"Q3_CANDIDATES_ROUTING_PREFIX={Q3_CANDIDATES_ROUTING_PREFIX}",
-        ])
+    environment.extend([
+        f"Q3_AVERAGES_EXCHANGE={Q3_AVERAGES_EXCHANGE}",
+        f"Q3_CANDIDATES_EXCHANGE={Q3_CANDIDATES_EXCHANGE}",
+        f"Q3_AVERAGES_ROUTING_PREFIX={Q3_AVERAGES_ROUTING_PREFIX}",
+        f"Q3_CANDIDATES_ROUTING_PREFIX={Q3_CANDIDATES_ROUTING_PREFIX}",
+    ])
     return base_service(
         "workers/q3_barrier/Dockerfile",
         depends_on=depends_on_rabbitmq(),
@@ -1267,6 +1555,109 @@ def client_service(client_id: int, account: dict, settings: dict, depends_on: li
     )
 
 
+def monkey_service(settings: dict, client_names: list[str]) -> dict:
+    monkey = settings.get("monkey", {})
+    environment = [
+        "PYTHONUNBUFFERED=1",
+        "MONKEY_ENABLED=true",
+        f"MONKEY_INTERVAL={int(monkey.get('interval', 30))}",
+    ]
+    if monkey.get("interval_min") is not None:
+        environment.append(f"MONKEY_INTERVAL_MIN={int(monkey['interval_min'])}")
+    if monkey.get("interval_max") is not None:
+        environment.append(f"MONKEY_INTERVAL_MAX={int(monkey['interval_max'])}")
+    if monkey.get("max_kills") is not None:
+        environment.append(f"MONKEY_MAX_KILLS={int(monkey['max_kills'])}")
+    if monkey.get("kill_monitor_leader_first"):
+        environment.append("MONKEY_KILL_MONITOR_LEADER_FIRST=true")
+    if monkey.get("client_disconnect_abort"):
+        environment.append("MONKEY_KILL_CLIENT_FIRST=true")
+        environment.append(
+            f"MONKEY_CLIENT_KILL_DELAY={int(monkey.get('client_disconnect_delay', 5))}"
+        )
+    # targets may be a per-worker toggle map {name: bool} or a plain list.
+    raw_targets = monkey.get("targets") or []
+    if isinstance(raw_targets, dict):
+        targets = [name for name, enabled in raw_targets.items() if enabled]
+        # An explicit toggle map with everything off means "kill nothing", not
+        # "kill anything"
+        if not targets:
+            targets = ["__monkey_none__"]
+    else:
+        targets = list(raw_targets)
+    if targets:
+        environment.append(f"MONKEY_INCLUDE={','.join(targets)}")
+    excludes = monkey.get("exclude") or []
+    if excludes:
+        environment.append(f"MONKEY_EXCLUDE={','.join(excludes)}")
+    return {
+        "build": {"context": "./monkey", "dockerfile": "Dockerfile"},
+        "environment": environment,
+        "volumes": ["/var/run/docker.sock:/var/run/docker.sock"],
+        "depends_on": {name: {"condition": "service_started"} for name in client_names},
+    }
+
+
+def monitor_service(
+    monitor_id: int,
+    monitor_count: int,
+    nodes_to_watch: list[str],
+    monitor_config: dict,
+    settings: dict,
+) -> dict:
+    monitor_port = int(
+        monitor_config.get("port", DEFAULT_MONITOR_PORT)
+    )
+    election_port = int(
+        monitor_config.get("election_port", DEFAULT_ELECTION_PORT)
+    )
+    return {
+        "build": {
+            "context": "./src/",
+            "dockerfile": "monitor/Dockerfile",
+        },
+        "environment": [
+            f"MONITOR_ID={monitor_id}",
+            f"MONITOR_COUNT={monitor_count}",
+            f"MONITOR_PORT={monitor_port}",
+            f"ELECTION_PORT={election_port}",
+            (
+                "MONITOR_CHECK_INTERVAL="
+                f"{monitor_config.get('check_interval', DEFAULT_MONITOR_CHECK_INTERVAL)}"
+            ),
+            (
+                "MAX_MISSED="
+                f"{monitor_config.get('max_missed', DEFAULT_MAX_MISSED)}"
+            ),
+            (
+                "ELECTION_TIMEOUT="
+                f"{monitor_config.get('election_timeout', DEFAULT_ELECTION_TIMEOUT)}"
+            ),
+            (
+                "COORDINATOR_TIMEOUT="
+                f"{monitor_config.get('coordinator_timeout', DEFAULT_COORDINATOR_TIMEOUT)}"
+            ),
+            (
+                "STARTUP_GRACE_PERIOD="
+                f"{monitor_config.get('startup_grace_period', DEFAULT_STARTUP_GRACE_PERIOD)}"
+            ),
+            "MONITOR_STATE_PATH=/data/monitor/epoch.json",
+            f"NODES_TO_WATCH={','.join(nodes_to_watch)}",
+            "PINNED_CONTAINER_NAMES=true",
+            f"LOGGING_LEVEL={settings.get('logging_level', 'INFO')}",
+            "PYTHONUNBUFFERED=1",
+        ],
+        "expose": [
+            f"{monitor_port}/udp",
+            str(election_port),
+        ],
+        "volumes": [
+            "/var/run/docker.sock:/var/run/docker.sock",
+            f"./data/monitor/monitor_{monitor_id}:/data/monitor:rw",
+        ],
+    }
+
+
 def base_service(dockerfile: str, depends_on, environment: list[str], volumes: list[str] | None = None) -> dict:
     service = {
         "build": {"context": "./src/", "dockerfile": dockerfile},
@@ -1276,6 +1667,41 @@ def base_service(dockerfile: str, depends_on, environment: list[str], volumes: l
     if volumes:
         service["volumes"] = volumes
     return service
+
+
+def add_worker_state_volume(
+    service_name: str,
+    service: dict,
+    named_volumes: dict[str, None],
+    snapshot_interval: int = DEFAULT_SNAPSHOT_INTERVAL,
+) -> None:
+    volume_name = worker_state_volume_name(service_name)
+    named_volumes[volume_name] = None
+    add_env_once(service, f"STATE_DIR={WORKER_STATE_DIR}")
+    add_env_once(service, f"SNAPSHOT_INTERVAL={snapshot_interval}")
+    add_volume_once(service, f"{volume_name}:{WORKER_STATE_DIR}")
+
+
+def worker_state_volume_name(service_name: str) -> str:
+    return f"{service_name}_state"
+
+
+def worker_queue_name(prefix: str, index: int) -> str:
+    return f"{prefix}_{int(index)}"
+
+
+def add_env_once(service: dict, item: str) -> None:
+    environment = service.setdefault("environment", [])
+    key = item.split("=", 1)[0]
+    if any(entry.split("=", 1)[0] == key for entry in environment):
+        return
+    environment.append(item)
+
+
+def add_volume_once(service: dict, item: str) -> None:
+    volumes = service.setdefault("volumes", [])
+    if item not in volumes:
+        volumes.append(item)
 
 
 def observability_env() -> list[str]:

@@ -14,18 +14,27 @@ import time
 def _setup(pika_env, monkeypatch):
     monkeypatch.setenv("ID", "0")
     monkeypatch.setenv("MOM_HOST", "rabbitmq")
-    monkeypatch.setenv("Q3_AVERAGES_QUEUE", "q3_averages_queue")
-    monkeypatch.setenv("Q3_CANDIDATES_QUEUE", "q3_candidates_queue")
+    monkeypatch.setenv("Q3_AVERAGES_QUEUE", "q3_averages_0")
+    monkeypatch.setenv("Q3_CANDIDATES_QUEUE", "q3_candidates_0")
     monkeypatch.setenv("GATEWAY_Q3_QUEUE", "gateway_q3_queue")
-    monkeypatch.setenv("Q3_BARRIER_AMOUNT", "1")  # no sharding -> plain queues
+    monkeypatch.setenv("Q3_BARRIER_AMOUNT", "1")
+    monkeypatch.setenv("Q3_AVERAGES_EXCHANGE", "q3_averages_exchange")
+    monkeypatch.setenv("Q3_CANDIDATES_EXCHANGE", "q3_candidates_exchange")
+    monkeypatch.setenv("Q3_AVERAGES_ROUTING_PREFIX", "q3_averages")
+    monkeypatch.setenv("Q3_CANDIDATES_ROUTING_PREFIX", "q3_candidates")
 
     module = pika_env.import_fresh("workers.q3_barrier.q3_barrier")
 
+    created = []
+
     def factory(*args, **kwargs):
-        return pika_env.BlockingFakeConsumer(block_timeout=30)
+        endpoint = pika_env.BlockingFakeConsumer(block_timeout=30)
+        created.append(endpoint)
+        return endpoint
 
     monkeypatch.setattr(module.middleware, "MessageMiddlewareQueueRabbitMQ", factory)
     monkeypatch.setattr(module.middleware, "MessageMiddlewareExchangeRabbitMQ", factory)
+    module._test_created_endpoints = created
     return module
 
 
@@ -56,10 +65,7 @@ def test_q3_barrier_sigterm_stops_both_consumers_and_closes(pika_env, monkeypatc
     assert not runner.is_alive()
     assert worker.averages_input.stop_calls == 1
     assert worker.candidates_input.stop_calls == 1
-    # Each connection closed by its owning thread.
-    assert worker.averages_input.closed          # close() (main)
-    assert worker.averages_output_queue.closed    # close() (main)
-    assert worker.candidates_input.closed         # candidates thread finally
+    assert all(endpoint.closed for endpoint in module._test_created_endpoints)
 
 
 def test_q3_barrier_handle_sigterm_is_idempotent(pika_env, monkeypatch):

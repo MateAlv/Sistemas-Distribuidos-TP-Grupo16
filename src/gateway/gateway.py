@@ -12,7 +12,7 @@ from common.message_protocol.external.types import (
     FILE_TYPE_ACCOUNTS,
     FILE_TYPE_TRANSACTIONS,
     HANDSHAKE, FILE_CHUNK, FINISH, ACK,
-    MSG_CHUNK, MSG_EOF,
+    MSG_CHUNK, MSG_EOF, MSG_ABORT,
     file_ingestor_routing_key,
     file_type_name,
 )
@@ -63,6 +63,7 @@ class Gateway:
 
         self._client_queues = {}
         self._pending_eofs_by_client = {}  # client_id -> pending EOF count
+        self._addressed_result_seen: set[tuple[str, int, int, int]] = set()
         self._client_queues_lock = threading.Lock()
 
         self._q1_queue_name = (
@@ -95,24 +96,28 @@ class Gateway:
         self._ensure_file_splitter_bindings()
 
         self._start_result_consumer(self._q1_queue_name, self._q1_csv_lines, "")
-        self._start_result_consumer(self._q2_queue_name, self._q2_csv_lines, "Q2|")
+        self._start_result_consumer(
+            self._q2_queue_name, self._q2_csv_lines, "Q2|", addressed=True
+        )
         self._start_result_consumer(self._q3_queue_name, self._q3_csv_lines, "Q3|")
-        self._start_result_consumer(self._q4_queue_name, self._q4_csv_lines, "Q4|")
-        self._start_result_consumer(self._q5_queue_name, self._q5_csv_lines, "Q5|")
+        self._start_result_consumer(self._q4_queue_name, self._q4_csv_lines, "Q4|", addressed=True)
+        self._start_result_consumer(self._q5_queue_name, self._q5_csv_lines, "Q5|", addressed=True)
 
         try:
             self._accept_clients()
         finally:
             self._shutdown_workers()
 
-    def _start_result_consumer(self, queue_name, payload_to_csv_lines, prefix: str) -> None:
+    def _start_result_consumer(
+        self, queue_name, payload_to_csv_lines, prefix: str, addressed: bool = False
+    ) -> None:
         if not queue_name:
             return
         consumer = MessageMiddlewareQueueRabbitMQ(self._config.mom_host, queue_name)
         self._consumers.append(consumer)
         thread = threading.Thread(
             target=self._run_result_consumer,
-            args=(consumer, payload_to_csv_lines, prefix),
+            args=(consumer, payload_to_csv_lines, prefix, addressed),
             daemon=True,
         )
         self._consumer_threads.append(thread)
@@ -247,21 +252,52 @@ class Gateway:
     def _serve_client(self, client_sock: socket.socket) -> int:
         client_id = self._recv_handshake(client_sock)
         session = ClientSession(client_id=client_id, sock=client_sock)
-        
+
         q = queue.Queue()
         with self._client_queues_lock:
             self._client_queues[client_id] = q
             self._pending_eofs_by_client[client_id] = self._num_result_queues
-        
+
+        chunks_finished = False
         try:
             self._forward_chunks(session)
+            chunks_finished = True
             self._wait_for_results(session, q)
         finally:
             with self._client_queues_lock:
                 self._client_queues.pop(client_id, None)
                 self._pending_eofs_by_client.pop(client_id, None)
+                self._addressed_result_seen = {
+                    key for key in self._addressed_result_seen if key[1] != client_id
+                }
+            if not chunks_finished:
+                self._send_abort(session.client_id)
 
         return client_id
+
+    def _send_abort(self, client_id: int) -> None:
+        """Broadcast ABORT to every file-splitter partition so each worker can
+        discard orphaned per-client state. Best-effort: if this send fails the
+        state leaks until the next gateway restart, which is acceptable."""
+        partitions = self._config.file_ingestor_partitions
+        publisher = FileIngestorPublisher(
+            mom_host=self._config.mom_host,
+            exchange_name=self._config.file_ingestor_exchange,
+        )
+        try:
+            abort_msg = _serialize_abort(client_id)
+            for partition in range(partitions):
+                publisher.send(partition, abort_msg)
+            logging.info(
+                "gateway_abort_sent | client_id=%s | partitions=%s",
+                client_id, partitions,
+            )
+        except Exception as e:
+            logging.error(
+                "gateway_abort_error | client_id=%s | error=%s", client_id, e
+            )
+        finally:
+            publisher.close()
 
     def _recv_handshake(self, client_sock: socket.socket) -> int:
         msg_type = int.from_bytes(recv_exact(client_sock, 1), "big")
@@ -442,18 +478,32 @@ class Gateway:
                         logging.info("gateway_client_closed | client_id=%s", session.client_id)
                         return  
 
-    def _run_result_consumer(self, consumer, payload_to_csv_lines, prefix: str) -> None:
+    def _run_result_consumer(
+        self, consumer, payload_to_csv_lines, prefix: str, addressed: bool = False
+    ) -> None:
         internal_serializer = InternalProtocol()
 
         def callback(message, ack, nack):
             try:
-                msg_type, client_id, payload = internal_serializer.unpack_packet(message)
+                if addressed:
+                    msg_type, client_id, sender_id, seq, payload = (
+                        internal_serializer.unpack_addressed_packet(message)
+                    )
+                else:
+                    msg_type, client_id, payload = internal_serializer.unpack_packet(message)
 
                 with self._client_queues_lock:
                     client_queue = self._client_queues.get(client_id)
                     if not client_queue:
                         ack()
                         return
+
+                    if addressed:
+                        dedup_key = (prefix, client_id, sender_id, seq)
+                        if dedup_key in self._addressed_result_seen:
+                            ack()
+                            return
+                        self._addressed_result_seen.add(dedup_key)
 
                     if msg_type == MessageType.EOF:
                         remaining = self._pending_eofs_by_client.get(client_id, 1) - 1
@@ -539,11 +589,6 @@ class Gateway:
             yield f"{account.bank_id},{account.account}"
 
     @staticmethod
-    def _q4_csv(payload: bytes) -> str:
-        account = Q4AccountIdSerializer.deserialize(payload)
-        return f"{account.bank_id},{account.account}"
-
-    @staticmethod
     def _q5_csv_lines(payload: bytes):
         yield Gateway._q5_csv(payload)
 
@@ -559,6 +604,10 @@ def _send_ack(sock: socket.socket) -> None:
 
 def _serialize_chunk(chunk: FileChunk) -> bytes:
     return MSG_CHUNK.to_bytes(1, "big") + chunk.serialize()
+
+
+def _serialize_abort(client_id: int) -> bytes:
+    return MSG_ABORT.to_bytes(1, "big") + client_id.to_bytes(4, "big")
 
 
 def _serialize_file_eof(client_id: int, file_type: int, rel_path: str) -> bytes:
