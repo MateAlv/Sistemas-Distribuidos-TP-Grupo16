@@ -77,6 +77,10 @@ class JoinerState:
     def close_change(client_id: int) -> dict:
         return {"type": "close", "client_id": client_id}
 
+    @staticmethod
+    def abort_change(client_id: int) -> dict:
+        return JoinerState.close_change(client_id)
+
     def data_count(self, client_id: int) -> int:
         return self._data_count_by_client.get(client_id, 0)
 

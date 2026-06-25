@@ -46,6 +46,10 @@ class Q4DeduperState:
         return {"type": "close", "client_id": client_id}
 
     @staticmethod
+    def abort_change(client_id: int) -> dict:
+        return Q4DeduperState.close_change(client_id)
+
+    @staticmethod
     def leader_report_change(client_id: int, sender_id: int, emitted_accounts: int) -> dict:
         return {
             "type": "leader_report",

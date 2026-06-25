@@ -10,9 +10,10 @@ settings:
   result_line_max_bytes: 1048576
   connect_timeout_seconds: 30
   io_timeout_seconds: 3600
-  chaos:
+  # Fault-injection monkey. Disabled in the production config; see
+  # config/test-config.yaml for the chaos-test setup.
+  monkey:
     enabled: false
-    interval: 30
 
 monitor:
   enabled: true

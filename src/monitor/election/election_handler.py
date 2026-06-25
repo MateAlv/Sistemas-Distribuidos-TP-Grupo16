@@ -187,6 +187,10 @@ class ElectionHandler:
         with self._leader_lock:
             return self._leader_running and self._leader == self._monitor_id
 
+    @property
+    def monitor_id(self) -> int:
+        return self._monitor_id
+
     def get_leader(self) -> int:
         with self._leader_lock:
             return self._leader

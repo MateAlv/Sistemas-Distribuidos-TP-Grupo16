@@ -314,11 +314,50 @@ class FilterQ5UsdWorker:
             elif msg_type == MessageType.EOF:
                 self._handle_upstream_eof(client_id, payload, ack, nack)
 
+            elif msg_type == MessageType.ABORT:
+                self._handle_abort(client_id, sender_id, seq, ack, nack)
+
             else:
                 raise ValueError(f"Unexpected filter_q5_usd message type: {msg_type}")
 
         except Exception:
             logging.exception("filter_q5_usd_data_error | id=%s", ID)
+            nack(requeue=True)
+
+    def _downstream_abort_outputs(self, client_id: int) -> list:
+        current_seq = self._state.agg_seq(client_id)
+        return [
+            (f"{AGGREGATION_PREFIX}_{i}",
+             self._addressed_packet(MessageType.ABORT, client_id, current_seq + i, b""))
+            for i in range(AGGREGATION_AMOUNT)
+        ]
+
+    def _handle_abort(self, client_id: int, sender_id: int, seq: int, ack, nack) -> None:
+        msg_id = f"abort:{sender_id}:{client_id}:{seq}"
+        try:
+            with self._lock:
+                if self._state.is_closed(client_id):
+                    ack()
+                    return
+
+                def bfn(_pl):
+                    return (
+                        FilterQ5UsdState.abort_change(client_id),
+                        self._downstream_abort_outputs(client_id),
+                    )
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, sender_id, seq, b"", bfn,
+                    kind=MsgKind.ABORT,
+                )
+            self._publish_commit_ack(instruction, ack)
+            logging.info(
+                "filter_q5_usd_abort | id=%s | client_id=%s", ID, client_id
+            )
+        except Exception:
+            logging.exception(
+                "filter_q5_usd_abort_error | id=%s | client_id=%s", ID, client_id
+            )
             nack(requeue=True)
 
     def _handle_upstream_eof(self, client_id: int, payload: bytes, ack, nack):

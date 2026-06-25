@@ -103,6 +103,13 @@ class Q4FilterState:
         }
 
     @staticmethod
+    def abort_change(client_id: int) -> dict:
+        return Q4FilterState.compound_change(
+            Q4FilterState.coordinator_cleanup_change(client_id),
+            Q4FilterState.close_change(client_id),
+        )
+
+    @staticmethod
     def coordinator_cleanup_change(client_id: int) -> dict:
         # Non-leader cleanup after FlushAction(is_leader=False).
         return {"type": "coordinator_cleanup", "client_id": client_id}

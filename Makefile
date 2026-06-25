@@ -19,7 +19,10 @@ TEST_Q1_SUCCESS_PATTERN := Forward pass successful - Mate | filter=Q1
 TEST_CLIENT_DONE_PATTERN := client_results_finished
 TEST_Q2_EOF_PATTERN := gateway_eof | prefix=Q2|
 TEST_Q4_EOF_PATTERN := gateway_eof | prefix=Q4|
-TEST_CLIENT_WAIT_TIMEOUT ?= 4600s
+TEST_CLIENT_WAIT_TIMEOUT ?= 18000s
+# Unset by default so config/test-config.yaml client_accounts is the source of
+# truth for the dataset. Set TEST_DATASET=LI-Medium to override for one run.
+TEST_DATASET ?=
 TEST_SMOKE_DEADLINE_SECONDS ?= 600
 SCENARIOS_DIR := config/scenarios
 RABBIT_SCREEN_URL ?= http://localhost:15672
@@ -110,31 +113,31 @@ clean-state:
 	find data/datasets -mindepth 1 -maxdepth 1 -type d -name 'client-*' -exec rm -rf {} +
 .PHONY: clean-state
 
-CHAOS_SERVICE := chaos_monkey
+MONKEY_SERVICE := monkey
 
-chaos-kill-random:
-	@chaos=$$(docker compose -f $(COMPOSE_FILE) ps --status running --quiet $(CHAOS_SERVICE)); \
-	if [ -z "$$chaos" ]; then echo "chaos monkey not running (enable chaos in config and 'make up')" >&2; exit 1; fi; \
-	docker exec "$$chaos" python3 -c "from manager import ChaosManager, excluded_from_env; result = ChaosManager(excluded_from_env()).kill_random_container(); print(result); raise SystemExit(0 if result else 1)"
-.PHONY: chaos-kill-random
+monkey-kill-random:
+	@monkey=$$(docker compose -f $(COMPOSE_FILE) ps --status running --quiet $(MONKEY_SERVICE)); \
+	if [ -z "$$monkey" ]; then echo "monkey not running (enable monkey in config and 'make up')" >&2; exit 1; fi; \
+	docker exec "$$monkey" python3 -c "from manager import MonkeyManager, excluded_from_env, included_from_env; result = MonkeyManager(excluded_from_env(), included_from_env()).kill_random_container(); print(result); raise SystemExit(0 if result else 1)"
+.PHONY: monkey-kill-random
 
-CHAOS_TARGET := $(if $(CONTAINER),$(CONTAINER),$(word 2,$(MAKECMDGOALS)))
-chaos-kill:
-	@if [ -z "$(CHAOS_TARGET)" ]; then \
-		echo "Usage: make chaos-kill CONTAINER=<service>" >&2; \
-		echo "   or: make chaos-kill <service>" >&2; \
+MONKEY_TARGET := $(if $(CONTAINER),$(CONTAINER),$(word 2,$(MAKECMDGOALS)))
+monkey-kill:
+	@if [ -z "$(MONKEY_TARGET)" ]; then \
+		echo "Usage: make monkey-kill CONTAINER=<service>" >&2; \
+		echo "   or: make monkey-kill <service>" >&2; \
 		exit 2; \
 	fi; \
-	if ! docker compose -f $(COMPOSE_FILE) config --services | grep -Fxq "$(CHAOS_TARGET)"; then \
-		echo "Unknown compose service: $(CHAOS_TARGET)" >&2; \
+	if ! docker compose -f $(COMPOSE_FILE) config --services | grep -Fxq "$(MONKEY_TARGET)"; then \
+		echo "Unknown compose service: $(MONKEY_TARGET)" >&2; \
 		exit 2; \
 	fi; \
-	chaos=$$(docker compose -f $(COMPOSE_FILE) ps --status running --quiet $(CHAOS_SERVICE)); \
-	if [ -z "$$chaos" ]; then echo "chaos monkey not running (enable chaos in config and 'make up')" >&2; exit 1; fi; \
-	docker exec "$$chaos" python3 -c "import sys; from manager import ChaosManager; result = ChaosManager().kill_container(sys.argv[1]); print(result); raise SystemExit(0 if result else 1)" "$(CHAOS_TARGET)"
-.PHONY: chaos-kill
+	monkey=$$(docker compose -f $(COMPOSE_FILE) ps --status running --quiet $(MONKEY_SERVICE)); \
+	if [ -z "$$monkey" ]; then echo "monkey not running (enable monkey in config and 'make up')" >&2; exit 1; fi; \
+	docker exec "$$monkey" python3 -c "import sys; from manager import MonkeyManager; result = MonkeyManager().kill_container(sys.argv[1]); print(result); raise SystemExit(0 if result else 1)" "$(MONKEY_TARGET)"
+.PHONY: monkey-kill
 
-ifneq ($(filter chaos-kill,$(MAKECMDGOALS)),)
+ifneq ($(filter monkey-kill,$(MAKECMDGOALS)),)
 ifneq ($(word 2,$(MAKECMDGOALS)),)
 $(word 2,$(MAKECMDGOALS)):
 	@:
@@ -217,15 +220,15 @@ monitor-test-election:
 		if [ "$$leader" = "$$successor" ]; then \
 			echo "At least two monitor replicas are required" >&2; exit 1; \
 		fi; \
-		chaos=$$("$${compose[@]}" ps --status running --quiet "$(CHAOS_SERVICE)"); \
-		if [ -z "$$chaos" ]; then \
-			echo "Chaos monkey is not running. Enable settings.chaos and start the stack." >&2; \
+		monkey=$$("$${compose[@]}" ps --status running --quiet "$(MONKEY_SERVICE)"); \
+		if [ -z "$$monkey" ]; then \
+			echo "Monkey is not running. Enable settings.monkey and start the stack." >&2; \
 			exit 1; \
 		fi; \
 		started_at=$$(date -u +"%Y-%m-%dT%H:%M:%SZ"); \
-		echo "Killing leader $$leader through Chaos Monkey..."; \
-		docker exec "$$chaos" python3 -c \
-			"import sys; from manager import ChaosManager; sys.exit(0 if ChaosManager().kill_container(sys.argv[1]) else 1)" \
+		echo "Killing leader $$leader through Monkey..."; \
+		docker exec "$$monkey" python3 -c \
+			"import sys; from manager import MonkeyManager; sys.exit(0 if MonkeyManager().kill_container(sys.argv[1]) else 1)" \
 			"$$leader"; \
 		deadline=$$((SECONDS + $(MONITOR_FAILOVER_TIMEOUT))); \
 		while (( SECONDS < deadline )); do \

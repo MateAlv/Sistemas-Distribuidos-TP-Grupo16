@@ -14,6 +14,7 @@ class FakeElectionHandler:
     ) -> None:
         self.leader = leader
         self.leader_id = leader_id
+        self.monitor_id = leader_id if leader else 1
         self.leader_running = leader if leader_running is None else leader_running
         self.wait_calls = []
         self.start_calls = 0

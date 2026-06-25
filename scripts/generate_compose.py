@@ -174,8 +174,8 @@ def parse_args():
     parser.add_argument("--q3-barrier-workers", type=int, default=None, help="Override q3_barrier worker count (sharded by client_id).")
     parser.add_argument("--prefetch", type=int, default=None, help="PREFETCH_COUNT for filter/sum services.")
     parser.add_argument("--clients", type=int, default=None, help="Number of client containers to spawn. Each gets a distinct client_id sharing the first configured dataset.")
-    parser.add_argument("--chaos", action="store_true", default=None, help="Add the chaos monkey service that kills random workers.")
-    parser.add_argument("--chaos-interval", type=int, default=None, help="Seconds between chaos monkey kills.")
+    parser.add_argument("--monkey", action="store_true", default=None, help="Add the monkey service that kills random workers.")
+    parser.add_argument("--monkey-interval", type=int, default=None, help="Seconds between monkey kills.")
     parser.add_argument("--skip-output", action="store_true", help="Do not write docker-compose.yaml.")
     parser.add_argument("--skip-test-output", action="store_true", help="Do not write docker-compose.test.yaml.")
     parser.set_defaults(skip_output=False, skip_test_output=False)
@@ -338,10 +338,10 @@ def apply_cli_overrides(config: dict, args, path: Path) -> None:
         workers["q3_barrier"] = args.q3_barrier_workers
     if args.prefetch is not None:
         settings["filter_prefetch_count"] = args.prefetch
-    if args.chaos:
-        settings.setdefault("chaos", {})["enabled"] = True
-    if args.chaos_interval is not None:
-        settings.setdefault("chaos", {})["interval"] = args.chaos_interval
+    if args.monkey:
+        settings.setdefault("monkey", {})["enabled"] = True
+    if args.monkey_interval is not None:
+        settings.setdefault("monkey", {})["interval"] = args.monkey_interval
     if args.clients is not None:
         if args.clients < 1:
             raise ValueError("clients must be >= 1")
@@ -882,8 +882,8 @@ def build_compose(config: dict, expose_ports: bool) -> dict:
             if name != "rabbitmq":
                 service.setdefault("environment", []).extend(rabbitmq_env_vars)
 
-    if settings.get("chaos", {}).get("enabled", False):
-        services["chaos_monkey"] = chaos_monkey_service(settings, client_names)
+    if settings.get("monkey", {}).get("enabled", False):
+        services["monkey"] = monkey_service(settings, client_names)
 
     compose: dict = {"services": services}
     if named_volumes:
@@ -1555,15 +1555,47 @@ def client_service(client_id: int, account: dict, settings: dict, depends_on: li
     )
 
 
-def chaos_monkey_service(settings: dict, client_names: list[str]) -> dict:
-    chaos = settings.get("chaos", {})
+def monkey_service(settings: dict, client_names: list[str]) -> dict:
+    monkey = settings.get("monkey", {})
+    environment = [
+        "PYTHONUNBUFFERED=1",
+        "MONKEY_ENABLED=true",
+        f"MONKEY_INTERVAL={int(monkey.get('interval', 30))}",
+    ]
+    if monkey.get("interval_min") is not None:
+        environment.append(f"MONKEY_INTERVAL_MIN={int(monkey['interval_min'])}")
+    if monkey.get("interval_max") is not None:
+        environment.append(f"MONKEY_INTERVAL_MAX={int(monkey['interval_max'])}")
+    if monkey.get("max_kills") is not None:
+        environment.append(f"MONKEY_MAX_KILLS={int(monkey['max_kills'])}")
+    if monkey.get("kill_monitor_leader_first"):
+        environment.append("MONKEY_KILL_MONITOR_LEADER_FIRST=true")
+    # Single switch for the whole client-disconnect / ABORT-cleanup scenario:
+    # the first kill disconnects a client mid-upload after client_disconnect_delay
+    # seconds (default 5, the value proven to land during upload).
+    if monkey.get("client_disconnect_abort"):
+        environment.append("MONKEY_KILL_CLIENT_FIRST=true")
+        environment.append(
+            f"MONKEY_CLIENT_KILL_DELAY={int(monkey.get('client_disconnect_delay', 5))}"
+        )
+    # targets may be a per-worker toggle map {name: bool} or a plain list.
+    raw_targets = monkey.get("targets") or []
+    if isinstance(raw_targets, dict):
+        targets = [name for name, enabled in raw_targets.items() if enabled]
+        # An explicit toggle map with everything off means "kill nothing", not
+        # "kill anything"; pin a sentinel that matches no container.
+        if not targets:
+            targets = ["__monkey_none__"]
+    else:
+        targets = list(raw_targets)
+    if targets:
+        environment.append(f"MONKEY_INCLUDE={','.join(targets)}")
+    excludes = monkey.get("exclude") or []
+    if excludes:
+        environment.append(f"MONKEY_EXCLUDE={','.join(excludes)}")
     return {
-        "build": {"context": "./chaos_monkey", "dockerfile": "Dockerfile"},
-        "environment": [
-            "PYTHONUNBUFFERED=1",
-            "CHAOS_ENABLED=true",
-            f"CHAOS_INTERVAL={int(chaos.get('interval', 30))}",
-        ],
+        "build": {"context": "./monkey", "dockerfile": "Dockerfile"},
+        "environment": environment,
         "volumes": ["/var/run/docker.sock:/var/run/docker.sock"],
         "depends_on": {name: {"condition": "service_started"} for name in client_names},
     }

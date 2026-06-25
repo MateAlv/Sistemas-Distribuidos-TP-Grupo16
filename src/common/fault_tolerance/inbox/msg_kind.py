@@ -12,3 +12,6 @@ class MsgKind(IntEnum):
     # an averages and a candidates message can't collide on (client, sender, seq).
     Q3_AVERAGES = 6
     Q3_CANDIDATES = 7
+    # Abort tombstone: a separate inbox bucket so abort (sender=0, seq=0) can
+    # never collide with real DATA or control messages from the same sender.
+    ABORT = 8

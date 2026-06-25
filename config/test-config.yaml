@@ -13,7 +13,38 @@ settings:
   connect_timeout_seconds: 30
   io_timeout_seconds: 3600
   filter_prefetch_count: 50
-  snapshot_interval: 1000
+  snapshot_interval: 2000
+  monkey:
+    enabled: true
+    max_kills: 0
+    interval_min: 30
+    interval_max: 30
+    client_disconnect_abort: false
+    client_disconnect_delay: 5
+    kill_monitor_leader_first: false
+    targets:
+      file_ingestor: true
+      file_splitter: true
+      q4_filter: true
+      q4_joiner: true
+      q4_sum: true
+      q4_aggregator: true
+      q4_deduper: true
+      filter_usd: true
+      filter_q1: true
+      filter_date: true
+      filter_q5_format: true
+      filter_q5_usd: true
+      sum_q2: true
+      sum_q3: true
+      aggregation_q2: true
+      aggregation_q3: true
+      aggregation_q5: true
+      join_q2: true
+      join_q3: true
+      join_q5: true
+      q2_bank_name_joiner: true
+      q3_barrier: true
 
 monitor:
   enabled: true
@@ -56,8 +87,8 @@ workers:
 clients: 2
 client_accounts:
   - client_id: 0
-    accounts_file: data/datasets/LI-Mini/LI-Mini_accounts.csv
-    transactions_file: data/datasets/LI-Mini/LI-Mini_Trans.csv
+    accounts_file: data/datasets/HI-Medium/HI-Medium_accounts.csv
+    transactions_file: data/datasets/HI-Medium/HI-Medium_Trans.csv
   - client_id: 1
-    accounts_file: data/datasets/LI-Mini/LI-Mini_accounts.csv
-    transactions_file: data/datasets/LI-Mini/LI-Mini_Trans.csv
+    accounts_file: data/datasets/HI-Medium/HI-Medium_accounts.csv
+    transactions_file: data/datasets/HI-Medium/HI-Medium_Trans.csv

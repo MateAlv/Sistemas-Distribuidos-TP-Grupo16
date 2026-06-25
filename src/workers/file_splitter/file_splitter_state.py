@@ -103,6 +103,10 @@ class FileSplitterState:
     def client_eof_change(client_id: int) -> dict:
         return {"type": "client_eof", "client_id": client_id}
 
+    @staticmethod
+    def abort_change(client_id: int) -> dict:
+        return {"type": "abort", "client_id": client_id}
+
     def data_lines_emitted(self, key: FileKey) -> int:
         state = self._files.get(key)
         return state.data_lines_emitted if state is not None else 0
@@ -145,6 +149,8 @@ class FileSplitterState:
             accounts_counts = dict(self._accounts_batches_by_client)
             for key in [k for k in self._files if k.client_id == change["client_id"]]:
                 self._run_finish(key, _copy_file_state(self._files[key]), accounts_counts, out)
+        elif kind == "abort":
+            pass  # no data outputs — only the ABORT packet forwarded by _dispatch_abort
         else:
             raise ValueError(f"unknown change type: {kind}")
         return out
@@ -196,6 +202,11 @@ class FileSplitterState:
             for key in [k for k in self._files if k.client_id == change["client_id"]]:
                 self._finish_and_remove(key)
             self._eofs_received += 1
+        elif kind == "abort":
+            client_id = change["client_id"]
+            for key in [k for k in self._files if k.client_id == client_id]:
+                del self._files[key]
+            self._accounts_batches_by_client.pop(client_id, None)
         else:
             raise ValueError(f"unknown change type: {kind}")
 
