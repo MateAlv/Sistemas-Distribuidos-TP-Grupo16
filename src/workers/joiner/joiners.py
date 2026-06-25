@@ -6,6 +6,7 @@ from common import middleware
 from common.constants import C_Q2, C_Q3, C_Q5
 from common.fault_tolerance.handler.action import Action
 from common.fault_tolerance.handler.persistent_state_handler import PersistentStateHandler
+from common.fault_tolerance.inbox import MsgKind
 from common.logging_utils import should_log_progress
 from common.message_protocol.internal.common import MessageType
 from common.message_protocol.internal.common.control_message import ControlMessage
@@ -238,6 +239,23 @@ class JoinerWorker:
                     AGGREGATION_AMOUNT,
                     should_emit,
                 )
+            elif msg_type == MessageType.ABORT:
+                abort_msg_id = f"abort:{sender_id}:{client_id}:{seq}"
+                logging.info(
+                    "joiner_abort | id=%s | configuration=%s | client_id=%s | "
+                    "message=client disconnect signal received; flushing per-client state",
+                    ID, CONFIGURATION, client_id,
+                )
+                def bfn(_pl):
+                    if CONFIGURATION == C_Q5:
+                        return JoinerState.abort_change(client_id), []
+                    abort_pkt = self._output_packet(MessageType.ABORT, client_id, 0, b"")
+                    return JoinerState.abort_change(client_id), [(OUTPUT_QUEUE, abort_pkt)]
+                instruction = self._handler.handle(
+                    abort_msg_id, client_id, sender_id, seq, b"", bfn,
+                    kind=MsgKind.ABORT,
+                )
+
             else:
                 raise ValueError(f"unsupported message type: {msg_type}")
 

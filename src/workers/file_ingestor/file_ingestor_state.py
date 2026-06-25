@@ -69,6 +69,12 @@ class FileIngestorState:
         return {"type": "coordinator_cleanup", "client_id": client_id}
 
     @staticmethod
+    def abort_change(client_id: int) -> dict:
+        """Atomically clean coordinator state + close business state on abort.
+        Idempotent: calling on an already-closed client is a no-op at every step."""
+        return {"type": "abort", "client_id": client_id}
+
+    @staticmethod
     def compound_change(*changes: dict) -> dict:
         return {"type": "compound", "changes": list(changes)}
 
@@ -127,6 +133,12 @@ class FileIngestorState:
             )
         elif kind == "coordinator_cleanup":
             self._coordinator.cleanup_client(client_id)
+        elif kind == "abort":
+            # Clean up any partial coordinator state (may be mid-EOF-coordination)
+            # then mark client closed so late-arriving DATA is silently dropped.
+            self._coordinator.cleanup_client(client_id)
+            self._coordinator.cleanup_leader_state(client_id)
+            self._apply_close(client_id)
         else:
             raise ValueError(f"unknown change type: {kind}")
 

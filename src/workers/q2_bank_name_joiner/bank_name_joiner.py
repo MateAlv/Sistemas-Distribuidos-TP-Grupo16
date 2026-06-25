@@ -12,6 +12,7 @@ from common.fault_tolerance.handler.action import Action
 from common.fault_tolerance.handler.persistent_state_handler import (
     PersistentStateHandler,
 )
+from common.fault_tolerance.inbox import MsgKind
 from common.message_protocol.external.types import FILE_TYPE_ACCOUNTS
 from common.message_protocol.internal import (
     InternalProtocol,
@@ -204,6 +205,19 @@ class BankNameJoinerWorker:
                         "expected_total=%s",
                         self._config.id, client_id, control.expected_total,
                     )
+                elif msg_type == MessageType.ABORT:
+                    logging.info(
+                        "q2_bank_name_joiner_abort | id=%s | client_id=%s | "
+                        "message=client disconnect signal received; flushing per-client state",
+                        self._config.id, client_id,
+                    )
+                    def bfn(_pl: bytes):
+                        return BankNameJoinerState.abort_change(client_id), []
+                    instruction = self._handler.handle(
+                        f"abort:{sender_id}:{client_id}:{seq}",
+                        client_id, sender_id, seq, b"", bfn,
+                        kind=MsgKind.ABORT,
+                    )
                 else:
                     raise ValueError(f"unsupported q2 message type: {msg_type}")
 
@@ -264,6 +278,20 @@ class BankNameJoinerWorker:
                         "q2_bank_name_joiner_accounts_eof | id=%s | client_id=%s | "
                         "expected_total=%s",
                         self._config.id, client_id, control.expected_total,
+                    )
+            elif msg_type == MessageType.ABORT:
+                with self._lock:
+                    logging.info(
+                        "q2_bank_name_joiner_abort | id=%s | client_id=%s | "
+                        "message=client disconnect signal received; flushing per-client state",
+                        self._config.id, client_id,
+                    )
+                    def bfn(_pl: bytes):
+                        return BankNameJoinerState.abort_change(client_id), []
+                    instruction = self._handler.handle(
+                        f"abort:{sender_id}:{client_id}:{seq}",
+                        client_id, effective_sender_id, seq, b"", bfn,
+                        kind=MsgKind.ABORT,
                     )
             else:
                 raise ValueError(f"unsupported accounts message type: {msg_type}")

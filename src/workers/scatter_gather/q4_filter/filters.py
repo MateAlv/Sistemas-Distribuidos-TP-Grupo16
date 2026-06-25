@@ -271,10 +271,35 @@ class Q4FilterWorker:
                 )
                 return
 
+            if msg_type == MessageType.ABORT:
+                self._handle_abort(client_id, sender_id, seq, ack)
+                return
+
             raise ValueError(f"unexpected q4 source prefilter message: {msg_type}")
         except Exception:
             logging.exception("q4_filter_error | id=%s", ID)
             nack(requeue=True)
+
+    def _handle_abort(self, client_id: int, sender_id: int, seq: int, ack) -> None:
+        msg_id = f"abort:{sender_id}:{client_id}:{seq}"
+        with self._lock:
+            if self._state.is_closed(client_id):
+                ack()
+                return
+            instruction = self._handler.handle(
+                msg_id, client_id, sender_id, seq, b"",
+                lambda _: (
+                    Q4FilterState.abort_change(client_id),
+                    [
+                        (Q4_SUM_EDGE, self._packet(MessageType.ABORT, client_id, b""), partition)
+                        for partition in range(Q4_SUM_AMOUNT)
+                    ],
+                ),
+                kind=MsgKind.ABORT,
+            )
+        self._publish_then_commit(instruction)
+        ack()
+        logging.info("q4_filter_abort | id=%s | client_id=%s", ID, client_id)
 
     def _handle_upstream_eof(
         self,

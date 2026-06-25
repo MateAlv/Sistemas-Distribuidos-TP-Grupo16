@@ -191,13 +191,26 @@ class Q3BarrierWorker:
                                 eof_change, Q3BarrierState.close_change(client_id)
                             ), outputs
                         return eof_change, []
+                elif msg_type == MessageType.ABORT:
+                    logging.info(
+                        "q3_barrier_abort | id=%s | client_id=%s | "
+                        "message=client disconnect signal received; flushing per-client state",
+                        ID, client_id,
+                    )
+                    instruction = self._handler.handle(
+                        f"abort:{sender_id}:{client_id}:{seq}",
+                        client_id, sender_id, seq, b"",
+                        lambda _: (Q3BarrierState.abort_change(client_id), []),
+                        kind=MsgKind.ABORT,
+                    )
                 else:
                     raise ValueError(f"unsupported Q3 averages message type: {msg_type}")
 
-                instruction = self._handler.handle(
-                    msg_id, client_id, sender_id, seq, payload, bfn,
-                    kind=MsgKind.Q3_AVERAGES,
-                )
+                if msg_type != MessageType.ABORT:
+                    instruction = self._handler.handle(
+                        msg_id, client_id, sender_id, seq, payload, bfn,
+                        kind=MsgKind.Q3_AVERAGES,
+                    )
             self._publish_commit_ack(instruction, ack, output_sender)
         except Exception:
             logging.exception("q3_barrier_average_error | id=%s", ID)
@@ -238,13 +251,26 @@ class Q3BarrierWorker:
                                 eof_change, Q3BarrierState.close_change(client_id)
                             ), outputs
                         return eof_change, []
+                elif msg_type == MessageType.ABORT:
+                    logging.info(
+                        "q3_barrier_abort | id=%s | client_id=%s | "
+                        "message=client disconnect signal received; flushing per-client state",
+                        ID, client_id,
+                    )
+                    instruction = self._handler.handle(
+                        f"abort:{sender_id}:{client_id}:{seq}",
+                        client_id, sender_id, seq, b"",
+                        lambda _: (Q3BarrierState.abort_change(client_id), []),
+                        kind=MsgKind.ABORT,
+                    )
                 else:
                     raise ValueError(f"unsupported Q3 candidates message type: {msg_type}")
 
-                instruction = self._handler.handle(
-                    msg_id, client_id, sender_id, seq, payload, bfn,
-                    kind=MsgKind.Q3_CANDIDATES,
-                )
+                if msg_type != MessageType.ABORT:
+                    instruction = self._handler.handle(
+                        msg_id, client_id, sender_id, seq, payload, bfn,
+                        kind=MsgKind.Q3_CANDIDATES,
+                    )
             self._publish_commit_ack(instruction, ack, output_sender)
         except Exception:
             logging.exception("q3_barrier_candidate_error | id=%s", ID)

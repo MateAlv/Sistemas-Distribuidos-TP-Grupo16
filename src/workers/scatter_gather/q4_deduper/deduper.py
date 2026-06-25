@@ -245,6 +245,20 @@ class Q4DeduperWorker:
                     entry.destination,
                 )
 
+    def _handle_abort(self, msg_id, client_id, sender_id, seq, ack) -> None:
+        with self._lock:
+            if self._state.is_closed(client_id):
+                ack()
+                return
+            instruction = self._handler.handle(
+                msg_id, client_id, sender_id, seq, b"",
+                lambda _: (Q4DeduperState.abort_change(client_id), []),
+                kind=MsgKind.ABORT,
+            )
+        self._publish_then_commit(instruction)
+        ack()
+        logging.info("q4_deduper_abort | id=%s | client_id=%s", ID, client_id)
+
     def _handle_data(self, msg_id, client_id, sender_id, seq, payload, ack) -> None:
         def bfn(data):
             return Q4DeduperState.data_change(client_id, data), []
@@ -327,6 +341,8 @@ class Q4DeduperWorker:
                 self._handle_data(msg_id, client_id, sender_id, seq, payload, ack)
             elif msg_type == MessageType.EOF:
                 self._handle_eof(msg_id, client_id, sender_id, seq, payload, ack)
+            elif msg_type == MessageType.ABORT:
+                self._handle_abort(f"abort:{sender_id}:{client_id}:{seq}", client_id, sender_id, seq, ack)
             else:
                 raise ValueError(
                     f"unexpected q4 account deduper message type: {msg_type}"

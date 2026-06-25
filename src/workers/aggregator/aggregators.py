@@ -232,12 +232,47 @@ class AggregatorWorker:
                     CONFIGURATION, ID, client_id, count, ctrl.expected_total,
                 )
 
+            elif msg_type == MessageType.ABORT:
+                self._handle_abort(client_id, sender_id, seq, ack, nack)
+                return
+
             else:
                 raise ValueError(f"unsupported aggregator message type: {msg_type}")
 
         except Exception:
             logging.exception(
                 "aggregation_data_error | configuration=%s | id=%s", CONFIGURATION, ID
+            )
+            nack(requeue=True)
+
+    def _handle_abort(self, client_id: int, sender_id: int, seq: int, ack, nack) -> None:
+        msg_id = f"abort:{sender_id}:{client_id}:{seq}"
+        try:
+            with self._lock:
+                if self._state.is_closed(client_id):
+                    ack()
+                    return
+
+                def bfn(_pl):
+                    abort_packet = self._packet(MessageType.ABORT, client_id, 0, b"")
+                    return (
+                        AggregatorState.abort_change(client_id),
+                        [(OUTPUT_QUEUE, abort_packet)],
+                    )
+
+                instruction = self._handler.handle(
+                    msg_id, client_id, sender_id, seq, b"", bfn,
+                    kind=MsgKind.ABORT,
+                )
+            self._publish_commit_ack(instruction, ack)
+            logging.info(
+                "aggregation_abort | configuration=%s | id=%s | client_id=%s",
+                CONFIGURATION, ID, client_id,
+            )
+        except Exception:
+            logging.exception(
+                "aggregation_abort_error | configuration=%s | id=%s | client_id=%s",
+                CONFIGURATION, ID, client_id,
             )
             nack(requeue=True)
 

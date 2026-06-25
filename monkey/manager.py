@@ -8,6 +8,7 @@ import logging
 DEFAULT_EXCLUDED = ["rabbitmq", "gateway", "rates_service", "client", "monkey"]
 
 _MONITOR_RE = re.compile(r"monitor_(\d+)")
+_CLIENT_RE = re.compile(r"client_\d+")
 
 
 def monitor_index(container):
@@ -79,6 +80,35 @@ class MonkeyManager:
         ]
         return max(indexed)[1] if indexed else None
 
+    def client_containers(self):
+        return [c for c in self.get_running_containers() if _CLIENT_RE.search(c)]
+
+    def kill_client(self):
+        """Disconnect a random client mid-query to exercise gateway ABORT.
+
+        Bypasses the kill list / exclude filters on purpose (clients are always
+        excluded for worker kills). Clients are not in the monitor's watch list,
+        so the killed client is never revived — the surviving clients must still
+        finish and every worker must flush the aborted client's per-client state.
+        """
+        clients = self.client_containers()
+        if not clients:
+            logging.warning(
+                "action: kill_client | status: no_client | "
+                "message: no running client_* container found to disconnect"
+            )
+            return None
+        target = random.choice(clients)
+        logging.info(
+            "action: kill_client | target: %s | candidates: %d | "
+            "reason: simulate_client_disconnect | message: SIGKILL a client "
+            "mid-query to trigger gateway ABORT; monitor will NOT revive it "
+            "(clients are unwatched) — downstream workers must flush its state",
+            target,
+            len(clients),
+        )
+        return self.kill_container(target, role="client")
+
     def kill_random_container(self):
         kill_list = ",".join(self.included_containers) or "<any non-excluded>"
         targets = self.get_valid_targets()
@@ -129,11 +159,17 @@ class MonkeyManager:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
+            aftermath = (
+                "no revival expected (client is unwatched); query must still end"
+                if role == "client"
+                else "monitor should detect and revive it"
+            )
             logging.info(
                 "action: kill_container | target: %s | role: %s | status: success | "
-                "message: container killed (SIGKILL); monitor should detect and revive it",
+                "message: container killed (SIGKILL); %s",
                 container_name,
                 role,
+                aftermath,
             )
             return container_name
         except subprocess.CalledProcessError as e:

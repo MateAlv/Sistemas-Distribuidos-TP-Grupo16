@@ -34,6 +34,10 @@ def green(text):
 def red(text):
     return f"\033[31m{text}\033[0m" if _use_color() else text
 
+
+def yellow(text):
+    return f"\033[33m{text}\033[0m" if _use_color() else text
+
 QUERIES = ("q1", "q2", "q3", "q4", "q5")
 
 OUTPUT_COLUMNS = {

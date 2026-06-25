@@ -47,6 +47,10 @@ class Q4AggregatorState:
         return {"type": "close", "client_id": client_id}
 
     @staticmethod
+    def abort_change(client_id: int) -> dict:
+        return Q4AggregatorState.close_change(client_id)
+
+    @staticmethod
     def compound_change(*changes: dict) -> dict:
         return {"type": "compound", "changes": list(changes)}
 

@@ -139,6 +139,41 @@ class TestMonkeyManagerKillList(unittest.TestCase):
         self.assertEqual(manager.get_valid_targets(), ["filter_usd_0"])
 
 
+class TestKillClient(unittest.TestCase):
+    @patch('manager.MonkeyManager.get_running_containers')
+    def test_client_containers_matches_only_clients(self, mock_get_containers):
+        manager = MonkeyManager(included_containers=DEMO_KILL_LIST)
+        mock_get_containers.return_value = [
+            "client_0", "client_1", "gateway", "q4_sum_0",
+            "q2_bank_name_joiner_0", "monitor_3",
+        ]
+        self.assertEqual(manager.client_containers(), ["client_0", "client_1"])
+
+    @patch('subprocess.run')
+    @patch('manager.MonkeyManager.get_running_containers')
+    def test_kill_client_targets_a_client_with_client_role(
+        self, mock_get_containers, mock_run
+    ):
+        manager = MonkeyManager(included_containers=DEMO_KILL_LIST)
+        mock_get_containers.return_value = ["client_0", "gateway", "q4_sum_0"]
+        result = manager.kill_client()
+        self.assertEqual(result, "client_0")
+        mock_run.assert_called_once_with(
+            ["docker", "kill", "client_0"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    @patch('subprocess.run')
+    @patch('manager.MonkeyManager.get_running_containers')
+    def test_kill_client_noop_when_no_client(self, mock_get_containers, mock_run):
+        manager = MonkeyManager()
+        mock_get_containers.return_value = ["gateway", "q4_sum_0"]
+        self.assertIsNone(manager.kill_client())
+        mock_run.assert_not_called()
+
+
 class TestMonitorLeader(unittest.TestCase):
     @patch('manager.MonkeyManager.get_running_containers')
     def test_monitor_leader_is_highest_numbered(self, mock_get_containers):
