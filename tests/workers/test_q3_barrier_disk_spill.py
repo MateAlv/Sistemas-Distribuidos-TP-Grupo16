@@ -270,6 +270,43 @@ def test_emit_closes_disk_log(monkeypatch, tmp_path):
     worker.close()
 
 
+def test_crash_before_first_snapshot_does_not_double_candidate_log(monkeypatch, tmp_path):
+    """Regression: a crash before the first snapshot must not double the candidate
+    disk log. With no snapshot, recover() skips restore() and REPLAY_ALL re-appends
+    every candidate; start() must drop the stale file first or each candidate emits
+    twice (the Q3 client doubling seen under chaos)."""
+    module = _import_barrier_module(monkeypatch, tmp_path)
+    proto = InternalProtocol()
+    client_id = 5
+
+    raw_batches = [
+        TransactionSerializer.serialize_batch([_tx(amount=1.0, fmt="Wire")]),
+        TransactionSerializer.serialize_batch([_tx(amount=2.0, fmt="ACH")]),
+    ]
+
+    worker = module.Q3BarrierWorker()
+    for seq, raw in enumerate(raw_batches):
+        _handle_candidate(
+            worker, _pack(proto, MessageType.DATA, client_id, raw, seq=seq)
+        )
+    assert list(worker._state.disk_log(client_id).iter_raw_batches()) == raw_batches
+    # Crash: no snapshot was taken; the disk log + WAL persist under STATE_DIR.
+    worker._handler.wal.close()
+    worker._state.disk_log(client_id).close()
+
+    # Restart on the same STATE_DIR: start() runs recovery and must rebuild once.
+    recovered = module.Q3BarrierWorker()
+    assert recovered._handler.last_state.load() is None
+    recovered.start()
+
+    assert (
+        list(recovered._state.disk_log(client_id).iter_raw_batches()) == raw_batches
+    )
+
+    recovered._handler.wal.close()
+    recovered.close()
+
+
 def test_abort_closes_pending_client_state(monkeypatch, tmp_path):
     module = _import_barrier_module(monkeypatch, tmp_path)
     worker = module.Q3BarrierWorker()

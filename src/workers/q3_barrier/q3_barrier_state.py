@@ -36,6 +36,7 @@ State accessors (read before close_change, at emit time)
 from __future__ import annotations
 
 import base64
+import glob
 import os
 
 _RECORD_LEN_SIZE = 4
@@ -213,6 +214,21 @@ class Q3BarrierState:
         for cid, byte_count in data.get("disk_log_bytes", {}).items():
             log = self._disk_log_for(cid)
             log.truncate_to(byte_count)
+
+    def discard_disk_logs(self) -> None:
+        """Delete this node's candidate files. Call only before a from-scratch
+        recovery (no snapshot): with no checkpoint to truncate to, a file left by a
+        previous life would be re-appended by REPLAY_ALL and double the candidates.
+        Never call when a snapshot exists — the file holds the snapshotted bytes."""
+        for log in self._disk_logs.values():
+            log.close()
+        self._disk_logs = {}
+        pattern = os.path.join(self._state_dir, f"q3cand_{self._node_id}_*.log")
+        for path in glob.glob(pattern):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
     def apply_change(self, change: dict) -> None:
         kind = change["type"]
