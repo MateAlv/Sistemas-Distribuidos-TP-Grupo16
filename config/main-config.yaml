@@ -10,43 +10,10 @@ settings:
   result_line_max_bytes: 1048576
   connect_timeout_seconds: 30
   io_timeout_seconds: 3600
+  # Fault-injection monkey. Disabled in the production config; see
+  # config/test-config.yaml for the chaos-test setup.
   monkey:
-    enabled: true
-    # Kill at most this many containers, each after a random delay in
-    # [interval_min, interval_max] seconds, so the kills land at random points
-    # across the run. Then the monkey idles.
-    max_kills: 2
-    interval_min: 30
-    interval_max: 180
-    # The first kill targets the current monitor leader to force a failover
-    # election (visible in the logs and the test summary); later kills hit
-    # kill-list workers.
-    kill_monitor_leader_first: true
-    # Per-worker kill toggles: the monkey only kills workers set to true.
-    # gateway, rabbitmq, rates_service, clients and monkey are always protected.
-    targets:
-      file_ingestor: true
-      file_splitter: true
-      q4_filter: true
-      q4_joiner: true
-      q4_sum: true
-      q4_aggregator: true
-      q4_deduper: true
-      filter_usd: false
-      filter_q1: false
-      filter_date: false
-      filter_q5_format: false
-      filter_q5_usd: false
-      sum_q2: false
-      sum_q3: false
-      aggregation_q2: false
-      aggregation_q3: false
-      aggregation_q5: false
-      join_q2: false
-      join_q3: false
-      join_q5: false
-      q2_bank_name_joiner: false
-      q3_barrier: false
+    enabled: false
 
 monitor:
   enabled: true
