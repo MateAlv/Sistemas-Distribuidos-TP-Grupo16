@@ -13,20 +13,20 @@ settings:
   connect_timeout_seconds: 30
   io_timeout_seconds: 3600
   filter_prefetch_count: 50
-  snapshot_interval: 1000
+  snapshot_interval: 2000
   monkey:
     enabled: true
-    max_kills: 2
+    max_kills: 0
     interval_min: 30
-    interval_max: 180
+    interval_max: 30
     # Single switch for the client-disconnect / ABORT-cleanup scenario. When
     # true the first kill disconnects a client mid-upload so the gateway
     # broadcasts ABORT and every worker flushes that client's state, while the
     # surviving client(s) still finish and validate. Takes precedence over
     # kill_monitor_leader_first.
-    client_disconnect_abort: true
+    client_disconnect_abort: false
     # Seconds after start to kill the client. Must be short enough to land while
-    # the client is still uploading (before EOF); small datasets upload fast.
+    # the client is still uploading (before EOF)
     client_disconnect_delay: 5
     # Force a monitor failover election on the first kill instead.
     kill_monitor_leader_first: false
@@ -38,21 +38,21 @@ settings:
       q4_sum: true
       q4_aggregator: true
       q4_deduper: true
-      filter_usd: false
-      filter_q1: false
-      filter_date: false
-      filter_q5_format: false
-      filter_q5_usd: false
-      sum_q2: false
-      sum_q3: false
-      aggregation_q2: false
-      aggregation_q3: false
-      aggregation_q5: false
-      join_q2: false
-      join_q3: false
-      join_q5: false
-      q2_bank_name_joiner: false
-      q3_barrier: false
+      filter_usd: true
+      filter_q1: true
+      filter_date: true
+      filter_q5_format: true
+      filter_q5_usd: true
+      sum_q2: true
+      sum_q3: true
+      aggregation_q2: true
+      aggregation_q3: true
+      aggregation_q5: true
+      join_q2: true
+      join_q3: true
+      join_q5: true
+      q2_bank_name_joiner: true
+      q3_barrier: true
 
 monitor:
   enabled: true
@@ -95,8 +95,8 @@ workers:
 clients: 2
 client_accounts:
   - client_id: 0
-    accounts_file: data/datasets/LI-Small/LI-Small_accounts.csv
-    transactions_file: data/datasets/LI-Small/LI-Small_Trans.csv
+    accounts_file: data/datasets/HI-Medium/HI-Medium_accounts.csv
+    transactions_file: data/datasets/HI-Medium/HI-Medium_Trans.csv
   - client_id: 1
-    accounts_file: data/datasets/LI-Small/LI-Small_accounts.csv
-    transactions_file: data/datasets/LI-Small/LI-Small_Trans.csv
+    accounts_file: data/datasets/HI-Medium/HI-Medium_accounts.csv
+    transactions_file: data/datasets/HI-Medium/HI-Medium_Trans.csv

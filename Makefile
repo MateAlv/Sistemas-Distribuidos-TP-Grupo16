@@ -20,7 +20,9 @@ TEST_CLIENT_DONE_PATTERN := client_results_finished
 TEST_Q2_EOF_PATTERN := gateway_eof | prefix=Q2|
 TEST_Q4_EOF_PATTERN := gateway_eof | prefix=Q4|
 TEST_CLIENT_WAIT_TIMEOUT ?= 18000s
-TEST_DATASET ?= LI-Small
+# Unset by default so config/test-config.yaml client_accounts is the source of
+# truth for the dataset. Set TEST_DATASET=LI-Medium to override for one run.
+TEST_DATASET ?=
 TEST_SMOKE_DEADLINE_SECONDS ?= 600
 SCENARIOS_DIR := config/scenarios
 RABBIT_SCREEN_URL ?= http://localhost:15672
