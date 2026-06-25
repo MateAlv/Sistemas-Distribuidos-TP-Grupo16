@@ -127,6 +127,10 @@ class BankNameJoinerState:
     def close_change(client_id: int) -> dict:
         return {"type": "close", "client_id": client_id}
 
+    @staticmethod
+    def abort_change(client_id: int) -> dict:
+        return BankNameJoinerState.close_change(client_id)
+
     def client_state(self, client_id: int) -> ClientState | None:
         """Read-only view of accumulated per-client state; None if not yet seen."""
         return self._states.get(client_id)
