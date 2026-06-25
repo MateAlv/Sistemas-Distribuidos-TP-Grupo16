@@ -306,6 +306,8 @@ class Q3BarrierWorker:
         # touch shared state mid-recovery.
         recovery_sender = self._new_output_sender()
         with self._lock:
+            if self._handler.last_state.load() is None:
+                self._state.discard_disk_logs()
             self._handler.recover()
             pending = self._handler.outbox_to_republish()
         for entry in pending:

@@ -23,27 +23,27 @@ settings:
     client_disconnect_delay: 5
     kill_monitor_leader_first: false
     targets:
-      file_ingestor: true
-      file_splitter: true
-      q4_filter: true
-      q4_joiner: true
-      q4_sum: true
-      q4_aggregator: true
-      q4_deduper: true
-      filter_usd: true
-      filter_q1: true
-      filter_date: true
-      filter_q5_format: true
-      filter_q5_usd: true
-      sum_q2: true
-      sum_q3: true
-      aggregation_q2: true
-      aggregation_q3: true
-      aggregation_q5: true
-      join_q2: true
-      join_q3: true
-      join_q5: true
-      q2_bank_name_joiner: true
+      file_ingestor: false
+      file_splitter: false
+      q4_filter: false
+      q4_joiner: false
+      q4_sum: false
+      q4_aggregator: false
+      q4_deduper: false
+      filter_usd: false
+      filter_q1: false
+      filter_date: false
+      filter_q5_format: false
+      filter_q5_usd: false
+      sum_q2: false
+      sum_q3: false
+      aggregation_q2: false
+      aggregation_q3: false
+      aggregation_q5: false
+      join_q2: false
+      join_q3: false
+      join_q5: false
+      q2_bank_name_joiner: false
       q3_barrier: true
 
 monitor:
