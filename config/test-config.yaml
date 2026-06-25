@@ -19,16 +19,8 @@ settings:
     max_kills: 0
     interval_min: 30
     interval_max: 30
-    # Single switch for the client-disconnect / ABORT-cleanup scenario. When
-    # true the first kill disconnects a client mid-upload so the gateway
-    # broadcasts ABORT and every worker flushes that client's state, while the
-    # surviving client(s) still finish and validate. Takes precedence over
-    # kill_monitor_leader_first.
     client_disconnect_abort: false
-    # Seconds after start to kill the client. Must be short enough to land while
-    # the client is still uploading (before EOF)
     client_disconnect_delay: 5
-    # Force a monitor failover election on the first kill instead.
     kill_monitor_leader_first: false
     targets:
       file_ingestor: true
