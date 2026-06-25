@@ -25,6 +25,9 @@ class RecordingSender:
     def send(self, message, *args, **kwargs):
         self.messages.append(message)
 
+    def send_to_shard(self, message, shard):
+        self.messages.append(message)
+
     def close(self):
         pass
 
@@ -195,6 +198,40 @@ def test_q5_routes_wire_and_ach_to_filter_q5_usd(monkeypatch, tmp_path):
 
     change = _data_change_for(worker, 1, [_tx(fmt="Wire"), _tx(fmt="ACH"), _tx(fmt="Cash")])
     assert change["forwarded_by_output"] == {module.FILTER_Q5_USD_QUEUE: 2}
+
+
+def test_q5_output_sequence_survives_filter_restart(monkeypatch, tmp_path):
+    module = _import_filter(monkeypatch, tmp_path, C_Q5, batch_max_tx="1")
+    worker, publishers = _worker(module)
+    client_id = 1
+
+    first = _addressed(
+        MessageType.DATA,
+        client_id,
+        sender_id=7,
+        seq=0,
+        payload=TransactionSerializer.serialize_batch([_tx(fmt="Wire")]),
+    )
+    worker._runner.process(first, _noop_ack, _noop_nack)
+    first_msg = publishers[module.FILTER_Q5_USD_QUEUE].messages[0]
+    _, _, first_sender, first_seq, _ = InternalProtocol.unpack_addressed_packet(first_msg)
+    assert first_sender == module.ID
+    assert first_seq == 0
+
+    recovered, recovered_publishers = _worker(module)
+    second = _addressed(
+        MessageType.DATA,
+        client_id,
+        sender_id=7,
+        seq=1,
+        payload=TransactionSerializer.serialize_batch([_tx(fmt="ACH")]),
+    )
+    recovered._runner.process(second, _noop_ack, _noop_nack)
+
+    second_msg = recovered_publishers[module.FILTER_Q5_USD_QUEUE].messages[0]
+    _, _, second_sender, second_seq, _ = InternalProtocol.unpack_addressed_packet(second_msg)
+    assert second_sender == module.ID
+    assert second_seq == 1
 
 
 # ─── DATA dedup (Action.ACK path) ───────────────────────────────────────────
