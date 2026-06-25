@@ -234,6 +234,40 @@ def test_q5_output_sequence_survives_filter_restart(monkeypatch, tmp_path):
     assert second_seq == 1
 
 
+def test_usd_sum_q2_output_sequence_survives_filter_restart(monkeypatch, tmp_path):
+    module = _import_filter(monkeypatch, tmp_path, C_USD, batch_max_tx="1")
+    worker, publishers = _worker(module)
+    client_id = 1
+
+    first = _addressed(
+        MessageType.DATA,
+        client_id,
+        sender_id=7,
+        seq=0,
+        payload=TransactionSerializer.serialize_batch([_tx(currency="US Dollar")]),
+    )
+    worker._runner.process(first, _noop_ack, _noop_nack)
+    first_msg = publishers[module.SUM_Q2_OUTPUT].messages[0]
+    _, _, first_sender, first_seq, _ = InternalProtocol.unpack_addressed_packet(first_msg)
+    assert first_sender == module.ID
+    assert first_seq == 0
+
+    recovered, recovered_publishers = _worker(module)
+    second = _addressed(
+        MessageType.DATA,
+        client_id,
+        sender_id=7,
+        seq=1,
+        payload=TransactionSerializer.serialize_batch([_tx(currency="US Dollar")]),
+    )
+    recovered._runner.process(second, _noop_ack, _noop_nack)
+
+    second_msg = recovered_publishers[module.SUM_Q2_OUTPUT].messages[0]
+    _, _, second_sender, second_seq, _ = InternalProtocol.unpack_addressed_packet(second_msg)
+    assert second_sender == module.ID
+    assert second_seq == 1
+
+
 # ─── DATA dedup (Action.ACK path) ───────────────────────────────────────────
 
 def test_duplicate_data_is_ignored(monkeypatch, tmp_path):

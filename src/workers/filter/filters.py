@@ -217,8 +217,9 @@ class FilterWorker:
         if CONFIGURATION == C_DATE and DATE_ENABLE_Q3:
             self._addressed_outputs.add(Q3_CANDIDATES_QUEUE)
 
-        # Monotonic seq per (output, client) for legacy addressed edges. Q5->USD
-        # is handled by the durable SenderSequencer via _output_edges.
+        # Monotonic seq per (output, client) for legacy addressed edges. Sharded
+        # filter/sum edges are handled by the durable SenderSequencer via
+        # _output_edges.
         self._sum_seq_lock = threading.Lock()
         self._sum_seq_by_output_client: dict[tuple[str, int], int] = {}
 
@@ -226,6 +227,16 @@ class FilterWorker:
         edges: dict[str, EdgeSpec] = {}
         if CONFIGURATION == C_Q5:
             edges[FILTER_Q5_USD_QUEUE] = EdgeSpec(ID, FILTER_Q5_USD_AMOUNT)
+        if CONFIGURATION == C_USD:
+            if USD_ENABLE_Q1:
+                edges[FILTER_Q1_QUEUE] = EdgeSpec(ID, FILTER_Q1_AMOUNT)
+            if USD_ENABLE_Q2:
+                edges[SUM_Q2_OUTPUT] = EdgeSpec(ID, SUM_Q2_AMOUNT)
+            if USD_ENABLE_DATE:
+                edges[FILTER_DATE_QUEUE] = EdgeSpec(ID, FILTER_DATE_AMOUNT)
+        if CONFIGURATION == C_DATE and DATE_ENABLE_Q3:
+            edges[SUM_Q3_QUEUE] = EdgeSpec(ID, SUM_Q3_AMOUNT)
+            edges[Q3_CANDIDATES_QUEUE] = EdgeSpec(ID, Q3_BARRIER_AMOUNT)
         return edges
 
     # ─── connection factories ────────────────────────────────────────────────
@@ -462,9 +473,10 @@ class FilterWorker:
         client_id: int,
         payload: bytes,
     ) -> bytes:
-        # Q5->USD is stamped by PersistentStateHandler's durable SenderSequencer.
-        # q4 filter exchange edges are still pre-addressed per (client, partition);
-        # remaining addressed edges keep the existing in-memory sequence behavior.
+        # Sharded filter/sum edges are stamped by PersistentStateHandler's durable
+        # SenderSequencer. q4 filter exchange edges are still pre-addressed per
+        # (client, partition); remaining addressed edges keep the existing
+        # in-memory sequence behavior.
         if output_name in self._output_edges:
             return self.internal_packet_serializer.create_packet(
                 msg_type=msg_type,
