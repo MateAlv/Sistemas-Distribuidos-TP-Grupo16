@@ -11,7 +11,7 @@ import json
 import sys
 import types
 
-from common.constants import C_Q1, C_Q5, C_USD
+from common.constants import C_DATE, C_Q1, C_Q5, C_USD
 from common.domain.transaction import Transaction
 from common.message_protocol.internal import InternalProtocol, TransactionSerializer
 from common.message_protocol.internal.common import ControlMessage, MessageType
@@ -114,6 +114,14 @@ def _import_filter(monkeypatch, tmp_path, configuration, batch_max_tx="1000", fi
         env.update({
             "FILTER_Q5_USD_EXCHANGE": "filter_q5_usd_exchange",
             "FILTER_Q5_USD_ROUTING_PREFIX": "filter_q5_usd", "FILTER_Q5_USD_AMOUNT": "1",
+        })
+    if configuration == C_DATE:
+        env.update({
+            "DATE_ENABLE_Q3": "0",
+            "DATE_ENABLE_Q4": "1",
+            "Q4_FILTER_INPUT_EXCHANGE": "q4_filter_exchange",
+            "Q4_FILTER_INPUT_ROUTING_PREFIX": "q4_filter",
+            "Q4_FILTER_AMOUNT": "2",
         })
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -263,6 +271,42 @@ def test_usd_sum_q2_output_sequence_survives_filter_restart(monkeypatch, tmp_pat
     recovered._runner.process(second, _noop_ack, _noop_nack)
 
     second_msg = recovered_publishers[module.SUM_Q2_OUTPUT].messages[0]
+    _, _, second_sender, second_seq, _ = InternalProtocol.unpack_addressed_packet(second_msg)
+    assert second_sender == module.ID
+    assert second_seq == 1
+
+
+def test_date_q4_output_sequence_survives_filter_restart(monkeypatch, tmp_path):
+    module = _import_filter(monkeypatch, tmp_path, C_DATE, batch_max_tx="1")
+    worker, publishers = _worker(module)
+    client_id = 1
+    tx = _tx()
+    destination = worker._q4_filter_output_for_transaction(tx)
+
+    first = _addressed(
+        MessageType.DATA,
+        client_id,
+        sender_id=7,
+        seq=0,
+        payload=TransactionSerializer.serialize_batch([tx]),
+    )
+    worker._runner.process(first, _noop_ack, _noop_nack)
+    first_msg = publishers[destination].messages[0]
+    _, _, first_sender, first_seq, _ = InternalProtocol.unpack_addressed_packet(first_msg)
+    assert first_sender == module.ID
+    assert first_seq == 0
+
+    recovered, recovered_publishers = _worker(module)
+    second = _addressed(
+        MessageType.DATA,
+        client_id,
+        sender_id=7,
+        seq=1,
+        payload=TransactionSerializer.serialize_batch([tx]),
+    )
+    recovered._runner.process(second, _noop_ack, _noop_nack)
+
+    second_msg = recovered_publishers[destination].messages[0]
     _, _, second_sender, second_seq, _ = InternalProtocol.unpack_addressed_packet(second_msg)
     assert second_sender == module.ID
     assert second_seq == 1

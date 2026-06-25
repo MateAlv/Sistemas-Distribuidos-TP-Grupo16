@@ -237,6 +237,9 @@ class FilterWorker:
         if CONFIGURATION == C_DATE and DATE_ENABLE_Q3:
             edges[SUM_Q3_QUEUE] = EdgeSpec(ID, SUM_Q3_AMOUNT)
             edges[Q3_CANDIDATES_QUEUE] = EdgeSpec(ID, Q3_BARRIER_AMOUNT)
+        if CONFIGURATION == C_DATE and DATE_ENABLE_Q4:
+            for output_name in self._q4_filter_output_names():
+                edges[output_name] = EdgeSpec(ID, 1)
         return edges
 
     # ─── connection factories ────────────────────────────────────────────────
