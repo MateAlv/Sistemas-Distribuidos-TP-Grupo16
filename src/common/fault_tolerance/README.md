@@ -2,9 +2,10 @@
 
 This package gives a worker the ability to crash at any moment and recover
 without losing or double-applying a message. It solves the **disk-persistence**
-half of the fault-tolerance design (the protocol spec lives in
-`docs/fault-tolerance/fault_tolerance_plan.md`). Restarting crashed containers
-(monitors, heartbeats, leader election) is handled elsewhere.
+half of the fault-tolerance design. The WAL-specific notes live in
+[docs/fault-tolerance/wal.md](../../../docs/fault-tolerance/wal.md).
+Restarting crashed containers (monitors, heartbeats, leader election) is
+handled elsewhere.
 
 The guarantee it provides:
 

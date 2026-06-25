@@ -120,11 +120,11 @@ Los targets `monitor-*` trabajan con `docker-compose.yaml`. Los targets
 `make test-q1`, `make test-q2`, `make test-q3` y `make test-q5` generan otro
 proyecto en `docker-compose.test.yaml` y no habilitan monitores.
 
-Habilitar el monitor y Chaos Monkey en `config/main-config.yaml`:
+Habilitar el monitor y Monkey en `config/main-config.yaml`:
 
 ```yaml
 settings:
-  chaos:
+  monkey:
     enabled: true
     interval: 3600
 
@@ -133,7 +133,7 @@ monitor:
   count: 3
 ```
 
-El intervalo alto evita que Chaos Monkey mate containers automáticamente
+El intervalo alto evita que Monkey mate containers automáticamente
 durante la prueba.
 
 Limpiar y regenerar el compose:
@@ -148,7 +148,7 @@ Después de cambiar `startup_grace_period` es necesario reconstruir y reiniciar
 los containers de monitor para que reciban la nueva variable de entorno.
 
 La lista debe incluir `monitor_1`, `monitor_2`, `monitor_3`, algún worker como
-`filter_usd_0` y `chaos_monkey`.
+`filter_usd_0` y `monkey`.
 
 Levantar el sistema:
 
@@ -288,11 +288,11 @@ docker compose -f docker-compose.yaml config --services
 
 ## Caso 3: caída del líder
 
-Confirmar que las réplicas y Chaos Monkey estén activos:
+Confirmar que las réplicas y Monkey estén activos:
 
 ```bash
 docker compose -f docker-compose.yaml ps \
-  monitor_1 monitor_2 monitor_3 chaos_monkey
+  monitor_1 monitor_2 monitor_3 monkey
 ```
 
 Prueba automatizada:
@@ -310,9 +310,9 @@ followers acepten exactamente ese nuevo epoch.
 Prueba paso a paso:
 
 ```bash
-make chaos-kill CONTAINER=monitor_3
+make monkey-kill CONTAINER=monitor_3
 # Forma abreviada equivalente:
-make chaos-kill monitor_3
+make monkey-kill monitor_3
 make monitor-logs
 ```
 
@@ -346,7 +346,7 @@ MONITOR_FAILOVER_TIMEOUT=60 make monitor-test-election
 Con `monitor_3` como líder:
 
 ```bash
-make chaos-kill CONTAINER=monitor_1
+make monkey-kill CONTAINER=monitor_1
 make monitor-logs
 ```
 

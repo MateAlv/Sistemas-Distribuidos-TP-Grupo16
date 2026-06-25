@@ -73,7 +73,7 @@ crushing one.
 
 ### q4_joiner
 Runs the actual `A → M → B` join for one block. For each `(A, B)` reachable
-through the block it computes the path path_count `count(A→M) × count(M→B)`, skips
+through the block it computes `path_count = count(A→M) × count(M→B)`, skips
 `A == B`, and emits a weighted contribution for the pair. Weights are capped at 6,
 since "more than 5" is all that matters.
 

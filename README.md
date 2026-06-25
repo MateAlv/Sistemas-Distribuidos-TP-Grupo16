@@ -1,15 +1,14 @@
 # Money Laundering Analysis - Grupo 16
 
-Sistema distribuido para procesar datasets de transacciones bancarias y detectar patrones asociados a lavado de dinero. El sistema usa Python, Docker Compose y RabbitMQ como MOM, con workers escalables y soporte multicliente.
+Sistema distribuido para procesar datasets de transacciones bancarias y detectar patrones asociados a lavado de dinero. El sistema usa Python, Docker Compose y RabbitMQ como MOM, con workers escalables, tolerancia a fallos (WAL + snapshots + monitores) y soporte multicliente.
 
-Enunciado: [docs/enunciado.md](docs/enunciado.md).
+Enunciado: [docs/FIUBA-Entregas/enunciado/enunciado.md](docs/FIUBA-Entregas/enunciado/enunciado.md).
 
 ## Requisitos
 
 - Docker y Docker Compose.
-- Python 3.12 o compatible.
+- Python 3.12 o compatible, con las dependencias de `requirements.txt`.
 - Los datasets montados bajo `data/datasets/<DATASET>/`.
-- Opcional: entorno virtual en `venv/`. El Makefile usa `venv/bin/python` si existe, o `python3` en caso contrario.
 
 La estructura esperada para un dataset es:
 
@@ -18,9 +17,76 @@ data/datasets/LI-Mini/LI-Mini_Trans.csv
 data/datasets/LI-Mini/LI-Mini_accounts.csv
 ```
 
-Para multicliente no hace falta replicar fisicamente el dataset: los presets generan varios clientes apuntando al dataset base, cada uno con un `client_id` distinto.
+Datasets disponibles en el repo, de menor a mayor tamaño:
 
-## Comandos principales
+| Dataset | Tamaño | Uso típico |
+|---|---|---|
+| `LI-Mini` | chico | smoke test rápido, iteración local |
+| `LI-Small` | mediano | validación funcional completa |
+| `HI-Medium` | grande (~3 GB de transacciones) | corridas de performance y tolerancia a fallos |
+
+Para multiclient no hace falta replicar físicamente el dataset: la configuración genera varios clientes apuntando al dataset base, cada uno con un `client_id` distinto.
+
+## Probar todo con `make test`
+
+`make test` es el comando principal para correr **las cinco queries de punta a punta** y validar el resultado. Está manejado por `config/test-config.yaml` y por el script `scripts/run_full_test.py`.
+
+```bash
+make test
+```
+
+### Qué hace, paso a paso
+
+1. **Genera `docker-compose.test.yaml`** a partir de `config/test-config.yaml` (cantidad de workers, clientes, dataset, monitores y monkey de fallos).
+2. **Precomputa los resultados esperados** del dataset si todavía no existen (referencia contra la que se valida).
+3. **Levanta el stack de test** (`docker compose up --build`) en el proyecto `distribuidos-test`.
+4. **Captura los logs formateados** de toda la corrida en `data/logs/test-<timestamp>.log`, con un puntero estable en `data/logs/latest.log`.
+5. **Espera a que terminen todos los clientes** (hasta `TEST_CLIENT_WAIT_TIMEOUT`).
+6. **Valida la salida de cada cliente** contra la referencia, query por query (contemplando clientes abortados, ver abajo).
+7. **Imprime los resúmenes** de la corrida: elección de monitor / failovers, kills del monkey, cleanup por ABORT y un resumen final por query.
+8. **Baja y limpia** los containers, salvo que se use `KEEP_CONTAINERS=1`.
+
+Al terminar, un test exitoso muestra cada query con `✓ matches reference` y un resumen final en verde.
+
+### Elegir el dataset
+
+La fuente de verdad del dataset es `client_accounts` dentro de `config/test-config.yaml`. Para forzar otro dataset en una corrida puntual sin editar el YAML:
+
+```bash
+TEST_DATASET=LI-Small make test
+```
+
+### Tolerancia a fallos durante el test (monkey)
+
+La inyección de fallos se configura en `settings.monkey` dentro de `config/test-config.yaml`. Cuando está habilitada, durante la corrida se matan containers de workers (y opcionalmente se fuerza un failover de monitor o una desconexión de cliente), y el sistema debe recuperarse y **producir igualmente el resultado correcto**.
+
+Claves principales de `settings.monkey`:
+
+| Clave | Significado |
+|---|---|
+| `enabled` | Activa/desactiva la inyección de fallos. |
+| `max_kills` | Máximo de kills (`0` = ilimitado hasta que termina la query). |
+| `interval_min` / `interval_max` | Rango de segundos entre kills. |
+| `kill_monitor_leader_first` | El primer kill apunta al líder de monitores para forzar un failover. |
+| `client_disconnect_abort` | El primer kill desconecta un cliente a mitad de upload para ejercitar el flujo de ABORT. |
+| `targets.<worker>` | Qué tipos de worker pueden ser asesinados. |
+
+Cuando un cliente se desconecta a mitad de upload, el gateway difunde un **ABORT**: todos los workers descartan el estado de ese cliente y los clientes que sí terminan se validan normalmente. El resumen de ABORT al final del test indica qué clientes fueron abortados y se excluyen de la validación contra la referencia.
+
+### Salidas de una corrida
+
+- **Resultados**: `data/output/results_q<n>_<client_id>.csv`
+- **Log completo**: `data/logs/test-<timestamp>.log` (y `data/logs/latest.log`)
+
+```text
+data/output/results_q1_<client_id>.csv
+data/output/results_q2_<client_id>.csv
+data/output/results_q3_<client_id>.csv
+data/output/results_q4_<client_id>.csv
+data/output/results_q5_<client_id>.csv
+```
+
+## Otros comandos
 
 Generar `docker-compose.yaml` desde la configuración principal:
 
@@ -28,7 +94,7 @@ Generar `docker-compose.yaml` desde la configuración principal:
 make config
 ```
 
-Levantar el sistema completo definido en `config/main-config.yaml`:
+Levantar el sistema completo definido en `config/main-config.yaml` (posible entorno de "producción", no recomendado para probar):
 
 ```bash
 make up
@@ -64,107 +130,13 @@ Ejecutar tests unitarios dentro de Docker:
 make test-unit
 ```
 
-## Correr queries individuales
-
-Cada target genera un `docker-compose.test.yaml` con un preset mínimo para esa query, levanta los containers, espera a los clientes y valida los archivos de salida contra el dataset indicado.
-
-Q1:
-
-```bash
-make test-q1
-Q1_DATASET=LI-Small CLIENTS=3 USD_WORKERS=4 PREFETCH_COUNT=50 make test-q1
-```
-
-Q2:
-
-```bash
-make test-q2
-Q2_DATASET=LI-Small CLIENTS=3 USD_WORKERS=4 Q2_SUM_WORKERS=2 PREFETCH_COUNT=50 make test-q2
-```
-
-Q3:
-
-```bash
-make test-q3
-Q3_DATASET=LI-Small CLIENTS=3 USD_WORKERS=4 Q3_BARRIER_WORKERS=3 PREFETCH_COUNT=50 make test-q3
-```
-
-Q4:
-
-Q4 no tiene un target específico `test-q4`; se ejecuta dentro del flujo general con `make test`, `make up` o escenarios. Para enfocarse en Q4, escalar los workers scatter-gather y dejar containers vivos para mirar RabbitMQ:
-
-```bash
-KEEP_CONTAINERS=1 TEST_DATASET=LI-Mini CLIENTS=3 \
-USD_WORKERS=4 SG_MAPPER_WORKERS=2 SG_LINKER_WORKERS=2 SG_DETECTOR_WORKERS=2 \
-PREFETCH_COUNT=50 make test
-```
-
-Q5:
-
-```bash
-make test-q5
-Q5_DATASET=LI-Small CLIENTS=5 USD_WORKERS=4 Q5_FORMAT_WORKERS=4 Q5_USD_WORKERS=4 PREFETCH_COUNT=50 make test-q5
-```
-
-Si se quiere dejar el entorno vivo para inspeccionar RabbitMQ o logs después del test:
-
-```bash
-KEEP_CONTAINERS=1 CLIENTS=3 Q5_DATASET=LI-Small USD_WORKERS=4 Q5_FORMAT_WORKERS=4 Q5_USD_WORKERS=4 PREFETCH_COUNT=50 make test-q5
-```
-
-Para bajarlo luego:
-
-```bash
-docker compose -p distribuidos-test -f docker-compose.test.yaml down --volumes --remove-orphans
-```
-
-o tambien
-
-```bash
-make down
-```
-
-## Correr todas las queries
-
-El target general `make test` usa `config/test-config.yaml` y valida el flujo completo por smoke checks de logs y finalización de clientes.
-
-```bash
-make test
-```
-
-Con dataset y escalado:
-
-```bash
-TEST_DATASET=LI-Mini CLIENTS=3 USD_WORKERS=4 Q5_FORMAT_WORKERS=4 Q5_USD_WORKERS=4 PREFETCH_COUNT=50 make test
-```
-
-Ejemplo más exigente:
-
-```bash
-CLIENTS=3 USD_WORKERS=4 Q5_FORMAT_WORKERS=4 Q5_USD_WORKERS=4 \
-SG_MAPPER_WORKERS=2 SG_LINKER_WORKERS=2 SG_DETECTOR_WORKERS=2 \
-Q3_BARRIER_WORKERS=3 PREFETCH_COUNT=50 \
-TEST_CLIENT_WAIT_TIMEOUT=3600s TEST_SMOKE_DEADLINE_SECONDS=3600 \
-make test
-```
-
-Por default, `TEST_DATASET` depende de la configuración de `config/test-config.yaml`. Para forzarlo:
-
-```bash
-TEST_DATASET=LI-Small make test
-```
-
 ## Variables útiles
 
 Variables de dataset:
 
 | Variable | Uso |
 |---|---|
-| `TEST_DATASET` | Dataset para `make test`. |
-| `Q1_DATASET` | Dataset para `make test-q1`. |
-| `Q2_DATASET` | Dataset para `make test-q2`. |
-| `Q3_DATASET` | Dataset para `make test-q3`. |
-| `Q5_DATASET` | Dataset para `make test-q5`. |
+| `TEST_DATASET` | Fuerza el dataset para `make test` (override de `config/test-config.yaml`). |
 
 Variables de concurrencia y escalado:
 
@@ -176,76 +148,45 @@ Variables de concurrencia y escalado:
 | `Q3_BARRIER_WORKERS` | Réplicas de `q3_barrier`, particionadas por `client_id`. |
 | `Q5_FORMAT_WORKERS` | Réplicas de `filter_q5_format`. |
 | `Q5_USD_WORKERS` | Réplicas de `filter_q5_usd`. |
-| `SG_MAPPER_WORKERS` | Réplicas de mapper para Q4. |
-| `SG_LINKER_WORKERS` | Réplicas de linker para Q4. |
-| `SG_DETECTOR_WORKERS` | Réplicas de detector para Q4. |
+| `Q4_FILTER_WORKERS` | Réplicas de `q4_filter`. |
+| `Q4_SUM_WORKERS` | Réplicas de `q4_sum`. |
+| `Q4_JOINER_WORKERS` | Réplicas de `q4_joiner`. |
+| `Q4_AGGREGATOR_WORKERS` | Réplicas de `q4_aggregator`. |
+| `Q4_DEDUPER_WORKERS` | Réplicas de `q4_deduper`. |
 | `PREFETCH_COUNT` | Prefetch de RabbitMQ en workers que lo soportan. |
 
 Variables de ejecución:
 
 | Variable | Uso |
 |---|---|
-| `KEEP_CONTAINERS=1` | Mantiene containers luego de un test específico. |
-| `TEST_CLIENT_WAIT_TIMEOUT` | Timeout para esperar clientes en tests. Ej: `3600s`. |
+| `KEEP_CONTAINERS=1` | Mantiene los containers vivos al terminar el test. |
+| `TEST_CLIENT_WAIT_TIMEOUT` | Timeout para esperar a los clientes. Ej: `3600s`. |
 | `TEST_SMOKE_DEADLINE_SECONDS` | Deadline de smoke checks en `make test`. |
+| `TEST_LOG_KEEP` | Cuántas corridas conservar en `data/logs/`. Default: `5`. |
+| `TEST_LOG_MAX_MB` | Tope de tamaño del archivo de logs en `data/logs/`. Default: `1024`. |
 | `LOG_COLOR=never` | Desactiva color en logs formateados. |
 | `LOG_ARGS` | Argumentos extra para `docker compose logs`. |
-| `FLOW_LOG_EVERY_MESSAGES` | Cada cuantos mensajes DATA de RabbitMQ loguear progreso por publisher/consumer. Default: `100`. |
-| `FLOW_LOG_EVERY_BYTES` | Cada cuantos bytes de RabbitMQ loguear progreso por publisher/consumer. Default: `8388608`. |
-| `WORKER_LOG_EVERY_MESSAGES` | Cada cuantos batches DATA loguear progreso semantico dentro de cada worker. Default: `100`. |
+| `FLOW_LOG_EVERY_MESSAGES` | Cada cuántos mensajes DATA loguear progreso por publisher/consumer. Default: `100`. |
+| `FLOW_LOG_EVERY_BYTES` | Cada cuántos bytes de RabbitMQ loguear progreso por publisher/consumer. Default: `8388608`. |
+| `WORKER_LOG_EVERY_MESSAGES` | Cada cuántos batches DATA loguear progreso semántico dentro de cada worker. Default: `100`. |
 | `FLOW_LOG_ENABLED=0` | Desactiva los logs de flujo generados por el middleware. |
-| `CHUNK_LOG_EVERY` | Cada cuantos chunks cliente/gateway loguear progreso. Default: `100`. |
-| `RESULT_LOG_EVERY` | Cada cuantas lineas de resultado gateway->cliente loguear progreso. Default: `100`. |
+| `CHUNK_LOG_EVERY` | Cada cuántos chunks cliente/gateway loguear progreso. Default: `100`. |
+| `RESULT_LOG_EVERY` | Cada cuántas líneas de resultado gateway->cliente loguear progreso. Default: `100`. |
 
-## Crash test de tolerancia a fallos
+## Crash tests de tolerancia a fallos
 
-El script `scripts/crash_test_aggregator.py` prueba la recuperación del aggregator ante una caída con SIGKILL durante el procesamiento. Levanta el stack, mata el container en el momento justo, lo reinicia y valida que el resultado sea correcto.
+Además del monkey integrado en `make test`, hay scripts dedicados que matan un worker puntual con SIGKILL en el momento justo, lo reinician y validan que el resultado siga siendo correcto:
 
-**Queries soportadas:** `q2`, `q3`, `q5` (mismo binario de aggregator, distinta configuración).
-
-**Escenarios:**
-
-| Escenario | Descripción |
+| Script | Qué prueba |
 |---|---|
-| `smoke` | 1 aggregator. Mata durante DATA. Prueba WAL replay y path N=1 de EOF. |
-| `A` | 2 aggregators. Mata el **no-líder** (agg_1). Prueba recepción de FLUSH_ORDER al reiniciar. |
-| `B` | 2 aggregators. Mata el **líder** (agg_0). Prueba reentrega de FLUSH_ACKs al reiniciar. |
+| `scripts/crash_test_aggregator.py` | Recuperación del aggregator (`q2`, `q3`, `q5`). |
+| `scripts/crash_test_joiner.py` | Recuperación del joiner. |
+| `scripts/crash_test_filter_q5_usd.py` | Recuperación del filtro Q5/USD. |
+| `scripts/crash_test_q2_bank_name_joiner.py` | Recuperación del joiner de nombre de banco (Q2). |
+| `scripts/crash_test_q3_barrier.py` | Recuperación de la barrera de Q3. |
+| `scripts/crash_test_abort.py` | Propagación de ABORT al desconectarse un cliente a mitad de upload. |
 
-**Uso:**V
-
-```bash
-# smoke — 1 aggregator, kill durante DATA
-venv/bin/python scripts/crash_test_aggregator.py --query q5 --scenario smoke --dataset LI-Small
-venv/bin/python scripts/crash_test_aggregator.py --query q2 --scenario smoke --dataset LI-Small
-venv/bin/python scripts/crash_test_aggregator.py --query q3 --scenario smoke --dataset LI-Small
-
-# A — 2 aggregators, mata el no-líder
-venv/bin/python scripts/crash_test_aggregator.py --query q5 --scenario A --dataset LI-Small
-
-# B — 2 aggregators, mata el líder
-venv/bin/python scripts/crash_test_aggregator.py --query q5 --scenario B --dataset LI-Small
-
-# --keep deja el stack vivo para inspeccionar logs
-venv/bin/python scripts/crash_test_aggregator.py --query q5 --scenario B --dataset LI-Small --keep
-
-# q2_bank_name_joiner — dataset LI-Small, tres ventanas de caída
-venv/bin/python scripts/crash_test_q2_bank_name_joiner.py --scenario smoke
-venv/bin/python scripts/crash_test_q2_bank_name_joiner.py --scenario A
-venv/bin/python scripts/crash_test_q2_bank_name_joiner.py --scenario B --keep
-
-# q3_barrier — dataset LI-Small, DATA / EOF averages / EOF candidates
-venv/bin/python scripts/crash_test_q3_barrier.py --scenario smoke --dataset LI-Small
-venv/bin/python scripts/crash_test_q3_barrier.py --scenario A --dataset LI-Small
-venv/bin/python scripts/crash_test_q3_barrier.py --scenario B --dataset LI-Small --keep
-```
-
-Usar `venv/bin/python` (no `python3`): el script llama a `generate_compose.py` que necesita el paquete `yaml` del venv.
-
-Cada crash test genera su compose bajo `tmp/crash-tests/` con un nombre propio
-para la query/escenario/dataset. Si hace falta inspeccionar o reutilizar una
-ruta concreta, se puede pasar `--compose-file <path>`.
-
-Al terminar imprime `✓✓✓ CRASH TEST PASSED` o `✗✗✗ CRASH TEST FAILED` con los logs del container para debuggear.
+`scripts/ft_monitor.py` permite monitorear en tiempo real el estado de los containers de Docker durante una corrida.
 
 ## Monitor y recuperación
 
@@ -253,27 +194,6 @@ El sistema incluye réplicas de monitor con heartbeats UDP, elección Bully y
 recuperación de containers mediante Docker. La explicación de la arquitectura,
 la configuración y todos los casos de prueba manuales está en
 [src/monitor/README.md](src/monitor/README.md).
-
-## Outputs
-
-Los resultados se escriben en `data/output/`:
-
-```text
-data/output/results_q1_<client_id>.csv
-data/output/results_q2_<client_id>.csv
-data/output/results_q3_<client_id>.csv
-data/output/results_q4_<client_id>.csv
-data/output/results_q5_<client_id>.csv
-```
-
-Cada test específico ejecuta su validador correspondiente:
-
-```bash
-Q1_DATASET_DIR=data/datasets/LI-Mini Q1_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q1_output.py
-Q2_DATASET_DIR=data/datasets/LI-Mini Q2_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q2_output.py
-Q3_DATASET_DIR=data/datasets/LI-Mini Q3_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q3_output.py
-Q5_DATASET_DIR=data/datasets/LI-Mini Q5_DATASET_TRANS=LI-Mini_Trans.csv python3 scripts/validate_q5_output.py
-```
 
 ## RabbitMQ
 
@@ -335,30 +255,10 @@ Patrones prácticos para diagnosticar cuellos:
 - Si hay mucho `Unacked`, revisar `PREFETCH_COUNT`, tiempo de procesamiento y si el worker está bloqueado publicando hacia otra cola.
 - Si el cliente no termina aunque una query produjo output, revisar EOFs pendientes en gateway para todas las queries activas.
 
-Comando típico para una corrida de performance con containers vivos:
+Para una corrida de performance conviene usar un dataset grande (`HI-Medium`) con los containers vivos:
 
 ```bash
-KEEP_CONTAINERS=1 CLIENTS=3 TEST_DATASET=LI-Small USD_WORKERS=4 \
-Q5_FORMAT_WORKERS=4 Q5_USD_WORKERS=4 \
-SG_MAPPER_WORKERS=2 SG_LINKER_WORKERS=2 SG_DETECTOR_WORKERS=2 \
-Q3_BARRIER_WORKERS=3 PREFETCH_COUNT=50 \
-TEST_CLIENT_WAIT_TIMEOUT=3600s TEST_SMOKE_DEADLINE_SECONDS=3600 \
-make test
-```
-
-## Escenarios
-
-El proyecto permite generar compose desde escenarios:
-
-```bash
-make scenario 1
-make scenario config/scenarios/4.yaml
-```
-
-También existe un selector interactivo:
-
-```bash
-make switch
+TEST_DATASET=HI-Medium KEEP_CONTAINERS=1 make test
 ```
 
 ## Troubleshooting
