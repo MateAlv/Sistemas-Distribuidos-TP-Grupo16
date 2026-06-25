@@ -1570,6 +1570,14 @@ def monkey_service(settings: dict, client_names: list[str]) -> dict:
         environment.append(f"MONKEY_MAX_KILLS={int(monkey['max_kills'])}")
     if monkey.get("kill_monitor_leader_first"):
         environment.append("MONKEY_KILL_MONITOR_LEADER_FIRST=true")
+    # Single switch for the whole client-disconnect / ABORT-cleanup scenario:
+    # the first kill disconnects a client mid-upload after client_disconnect_delay
+    # seconds (default 5, the value proven to land during upload).
+    if monkey.get("client_disconnect_abort"):
+        environment.append("MONKEY_KILL_CLIENT_FIRST=true")
+        environment.append(
+            f"MONKEY_CLIENT_KILL_DELAY={int(monkey.get('client_disconnect_delay', 5))}"
+        )
     # targets may be a per-worker toggle map {name: bool} or a plain list.
     raw_targets = monkey.get("targets") or []
     if isinstance(raw_targets, dict):

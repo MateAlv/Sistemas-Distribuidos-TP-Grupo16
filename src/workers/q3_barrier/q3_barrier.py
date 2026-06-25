@@ -192,6 +192,11 @@ class Q3BarrierWorker:
                             ), outputs
                         return eof_change, []
                 elif msg_type == MessageType.ABORT:
+                    logging.info(
+                        "q3_barrier_abort | id=%s | client_id=%s | "
+                        "message=client disconnect signal received; flushing per-client state",
+                        ID, client_id,
+                    )
                     instruction = self._handler.handle(
                         f"abort:{sender_id}:{client_id}:{seq}",
                         client_id, sender_id, seq, b"",
@@ -247,6 +252,11 @@ class Q3BarrierWorker:
                             ), outputs
                         return eof_change, []
                 elif msg_type == MessageType.ABORT:
+                    logging.info(
+                        "q3_barrier_abort | id=%s | client_id=%s | "
+                        "message=client disconnect signal received; flushing per-client state",
+                        ID, client_id,
+                    )
                     instruction = self._handler.handle(
                         f"abort:{sender_id}:{client_id}:{seq}",
                         client_id, sender_id, seq, b"",

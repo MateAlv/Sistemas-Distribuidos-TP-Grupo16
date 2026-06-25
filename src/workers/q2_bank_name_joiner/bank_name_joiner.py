@@ -206,6 +206,11 @@ class BankNameJoinerWorker:
                         self._config.id, client_id, control.expected_total,
                     )
                 elif msg_type == MessageType.ABORT:
+                    logging.info(
+                        "q2_bank_name_joiner_abort | id=%s | client_id=%s | "
+                        "message=client disconnect signal received; flushing per-client state",
+                        self._config.id, client_id,
+                    )
                     def bfn(_pl: bytes):
                         return BankNameJoinerState.abort_change(client_id), []
                     instruction = self._handler.handle(
@@ -276,6 +281,11 @@ class BankNameJoinerWorker:
                     )
             elif msg_type == MessageType.ABORT:
                 with self._lock:
+                    logging.info(
+                        "q2_bank_name_joiner_abort | id=%s | client_id=%s | "
+                        "message=client disconnect signal received; flushing per-client state",
+                        self._config.id, client_id,
+                    )
                     def bfn(_pl: bytes):
                         return BankNameJoinerState.abort_change(client_id), []
                     instruction = self._handler.handle(

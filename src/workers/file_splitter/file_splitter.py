@@ -14,7 +14,7 @@ from common.message_protocol.external.types import (
     MSG_ABORT,
     file_ingestor_routing_key,
 )
-from common.message_protocol.internal import InternalProtocol
+from common.message_protocol.internal import InternalProtocol, MessageType
 from common.middleware import (
     MessageMiddlewareQueueRabbitMQ,
     ShardedPublisher,

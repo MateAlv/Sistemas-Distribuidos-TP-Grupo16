@@ -241,6 +241,11 @@ class JoinerWorker:
                 )
             elif msg_type == MessageType.ABORT:
                 abort_msg_id = f"abort:{sender_id}:{client_id}:{seq}"
+                logging.info(
+                    "joiner_abort | id=%s | configuration=%s | client_id=%s | "
+                    "message=client disconnect signal received; flushing per-client state",
+                    ID, CONFIGURATION, client_id,
+                )
                 def bfn(_pl):
                     if CONFIGURATION == C_Q5:
                         return JoinerState.abort_change(client_id), []

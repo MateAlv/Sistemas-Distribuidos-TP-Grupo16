@@ -373,13 +373,20 @@ def _print_counter_examples(label, counter):
         print(f"      {label}: {row}")
 
 
-def validate_query_for_clients(query, client_inputs, output_dir="data/output"):
+def validate_query_for_clients(query, client_inputs, aborted_clients=frozenset(),
+                               output_dir="data/output"):
     print("=" * 60)
     print(f"{query.upper()} FLOW VALIDATION")
     print("=" * 60)
     all_ok = True
     for client_input in client_inputs:
         print(f"\n  Client {client_input.client_id}: {_input_label(client_input)}")
+        if client_input.client_id in aborted_clients:
+            print(ref.yellow(
+                "    ↯ disconnected mid-query by the monkey — ABORT expected, "
+                "results intentionally not produced; skipping validation"
+            ))
+            continue
         try:
             expected = ref.expected_counter(
                 query,
@@ -430,10 +437,10 @@ def validate_query_for_clients(query, client_inputs, output_dir="data/output"):
     return all_ok
 
 
-def validate_all(client_inputs):
+def validate_all(client_inputs, aborted_clients=frozenset()):
     results = {}
     for q in QUERIES:
-        results[q] = validate_query_for_clients(q, client_inputs)
+        results[q] = validate_query_for_clients(q, client_inputs, aborted_clients)
     return results
 
 
@@ -448,6 +455,38 @@ _MONKEY_FAIL_RE = re.compile(r"monitor_recovery_failed \| node_id=(\S+)")
 _ELECT_FAIL_RE = re.compile(r"monitor_node_failed \|.*node_id=(monitor_\d+).*is_leader=(\w+)")
 _ELECT_START_RE = re.compile(r"monitor_election_started \| monitor_id=(\d+) \| epoch=(\d+)")
 _ELECT_WON_RE = re.compile(r"monitor_election_won \| monitor_id=(\d+) \| epoch=(\d+)")
+# Client disconnect / abort propagation.
+_CLIENT_KILL_RE = re.compile(
+    r"kill_container \| target: \S*client_(\d+)\S* \| role: client \| status: success")
+_GATEWAY_ABORT_RE = re.compile(r"gateway_abort_sent \| client_id=(\d+)")
+# Any worker stage flushing per-client state on abort: "<stage>_abort | ... client_id=N".
+# The trailing " |" keeps the "*_abort_error" diagnostics out (they read
+# "<stage>_abort_error |", which has no "<stage>_abort |" substring).
+_STAGE_ABORT_RE = re.compile(r"(\w+_abort) \|.*?client_id=(\d+)")
+# Workers on the worker_runner path (generic filter, q4_sum) log a uniform
+# receipt line instead of a "<stage>_abort" line: derive the stage from node.
+_RUNNER_ABORT_RE = re.compile(
+    r"worker_runner_abort_received \| node=(\S+) \| client_id=(\d+)")
+# Pipeline order used to present the per-stage flush timeline.
+_ABORT_STAGE_ORDER = [
+    "file_ingestor_abort",
+    "file_splitter_abort",
+    "filter_usd_abort",
+    "filter_q1_abort",
+    "filter_date_abort",
+    "filter_q5_format_abort",
+    "filter_q5_usd_abort",
+    "sum_abort",
+    "aggregation_abort",
+    "joiner_abort",
+    "q2_bank_name_joiner_abort",
+    "q3_barrier_abort",
+    "q4_filter_abort",
+    "q4_joiner_abort",
+    "q4_sum_abort",
+    "q4_aggregator_abort",
+    "q4_deduper_abort",
+]
 
 
 def _monkey_dt(line):
@@ -597,15 +636,102 @@ def print_monkey_summary(log_path):
     print(BAR)
 
 
+def aborted_clients_from_log(log_path):
+    """Return the set of client_ids the monkey disconnected mid-query."""
+    aborted = set()
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                m = _CLIENT_KILL_RE.search(line)
+                if m:
+                    aborted.add(int(m.group(1)))
+    except OSError:
+        pass
+    return aborted
+
+
+def print_abort_summary(log_path, aborted_clients):
+    """For each monkey-disconnected client, show that the gateway broadcast the
+    ABORT and that each pipeline stage flushed that client's per-client state."""
+    if not aborted_clients:
+        return
+
+    gateway_abort = {}          # client_id -> hms
+    stage_hits = {}             # client_id -> {stage_event -> (dt, hms)}
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                dt, hms = _monkey_dt(line)
+                m = _GATEWAY_ABORT_RE.search(line)
+                if m:
+                    cid = int(m.group(1))
+                    gateway_abort.setdefault(cid, hms)
+                    continue
+                m = _STAGE_ABORT_RE.search(line)
+                if m:
+                    cid = int(m.group(2))
+                    seen = stage_hits.setdefault(cid, {})
+                    seen.setdefault(m.group(1), (dt, hms))
+                    continue
+                m = _RUNNER_ABORT_RE.search(line)
+                if m:
+                    cid = int(m.group(2))
+                    stage = re.sub(r"_\d+$", "", m.group(1)) + "_abort"
+                    seen = stage_hits.setdefault(cid, {})
+                    seen.setdefault(stage, (dt, hms))
+    except OSError:
+        return
+
+    print()
+    print(BAR)
+    print("Client Disconnect / ABORT Cleanup")
+    print(BAR)
+    overall_ok = True
+    for cid in sorted(aborted_clients):
+        print(f"Client {cid}: disconnected mid-query by the monkey")
+        gw = gateway_abort.get(cid)
+        if gw:
+            print(ref.green(f"  {gw}  gateway broadcast ABORT to file_ingestor partitions"))
+        else:
+            print(ref.red(
+                "  —        gateway did NOT broadcast ABORT "
+                "(client likely finished uploading before being killed)"))
+            overall_ok = False
+
+        seen = stage_hits.get(cid, {})
+        ordered = [s for s in _ABORT_STAGE_ORDER if s in seen]
+        extra = sorted(s for s in seen if s not in _ABORT_STAGE_ORDER)
+        flushed = ordered + extra
+        if flushed:
+            print(f"  Stages that flushed client {cid} state: {len(flushed)}")
+            for stage in flushed:
+                _dt, hms = seen[stage]
+                print(ref.green(f"    {hms}  {stage}"))
+        else:
+            print(ref.red(f"  No worker stage logged an abort flush for client {cid}"))
+            overall_ok = False
+        print()
+
+    print(ref.green("Result: client-disconnect cleanup propagated ✓") if overall_ok
+          else ref.red("Result: client-disconnect cleanup INCOMPLETE ✗"))
+    print(BAR)
+    return overall_ok
+
+
 # --------------------------------------------------------------------------- #
 # summary footer
 # --------------------------------------------------------------------------- #
-def print_summary(results, timings, sampler, wall, timed_out, num_clients, inputs_label):
+def print_summary(results, timings, sampler, wall, timed_out, num_clients,
+                  inputs_label, aborted_clients=frozenset()):
     print()
     print(BAR)
     print("FULL PIPELINE TEST SUMMARY")
     print(BAR)
     print(f"Inputs: {inputs_label}   Clients: {num_clients}")
+    if aborted_clients:
+        print(ref.yellow(
+            "Disconnected mid-query (monkey, abort expected, excluded from "
+            f"result validation): {', '.join(f'client_{c}' for c in sorted(aborted_clients))}"))
     print()
     print(f"{'Query':<8}{'Result':<10}{'Pipeline time':<16}")
     for q in QUERIES:
@@ -677,6 +803,40 @@ def prune_log_archive():
             old.unlink(missing_ok=True)
 
 
+def point_latest_at(log_path):
+    """Maintain data/logs/latest.log -> this run, so the last run's full log is
+    always at a stable path regardless of its timestamped name."""
+    latest = LOG_ARCHIVE_DIR / "latest.log"
+    try:
+        if latest.exists() or latest.is_symlink():
+            latest.unlink()
+        latest.symlink_to(Path(log_path).name)
+    except OSError:
+        pass
+
+
+_log_finalized = False
+
+
+def finalize_log_archive(log_path):
+    """Prune, refresh the latest.log pointer, and print where the full log is.
+    Safe to call more than once (e.g. on normal exit and on interrupt)."""
+    global _log_finalized
+    if _log_finalized:
+        return
+    _log_finalized = True
+    prune_log_archive()
+    point_latest_at(log_path)
+    try:
+        size_mb = os.path.getsize(log_path) / (1024 * 1024)
+        print()
+        print(ref.green(f"Full run log saved: {log_path} ({size_mb:.1f} MiB)"))
+        print(f"   Stable pointer: {LOG_ARCHIVE_DIR / 'latest.log'}")
+        print(f"   Keeping last {LOG_KEEP} run(s) under {LOG_MAX_MB} MiB in {LOG_ARCHIVE_DIR}")
+    except OSError:
+        pass
+
+
 # --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
@@ -692,7 +852,8 @@ def main():
     prune_log_archive()  # drop older runs before this one starts
     log_path = str(LOG_ARCHIVE_DIR / f"test-{datetime.now():%Y%m%d-%H%M%S}.log")
     open(log_path, "w").close()
-    print(f"test_log_file={log_path}")
+    point_latest_at(log_path)  # discoverable from the first line, even if interrupted
+    print(f"test_log_file={log_path}  (also at {LOG_ARCHIVE_DIR / 'latest.log'})")
 
     cleanup_all()
     if not ensure_reference(client_inputs):
@@ -702,6 +863,7 @@ def main():
     sampler = MetricsSampler(TEST_PROJECT, METRICS_INTERVAL)
     watcher = None
     timed_out = False
+    interrupted = False
     start = time.monotonic()
 
     try:
@@ -737,6 +899,10 @@ def main():
         except subprocess.TimeoutExpired:
             timed_out = True
             print("WARNING: timed out waiting for clients", file=sys.stderr)
+        except KeyboardInterrupt:
+            interrupted = True
+            print("\nInterrupted — stopping the run early; the captured log is "
+                  "preserved.", file=sys.stderr)
 
         # give the gateway/clients a moment to flush final logs + output files
         time.sleep(3)
@@ -752,12 +918,26 @@ def main():
 
     wall = time.monotonic() - start
     print()
-    results = validate_all(client_inputs)
+    aborted_clients = aborted_clients_from_log(log_path)
+    if interrupted:
+        print_monkey_summary(log_path)
+        print_abort_summary(log_path, aborted_clients)
+        if not KEEP_CONTAINERS:
+            teardown()
+        finalize_log_archive(log_path)
+        return 130
+
+    results = validate_all(client_inputs, aborted_clients)
     print_election_summary(log_path)
     print_monkey_summary(log_path)
+    abort_ok = print_abort_summary(log_path, aborted_clients)
     overall = print_summary(
         results, (watcher.done_at if watcher else {}), sampler, wall,
-        timed_out, num_clients, inputs_label)
+        timed_out, num_clients, inputs_label, aborted_clients)
+    # When the monkey disconnected a client, the run only passes if cleanup
+    # actually propagated. abort_ok is None when no client was disconnected.
+    if abort_ok is False:
+        overall = False
 
     if KEEP_CONTAINERS:
         print(f"KEEP_CONTAINERS set — leaving stack up. Tear down with:\n"
@@ -765,13 +945,7 @@ def main():
     else:
         teardown()
 
-    prune_log_archive()
-    try:
-        size_mb = os.path.getsize(log_path) / (1024 * 1024)
-        print(f"Full run log saved: {log_path} ({size_mb:.1f} MiB) | "
-              f"keeping last {LOG_KEEP} run(s) under {LOG_MAX_MB} MiB in {LOG_ARCHIVE_DIR}")
-    except OSError:
-        pass
+    finalize_log_archive(log_path)
     return 0 if overall else 1
 
 

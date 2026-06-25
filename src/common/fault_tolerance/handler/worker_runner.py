@@ -94,6 +94,12 @@ class WorkerRunner:
     def _handle_abort(
         self, client_id: int, sender_id: int, seq: int, ack: Callable, nack: Callable
     ) -> None:
+        logging.info(
+            "worker_runner_abort_received | node=%s | client_id=%s | "
+            "message=client disconnect signal received; flushing per-client state",
+            self._handler.node_id,
+            client_id,
+        )
         if self._abort_fn is None:
             logging.warning("worker_runner_abort_unhandled | client_id=%s", client_id)
             nack(requeue=False)
