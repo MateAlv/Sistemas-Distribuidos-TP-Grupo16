@@ -247,8 +247,6 @@ class FileSplitter:
         )
 
     def _dispatch_client_eof(self, client_id: int, ack) -> None:
-        # Dead path now (the gateway emits per-file FileEof); kept so an aggregate
-        # client EOF still finishes open files.
         change = FileSplitterState.client_eof_change(client_id)
         self._run(
             f"c:{client_id}",

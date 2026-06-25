@@ -31,7 +31,6 @@ except ImportError:
 
 # Id correspondiente a la entidad
 ID = int(os.environ["ID"])
-# Host del middleware
 MOM_HOST = os.environ["MOM_HOST"]
 # Corresponde a como esta configurada la entidad, es decir, como filtra las transacciones
 # Configuraciones posibles:
@@ -42,9 +41,6 @@ MOM_HOST = os.environ["MOM_HOST"]
 CONFIGURATION = os.environ["CONFIGURATION"]
 # Cola de Entrada
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
-# Personal-queue input: cuando está seteado, el filter consume su propia cola
-# (INPUT_QUEUE) ligada a un exchange direct por routing key. Reemplaza a la cola
-# compartida / fanout en las etapas convertidas a colas personales.
 INPUT_EXCHANGE = os.getenv("INPUT_EXCHANGE")
 INPUT_ROUTING_PREFIX = os.getenv("INPUT_ROUTING_PREFIX")
 # Colas de Salida Posibles
@@ -62,10 +58,6 @@ Q4_FILTER_INPUT_ROUTING_PREFIX = os.getenv(
 Q4_FILTER_AMOUNT = int(os.getenv("Q4_FILTER_AMOUNT", "1"))
 Q4_FILTER_OUTPUT = "q4_filter"
 Q3_CANDIDATES_QUEUE = os.getenv("Q3_CANDIDATES_QUEUE", FILTER_Q3_QUEUE)
-# Sharding opcional de candidatos Q3 por client_id. Si Q3_CANDIDATES_EXCHANGE
-# y Q3_BARRIER_AMOUNT > 1 están seteados, el filter publica a un exchange con
-# routing key "{Q3_CANDIDATES_ROUTING_PREFIX}_{client_id % Q3_BARRIER_AMOUNT}"
-# para distribuir candidatos entre N q3_barrier shards.
 Q3_CANDIDATES_EXCHANGE = os.getenv("Q3_CANDIDATES_EXCHANGE")
 Q3_CANDIDATES_ROUTING_PREFIX = os.getenv(
     "Q3_CANDIDATES_ROUTING_PREFIX", "q3_candidates"
@@ -132,7 +124,6 @@ LEADER_ID = 0
 
 class FilterWorker:
     def __init__(self):
-        # Iniciacion de la cola de entrada
         if INPUT_EXCHANGE:
             self.input_queue = middleware.MessageMiddlewareExchangeRabbitMQ(
                 MOM_HOST,

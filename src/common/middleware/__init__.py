@@ -6,7 +6,6 @@ from .middleware_rabbitmq import (
     MessageMiddlewareRpcServerRabbitMQ,
 )
 from .sharded_publisher import (
-    SequencedShardedPublisher,
     ShardedByClientPublisher,
     ShardedPublisher,
     addressed_body_digest_key,

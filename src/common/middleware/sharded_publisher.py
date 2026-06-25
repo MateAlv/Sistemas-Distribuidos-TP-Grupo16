@@ -102,56 +102,6 @@ class ShardedPublisher:
             pass
 
 
-class SequencedShardedPublisher:
-    """Publishes addressed packets (sender_id + seq) over a sharded edge, with a
-    dense seq per (client_id, destination shard) so the consumer's dedup tracker
-    stays bounded.
-
-    Unused in production: the durable handler's SenderSequencer does this now.
-    """
-
-    def __init__(
-        self,
-        mom_host: str,
-        exchange_name: str,
-        routing_key_prefix: str,
-        shard_count: int,
-        sender_id: int,
-    ) -> None:
-        if shard_count < 1:
-            raise ValueError("shard_count must be >= 1")
-        self._shard_count = shard_count
-        self._routing_key_prefix = routing_key_prefix
-        self._sender_id = sender_id
-        self._next_seq: dict[tuple[int, int], int] = {}
-        self._publisher = MessageMiddlewareExchangeRabbitMQ(
-            mom_host,
-            exchange_name,
-            [],
-        )
-
-    def send(self, msg_type: int, client_id: int, payload: bytes) -> None:
-        shard = shard_for_key(payload, self._shard_count)
-        seq_key = (client_id, shard)
-        seq = self._next_seq.get(seq_key, 0)
-        self._next_seq[seq_key] = seq + 1
-        message = InternalProtocol.create_addressed_packet(
-            msg_type,
-            client_id.to_bytes(16, byteorder="big"),
-            self._sender_id,
-            seq,
-            payload,
-        )
-        routing_key = routing_key_for_shard(self._routing_key_prefix, shard)
-        self._publisher.send(message, routing_key=routing_key)
-
-    def close(self) -> None:
-        try:
-            self._publisher.close()
-        except Exception:
-            pass
-
-
 class ShardedByClientPublisher(ShardedPublisher):
     """Routes by client_id."""
 

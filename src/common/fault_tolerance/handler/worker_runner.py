@@ -29,6 +29,7 @@ from common.message_protocol.internal.protocol import InternalProtocol
 # state change and the logical (destination, body) outputs. The destination is a
 # logical name resolved against the publisher registry.
 ProcessPayload = Callable[[int, bytes], "tuple[dict, list[tuple[str, bytes]]]"]
+
 # Abort business logic: given the aborted client_id, return the state change and
 # the downstream ABORT outputs to propagate. Return (change, []) for terminal
 # workers that have no downstream to notify.
